@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Any, Generic, TypeVar
 from uuid import UUID
@@ -62,6 +62,112 @@ class AdminOverview(BaseModel):
     stats: AdminStats
     mode: AdminMode
     table: Page[UserRow] | Page[ProjectRow]
+
+
+class AdminDecision(str, Enum):
+    """What an operator can decide. There is deliberately no way back to
+    PENDING — a decision is a recorded event, not a toggle."""
+
+    approved = "APPROVED"
+    rejected = "REJECTED"
+
+
+class AdminDecisionRequest(BaseModel):
+    decision: AdminDecision
+    note: str | None = None
+
+
+class AdminKybVerificationOut(BaseModel):
+    """The verification ENGINE's half of the two-approval gate.
+
+    `status` is the provider's own verdict. MANUAL_REVIEW is the one an
+    operator can act on: borderline OCR confidence or a minor registry
+    mismatch parks here instead of hard-rejecting.
+    """
+
+    id: UUID
+    status: str
+    is_approved: bool
+    rejection_reason: str | None
+    business_name: str | None
+    tax_code: str | None
+    updated_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class AdminApplicationDocument(BaseModel):
+    """One file the SME uploaded on the loan-application wizard.
+
+    Metadata only — there is no download endpoint yet, so an operator can see
+    WHAT was supplied (and that it actually landed in storage) without the
+    panel pretending to offer the file itself.
+
+    `status` is PENDING while only a presign has been issued and UPLOADED once
+    the object was HEAD-checked in R2; a stuck PENDING is a real signal that
+    the upload never completed.
+    """
+
+    id: UUID
+    document_type: str
+    original_filename: str
+    content_type: str | None
+    file_size_bytes: int | None
+    status: str
+    uploaded_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class AdminLoanApplicationRow(BaseModel):
+    """One funding request a company has made, as the admin preview shows it.
+
+    `requested_amount` is an int for the same reason LoanApplicationOut makes it
+    one: the column is Numeric(20, 0) VND, and a float would start losing whole
+    dong somewhere above 2^53.
+    """
+
+    id: UUID
+    requested_amount: int
+    purpose: str | None
+    repayment_preference: str | None
+    status: str
+    # The operator half of the gate: PENDING until someone decides.
+    admin_approval: str
+    submitted_at: datetime | None
+    decided_at: datetime | None
+    decision_note: str | None
+    created_at: datetime | None
+    # The wizard's uploads (legal charter, business registration, e-invoice
+    # data, CIC report). Empty when the SME has not reached those steps.
+    documents: list[AdminApplicationDocument]
+
+    model_config = {"from_attributes": True}
+
+
+class AdminProjectDetail(BaseModel):
+    """BFF payload for the admin's project preview, in the same spirit as
+    AdminOverview: the whole panel in one response rather than the client
+    stitching a project row together with a separate applications call.
+
+    `address` is the JSONB the SME filled in on the project application, passed
+    through as-is — it has no server-side schema, so shaping it here would only
+    invent one.
+    """
+
+    id: UUID
+    legal_name: str
+    tax_id: str | None
+    industry: str | None
+    status: str
+    address: dict[str, Any] | None
+    incorporation_date: date | None
+    created_at: datetime | None
+    applications: list[AdminLoanApplicationRow]
+    # The owner's latest KYB attempt, or null if they never started one. The
+    # preview shows both halves of the gate side by side, so the operator can
+    # see WHY an application is stuck without leaving the panel.
+    kyb: AdminKybVerificationOut | None
 
 
 class ActorOut(BaseModel):

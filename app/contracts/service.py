@@ -20,6 +20,18 @@ async def create_contract(db: AsyncSession, body: ContractCreate) -> Contract:
         raise HTTPException(status_code=404, detail="Application not found")
     if sr.application_id != app.id:
         raise HTTPException(status_code=400, detail="Score run does not match application")
+    # The operator half of the two-approval gate. A LOCKED score run is the
+    # ENGINE saying the numbers work; this is a human saying the request should
+    # proceed. Both are required, and PENDING is not a yes — an unreviewed
+    # application must not be able to turn itself into a facility.
+    if app.admin_approval != "APPROVED":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Application requires admin approval before a contract can be "
+                f"created (currently {app.admin_approval})"
+            ),
+        )
     terms = dict(sr.recommended_terms or {})
     if body.template_version:
         terms["template_version"] = body.template_version

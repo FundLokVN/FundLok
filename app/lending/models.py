@@ -90,6 +90,18 @@ class LoanApplication(Base):
     decided_at = Column(DateTime(timezone=True))
     decision_note = Column(Text)
 
+    # The operator half of the two-approval gate (see migration 9f2c4a7d1e30).
+    # The verification engine says the business is who it claims to be; this
+    # says a human agreed the request should proceed. create_contract() refuses
+    # anything that is not APPROVED here, and PENDING is the default so an
+    # unreviewed application can never slip through.
+    # PENDING | APPROVED | REJECTED — enforced by a CHECK constraint in the
+    # migration, like every other check on this schema.
+    admin_approval = Column(Text, nullable=False, server_default="PENDING")
+    admin_approved_by = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
     # --- Lite grading: figures the applicant types instead of uploading ------
     # The VAT and annual-report steps used to demand 48+ files to supply inputs
     # the parser never actually read (grading-input-sources.md §3.1 still marks

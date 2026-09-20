@@ -408,7 +408,27 @@ def run_and_lock_score(client):
 
 @pytest.fixture
 def make_contract(client):
+    """Take an application all the way to a contract.
+
+    A contract needs BOTH approvals (migration 9f2c4a7d1e30): the engine's,
+    via a LOCKED score run, and an operator's. The caller has already produced
+    the score run, so this fixture supplies the operator decision — every
+    downstream suite (market, payments, repayment schedule, ledger) wants a
+    contract that exists, not a rehearsal of the approval gate. The gate
+    itself is asserted directly in tests/admin/test_admin_approval.py.
+    """
+
     async def _make(admin: dict, application_id: str, score_run_id: str):
+        decision = await client.post(
+            f"/admin/applications/{application_id}/decision",
+            json={"decision": "APPROVED"},
+            headers=auth_headers(admin),
+        )
+        # 409 = already decided by the test itself, which is fine; anything
+        # else means the approval step is broken and the contract assertion
+        # below would report a confusing 409 instead.
+        assert decision.status_code in (200, 409), decision.text
+
         resp = await client.post(
             "/contracts/",
             json={"application_id": application_id, "score_run_id": score_run_id},
