@@ -139,6 +139,15 @@ class AdminApplicationDocument(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AdminDocumentUrlResponse(BaseModel):
+    """A short-lived read URL for one uploaded application document."""
+
+    url: str
+    expires_in: int
+    content_type: str | None
+    original_filename: str
+
+
 class AdminLoanApplicationRow(BaseModel):
     """One funding request a company has made, as the admin preview shows it.
 

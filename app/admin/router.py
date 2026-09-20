@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.admin import service
 from app.admin.schemas import (
     AdminDecisionRequest,
+    AdminDocumentUrlResponse,
     AdminKybVerificationOut,
     AdminLoanApplicationRow,
     AdminMode,
@@ -107,6 +108,16 @@ async def decide_application(
         actor=current_user,
         ip_address=request.client.host if request.client else None,
     )
+
+
+@router.get("/documents/{document_id}/url", response_model=AdminDocumentUrlResponse)
+async def get_document_url(
+    document_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A 10-minute read URL for an uploaded application document. Admin-only."""
+    return await service.get_document_url(db, document_id)
 
 
 @router.patch("/users/{user_id}/status", response_model=AdminUserDetail)

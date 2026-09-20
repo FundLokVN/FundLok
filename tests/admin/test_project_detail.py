@@ -186,3 +186,119 @@ async def test_an_application_with_no_uploads_has_an_empty_document_list(
     )
 
     assert resp.json()["applications"][0]["documents"] == []
+
+
+# --------------------------------------------------------------------------- #
+# GET /admin/documents/{id}/url
+# --------------------------------------------------------------------------- #
+
+
+async def test_document_url_is_short_lived(
+    client, make_admin, make_user, make_project, make_loan_application, db_session,
+    monkeypatch,
+):
+    from app.lending.models import LoanApplicationDocument
+
+    sme = await make_user(role="SME")
+    project = await make_project(sme)
+    application = await make_loan_application(
+        sme, project["id"], requested_amount="500000000"
+    )
+    doc = LoanApplicationDocument(
+        loan_application_id=uuid.UUID(application["id"]),
+        document_type="cic_report",
+        file_key=f"application_documents/{sme['id']}/{application['id']}/cic_report.pdf",
+        original_filename="cic.pdf",
+        content_type="application/pdf",
+        file_size_bytes=1024,
+        status="UPLOADED",
+    )
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+
+    monkeypatch.setattr("app.utils.r2.is_configured", lambda: True)
+    monkeypatch.setattr(
+        "app.utils.r2.presign_get",
+        lambda key, **kw: f"https://r2.example/{key}?ttl={kw.get('expires_in')}",
+    )
+    admin = await make_admin()
+
+    resp = await client.get(
+        f"/admin/documents/{doc.id}/url", headers=admin["headers"]
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["expires_in"] == 600
+    assert data["original_filename"] == "cic.pdf"
+    assert "ttl=600" in data["url"]
+
+
+async def test_document_url_refuses_an_unconfirmed_upload(
+    client, make_admin, make_user, make_project, make_loan_application, db_session,
+):
+    """A presign for an object that was never confirmed would 404 at the
+    storage layer; say so here instead of handing over a dead link."""
+    from app.lending.models import LoanApplicationDocument
+
+    sme = await make_user(role="SME")
+    project = await make_project(sme)
+    application = await make_loan_application(
+        sme, project["id"], requested_amount="500000000"
+    )
+    doc = LoanApplicationDocument(
+        loan_application_id=uuid.UUID(application["id"]),
+        document_type="cic_report",
+        file_key="application_documents/never/confirmed.pdf",
+        original_filename="cic.pdf",
+        content_type="application/pdf",
+        status="PENDING",
+    )
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+    admin = await make_admin()
+
+    resp = await client.get(
+        f"/admin/documents/{doc.id}/url", headers=admin["headers"]
+    )
+
+    assert resp.status_code == 409, resp.text
+
+
+async def test_document_url_is_404_for_an_unknown_document(client, make_admin):
+    admin = await make_admin()
+    resp = await client.get(
+        f"/admin/documents/{uuid.uuid4()}/url", headers=admin["headers"]
+    )
+    assert resp.status_code == 404
+
+
+async def test_document_url_rejects_a_non_admin(
+    client, make_user, make_project, make_loan_application, db_session
+):
+    from app.lending.models import LoanApplicationDocument
+
+    sme = await make_user(role="SME")
+    project = await make_project(sme)
+    application = await make_loan_application(
+        sme, project["id"], requested_amount="500000000"
+    )
+    doc = LoanApplicationDocument(
+        loan_application_id=uuid.UUID(application["id"]),
+        document_type="cic_report",
+        file_key="application_documents/x/y.pdf",
+        original_filename="cic.pdf",
+        status="UPLOADED",
+    )
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+
+    # Even the SME who uploaded it — this is the admin console's route.
+    resp = await client.get(
+        f"/admin/documents/{doc.id}/url", headers=sme["headers"]
+    )
+
+    assert resp.status_code == 403, resp.text
