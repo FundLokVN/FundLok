@@ -134,6 +134,40 @@ async def test_approval_alone_does_not_tell_the_applicant_they_are_approved(
     assert row.status == before
 
 
+async def test_the_applicant_can_read_the_reason_for_a_rejection(
+    client, make_admin, make_submitted_application
+):
+    """The operator's note is applicant-facing on a decided application.
+
+    An outcome with no explanation is the thing an applicant phones about, so
+    GET /projects carries the reason back to them. `admin_approval` stays
+    internal — `status` is what they are entitled to see about the outcome.
+    """
+    sme, project, application = await make_submitted_application()
+    admin = await make_admin()
+
+    resp = await client.post(
+        f"/admin/applications/{application['id']}/decision",
+        json={
+            "decision": "REJECTED",
+            "note": "The declarations do not match the figures on the form.",
+        },
+        headers=admin["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+
+    mine = await client.get("/projects", headers=sme["headers"])
+    assert mine.status_code == 200, mine.text
+    row = next(p for p in mine.json() if p["id"] == project["id"])
+    app_out = row["loan_application"]
+    assert app_out["status"] == "REJECTED"
+    assert app_out["decision_note"] == (
+        "The declarations do not match the figures on the form."
+    )
+    assert app_out["decided_at"] is not None
+    assert "admin_approval" not in app_out
+
+
 async def test_a_decision_cannot_be_changed(
     client, make_admin, make_submitted_application
 ):
