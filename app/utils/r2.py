@@ -66,15 +66,26 @@ def presign_put(file_key: str, content_type: str) -> str:
     )
 
 
-def presign_get(file_key: str) -> str:
-    """Presigned GET URL for reading a private object (e.g. rendering an avatar)."""
+def presign_get(
+    file_key: str,
+    *,
+    bucket: str | None = None,
+    expires_in: int | None = None,
+) -> str:
+    """Presigned GET URL for reading a private object (e.g. rendering an avatar).
+
+    `bucket` mirrors put_bytes: verification documents live in
+    R2_VERIFICATION_BUCKET, not the default one. `expires_in` lets a caller
+    choose a tighter window than the global default — a link to someone's
+    business registration certificate should not live as long as an avatar.
+    """
     return _client().generate_presigned_url(
         "get_object",
         Params={
-            "Bucket": settings.R2_BUCKET,
+            "Bucket": bucket or settings.R2_BUCKET,
             "Key": file_key,
         },
-        ExpiresIn=settings.R2_PRESIGN_EXPIRE_SECONDS,
+        ExpiresIn=expires_in or settings.R2_PRESIGN_EXPIRE_SECONDS,
     )
 
 
@@ -83,10 +94,10 @@ def delete_object(file_key: str) -> None:
     _client().delete_object(Bucket=settings.R2_BUCKET, Key=file_key)
 
 
-def head_object(file_key: str) -> dict | None:
+def head_object(file_key: str, *, bucket: str | None = None) -> dict | None:
     """Object metadata ({size, content_type}) or None if the key does not exist."""
     try:
-        resp = _client().head_object(Bucket=settings.R2_BUCKET, Key=file_key)
+        resp = _client().head_object(Bucket=bucket or settings.R2_BUCKET, Key=file_key)
     except ClientError as exc:
         if exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404:
             return None

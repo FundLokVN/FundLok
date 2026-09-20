@@ -19,12 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.gverify import kyb_service, service
+from app.gverify import storage
 from app.gverify.client import GVerifyError
 from app.gverify.schemas import (
     HandoffResponse,
     KybRepresentative,
     KybStatusResponse,
     KybVerifyRequest,
+    KybCertificateResponse,
     KybVerifyResponse,
     KycStatusResponse,
     KycVerifyRequest,
@@ -248,6 +250,39 @@ async def kyb_verify(
             for rep in (attempt.representatives or [])
         ],
         created_at=attempt.created_at,
+    )
+
+
+@kyb_router.get("/certificate", response_model=KybCertificateResponse)
+async def kyb_certificate(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_sme_authorized),
+):
+    """A 10-minute read URL for the caller's OWN business registration
+    certificate, as submitted for KYB.
+
+    Scoped to the caller by construction: the attempt is looked up by
+    current_user.id, never by an id from the request, so there is no key to
+    tamper with. The object stays private — a presigned URL is the only way to
+    reach it, and it expires.
+    """
+    attempt = await kyb_service.latest_for_user(db, current_user.id)
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="No KYB verification found")
+
+    located = storage.find_kyb_certificate(attempt.id)
+    if located is None:
+        # Retention is best-effort, so an attempt can legitimately have no
+        # stored file. 404 lets the client fall back to asking for an upload
+        # instead of rendering a broken preview.
+        raise HTTPException(status_code=404, detail="No stored certificate for this verification")
+
+    key, content_type = located
+    return KybCertificateResponse(
+        url=storage.presign_kyb_certificate(key),
+        expires_in=storage.CERTIFICATE_URL_TTL_SECONDS,
+        content_type=content_type,
+        verification_id=attempt.id,
     )
 
 
