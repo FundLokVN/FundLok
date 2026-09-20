@@ -20,6 +20,7 @@ from app.admin.schemas import (
     AdminMode,
     AdminOverview,
     AdminProjectDetail,
+    AdminScoreRunOut,
     AdminStats,
     AdminUserDetail,
     AuditLogOut,
@@ -34,6 +35,7 @@ from app.lending.models import (
     LoanApplicationDocument,
     Project,
     ProjectOwnership,
+    ScoreRun,
 )
 from app.users.models import Role, User
 from app.utils import r2
@@ -168,6 +170,41 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
         )
     ).scalars().all()
 
+    # Newest score run per application, in one query rather than N.
+    # A company with several funding requests would otherwise cost a round
+    # trip each, and the panel renders them all at once.
+    latest_runs: dict[UUID, ScoreRun] = {}
+    if rows:
+        run_rows = (
+            await db.execute(
+                select(ScoreRun)
+                .where(ScoreRun.application_id.in_([r.id for r in rows]))
+                .order_by(ScoreRun.created_at.desc())
+            )
+        ).scalars().all()
+        for run in run_rows:
+            latest_runs.setdefault(run.application_id, run)
+
+    def _row(application) -> AdminLoanApplicationRow:
+        out = AdminLoanApplicationRow.model_validate(application)
+        run = latest_runs.get(application.id)
+        if run is not None:
+            out = out.model_copy(
+                update={
+                    "score_run": AdminScoreRunOut(
+                        id=run.id,
+                        status=run.status,
+                        decision=run.decision,
+                        final_grade=run.final_grade_precise,
+                        interest_rate_pct=run.interest_rate_pct,
+                        engine_version=run.engine_version,
+                        params_version=run.params_version,
+                        created_at=run.created_at,
+                    )
+                }
+            )
+        return out
+
     return AdminProjectDetail(
         id=project.id,
         legal_name=project.legal_name,
@@ -177,7 +214,7 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
         address=project.address,
         incorporation_date=project.incorporation_date,
         created_at=project.created_at,
-        applications=[AdminLoanApplicationRow.model_validate(row) for row in rows],
+        applications=[_row(row) for row in rows],
         kyb=await _latest_kyb_for_project(db, project_id),
     )
 

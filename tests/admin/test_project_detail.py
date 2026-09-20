@@ -302,3 +302,54 @@ async def test_document_url_rejects_a_non_admin(
     )
 
     assert resp.status_code == 403, resp.text
+
+
+# --------------------------------------------------------------------------- #
+# The engine's answer, shown before the operator gives theirs
+# --------------------------------------------------------------------------- #
+
+
+async def test_preview_carries_the_latest_score_run(
+    client, make_admin, make_user, make_project, make_loan_application,
+    submit_loan_application, run_and_lock_score,
+):
+    """An operator approving a funding request needs the engine's verdict in
+    front of them. Read from score_runs — no new columns."""
+    sme = await make_user(role="SME")
+    project = await make_project(sme)
+    application = await make_loan_application(
+        sme, project["id"], requested_amount="500000000"
+    )
+    await submit_loan_application(sme, application["id"])
+    admin = await make_admin()
+    await run_and_lock_score(admin, application["id"])
+
+    resp = await client.get(
+        f"/admin/projects/{project['id']}", headers=admin["headers"]
+    )
+
+    assert resp.status_code == 200, resp.text
+    run = resp.json()["applications"][0]["score_run"]
+    assert run is not None
+    # Both are needed: a LOCKED run that decided REVIEW is not an approval.
+    assert run["status"] == "LOCKED"
+    assert "decision" in run
+    # Provenance, so a quote can be traced to the engine that produced it.
+    assert run["engine_version"]
+    assert run["params_version"]
+
+
+async def test_score_run_is_null_before_the_engine_has_run(
+    client, make_admin, make_user, make_project, make_loan_application
+):
+    """Null, not an invented zero — no run means no opinion."""
+    sme = await make_user(role="SME")
+    project = await make_project(sme)
+    await make_loan_application(sme, project["id"], requested_amount="500000000")
+    admin = await make_admin()
+
+    resp = await client.get(
+        f"/admin/projects/{project['id']}", headers=admin["headers"]
+    )
+
+    assert resp.json()["applications"][0]["score_run"] is None

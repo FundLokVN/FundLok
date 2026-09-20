@@ -148,6 +148,31 @@ class AdminDocumentUrlResponse(BaseModel):
     original_filename: str
 
 
+class AdminScoreRunOut(BaseModel):
+    """What the grading engine produced for one application.
+
+    Read from `score_runs`, which already records the whole result — no new
+    columns. `final_grade_precise` is the real value; `overall_score` is a
+    legacy 2dp display column (D24) and is deliberately not surfaced.
+
+    `decision` is the grading OUTCOME (APPROVED | REVIEW | REJECT |
+    INSUFFICIENT_DATA | AI_PENDING), distinct from `status`, which is the run's
+    own lifecycle (RUNNING | READY | LOCKED | FAILED). An operator needs both:
+    a LOCKED run that decided REVIEW is not an approval.
+    """
+
+    id: UUID
+    status: str
+    decision: str | None
+    final_grade: float | None
+    interest_rate_pct: float | None
+    engine_version: str | None
+    params_version: str | None
+    created_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
 class AdminLoanApplicationRow(BaseModel):
     """One funding request a company has made, as the admin preview shows it.
 
@@ -170,6 +195,9 @@ class AdminLoanApplicationRow(BaseModel):
     # The wizard's uploads (legal charter, business registration, e-invoice
     # data, CIC report). Empty when the SME has not reached those steps.
     documents: list[AdminApplicationDocument]
+    # The most recent run, so the operator sees the engine's answer before
+    # giving theirs. None until a score run exists.
+    score_run: AdminScoreRunOut | None = None
 
     model_config = {"from_attributes": True}
 
