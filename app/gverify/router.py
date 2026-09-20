@@ -262,5 +262,7 @@ async def kyb_status(
         rejection_reason=attempt.rejection_reason,
         tax_code=attempt.tax_code,
         business_name=attempt.business_name,
+        company_address=attempt.company_address,
+        date_of_establishment=attempt.date_of_establishment,
         updated_at=attempt.updated_at,
     )
