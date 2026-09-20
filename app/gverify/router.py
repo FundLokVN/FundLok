@@ -32,7 +32,7 @@ from app.gverify.schemas import (
 )
 from app.gverify.service import ImageValidationError
 from app.gverify.tokens import HANDOFF_TTL, create_handoff_token, verify_handoff_token
-from app.users.models import Role, User
+from app.users.models import USER_STATUS_SUSPENDED, Role, User
 from app.utils.audit import append_audit
 from app.utils.rbac import require_roles
 
@@ -146,6 +146,12 @@ async def verify_via_handoff(
     user = result.scalar_one_or_none()
     if user is None or user.role != Role.INVESTOR.value:
         raise HTTPException(status_code=401, detail="Invalid or expired handoff token")
+    # This route authenticates by handoff token, so it never passes through
+    # get_current_user and does NOT inherit the suspension check from there.
+    # Without this, a suspended investor's phone could still submit a
+    # verification using a token minted before the suspension.
+    if user.status == USER_STATUS_SUSPENDED:
+        raise HTTPException(status_code=403, detail="This account has been suspended")
 
     return await _run_verification(request, body, db, user)
 

@@ -12,6 +12,8 @@ from app.admin.schemas import (
     AdminMode,
     AdminOverview,
     AdminProjectDetail,
+    AdminUserDetail,
+    AdminUserStatusRequest,
     AuditLogOut,
 )
 from app.core.database import get_db
@@ -101,6 +103,30 @@ async def decide_application(
         db,
         application_id,
         decision=body.decision,
+        note=body.note,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.patch("/users/{user_id}/status", response_model=AdminUserDetail)
+async def set_user_status(
+    user_id: UUID,
+    body: AdminUserStatusRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Change an account's status. Admin-only.
+
+    SUSPENDED genuinely denies: existing sessions stop working and no new one
+    can be minted. Two guards apply — nobody may change their own status, and
+    only a SYSTEM_ADMIN may act on an admin-level account.
+    """
+    return await service.set_user_status(
+        db,
+        user_id,
+        new_status=body.status,
         note=body.note,
         actor=current_user,
         ip_address=request.client.host if request.client else None,

@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -75,6 +75,26 @@ class AdminDecision(str, Enum):
 class AdminDecisionRequest(BaseModel):
     decision: AdminDecision
     note: str | None = None
+
+
+class AdminUserStatusRequest(BaseModel):
+    """Set an account's status. PENDING_KYC is included because an operator
+    may need to put an account back into onboarding, not only suspend it."""
+
+    status: Literal["ACTIVE", "PENDING_KYC", "SUSPENDED"]
+    note: str | None = None
+
+
+class AdminUserDetail(BaseModel):
+    id: UUID
+    email: str
+    full_name: str | None
+    role: str | None
+    status: str
+    email_verified: bool
+    created_at: datetime | None
+
+    model_config = {"from_attributes": True}
 
 
 class AdminKybVerificationOut(BaseModel):

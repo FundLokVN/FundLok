@@ -20,6 +20,7 @@ from app.admin.schemas import (
     AdminOverview,
     AdminProjectDetail,
     AdminStats,
+    AdminUserDetail,
     AuditLogOut,
     Page,
     ProjectRow,
@@ -27,7 +28,7 @@ from app.admin.schemas import (
 )
 from app.gverify.models import STATUS_MANUAL_REVIEW, GVerifyKybVerification
 from app.lending.models import AuditLog, LoanApplication, Project, ProjectOwnership
-from app.users.models import User
+from app.users.models import Role, User
 from app.utils.audit import append_audit
 
 
@@ -295,6 +296,62 @@ async def decide_application(
     await db.commit()
     await db.refresh(row, ["admin_approval", "decided_at", "decision_note"])
     return AdminLoanApplicationRow.model_validate(row)
+
+
+async def set_user_status(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    new_status: str,
+    note: str | None,
+    actor: User,
+    ip_address: str | None = None,
+) -> AdminUserDetail:
+    """Change an account's status.
+
+    SUSPENDED is a real deny: get_current_user rejects the account on every
+    request and login refuses to mint a new session. So the two guards below
+    are not politeness, they are the difference between a reversible action
+    and an unrecoverable one.
+    """
+    target = await db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # 1. No self-suspension. An operator who suspends their own account cannot
+    #    undo it — the endpoint that would restore it is the one they just
+    #    locked themselves out of.
+    if target.id == actor.id:
+        raise HTTPException(
+            status_code=409, detail="You cannot change your own account status"
+        )
+
+    # 2. Only a SYSTEM_ADMIN may act on an admin-level account. Otherwise any
+    #    ADMIN can suspend their peers — and every other ADMIN plus the
+    #    SYSTEM_ADMIN — which is a takeover, not moderation.
+    privileged = (Role.ADMIN.value, Role.SYSTEM_ADMIN.value)
+    if target.role in privileged and actor.role != Role.SYSTEM_ADMIN.value:
+        raise HTTPException(
+            status_code=403,
+            detail="Only a system admin can change an admin account's status",
+        )
+
+    before = {"status": target.status}
+    target.status = new_status
+    db.add(target)
+    append_audit(
+        db,
+        entity_type="USER",
+        entity_id=target.id,
+        action="USER_STATUS_CHANGED",
+        actor_id=actor.id,
+        before_state=before,
+        after_state={"status": new_status, "note": note},
+        ip_address=ip_address,
+    )
+    await db.commit()
+    await db.refresh(target)
+    return AdminUserDetail.model_validate(target)
 
 
 async def list_audit_logs(

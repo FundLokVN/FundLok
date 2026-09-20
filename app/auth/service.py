@@ -18,7 +18,7 @@ from app.auth.schemas import (
     UserCreate,
 )
 from app.lending.models import AuditLog
-from app.users.models import RefreshToken, TotpRecoveryCode, User
+from app.users.models import USER_STATUS_SUSPENDED, RefreshToken, TotpRecoveryCode, User
 from app.utils.password import hash_password, verify_password
 from app.utils.jwt import (
     create_access_token,
@@ -149,6 +149,17 @@ async def refresh_token_pair(
     if stored is None or stored.revoked_at is not None or stored.expires_at < now:
         raise credentials_exception
 
+    # Refresh authenticates by token, not by get_current_user, so it does NOT
+    # inherit the suspension check from there. Without this, a suspended
+    # account keeps minting fresh credentials and its session row stays alive
+    # indefinitely through rotation — the access tokens would be rejected
+    # downstream, but we should stop issuing them at all.
+    owner = (
+        await db.execute(select(User).where(User.id == UUID(str(user_id))))
+    ).scalar_one_or_none()
+    if owner is None or owner.status == USER_STATUS_SUSPENDED:
+        raise credentials_exception
+
     stored.revoked_at = now
     stored.last_used_at = now
     db.add(stored)
@@ -204,6 +215,18 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
+        )
+    # A suspended account cannot start a new session. get_current_user also
+    # rejects one on every request, which ends sessions already in flight;
+    # this stops a new one being minted in the first place, so no refresh
+    # token is issued to an account an operator has shut out.
+    #
+    # Checked AFTER the password, deliberately: answering "suspended" to a
+    # wrong password would confirm the address is registered.
+    if user.status == USER_STATUS_SUSPENDED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has been suspended",
         )
     # Second factor, if the account has one. Nothing is issued here: no access
     # token, no refresh token, no session row — only a short-lived challenge the

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.auth.schemas import TokenData
-from app.users.models import User
+from app.users.models import USER_STATUS_SUSPENDED, User
 
 # HTTPBearer parses Authorization: Bearer <token> reliably for API clients (curl, Postman).
 http_bearer = HTTPBearer(auto_error=False)
