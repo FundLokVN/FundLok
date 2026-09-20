@@ -74,7 +74,7 @@ async def test_admin_can_approve_an_application(
 
 
 async def test_admin_can_reject_an_application(
-    client, make_admin, make_submitted_application
+    client, make_admin, make_submitted_application, db_session
 ):
     _, _, application = await make_submitted_application()
     admin = await make_admin()
@@ -87,6 +87,51 @@ async def test_admin_can_reject_an_application(
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["admin_approval"] == "REJECTED"
+
+    # The applicant-facing status moves with it. `admin_approval` is an
+    # internal gate column and the SME dashboard renders `status`, so a
+    # rejection that only set the gate left the applicant reading
+    # "awaiting review" after the answer had already been given.
+    row = (
+        await db_session.execute(
+            select(LoanApplication).where(LoanApplication.id == uuid.UUID(application["id"]))
+        )
+    ).scalar_one()
+    assert row.status == "REJECTED"
+
+
+async def test_approval_alone_does_not_tell_the_applicant_they_are_approved(
+    client, make_admin, make_submitted_application, db_session
+):
+    """The operator's yes is one half of the gate, not the outcome.
+
+    create_contract() still requires the engine's half, so moving `status` to
+    APPROVED here would promise the applicant something the other half can
+    still refuse. It stays where it was until there is an offer.
+    """
+    _, _, application = await make_submitted_application()
+    admin = await make_admin()
+    before = (
+        await db_session.execute(
+            select(LoanApplication).where(LoanApplication.id == uuid.UUID(application["id"]))
+        )
+    ).scalar_one().status
+
+    resp = await client.post(
+        f"/admin/applications/{application['id']}/decision",
+        json={"decision": "APPROVED", "note": None},
+        headers=admin["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+
+    db_session.expire_all()
+    row = (
+        await db_session.execute(
+            select(LoanApplication).where(LoanApplication.id == uuid.UUID(application["id"]))
+        )
+    ).scalar_one()
+    assert row.admin_approval == "APPROVED"
+    assert row.status == before
 
 
 async def test_a_decision_cannot_be_changed(

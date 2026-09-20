@@ -322,11 +322,24 @@ async def decide_application(
             detail=f"Application has already been {row.admin_approval.lower()}",
         )
 
-    before = {"admin_approval": row.admin_approval}
+    before = {"admin_approval": row.admin_approval, "status": row.status}
     row.admin_approval = decision.value
     row.admin_approved_by = actor.id
     row.decided_at = datetime.now(timezone.utc)
     row.decision_note = note
+
+    # A rejection ends the application, so the applicant-facing `status` has to
+    # move with it. `admin_approval` is an internal gate column -- the SME
+    # dashboard renders `status` -- so a rejection that only set the gate left
+    # the applicant on "Submitted -- awaiting review" forever, waiting for an
+    # answer that had already been given.
+    #
+    # An approval deliberately does NOT move `status`. This is one half of a
+    # two-approval gate: create_contract() still requires the engine's, so
+    # telling the applicant "approved" here would promise an outcome the other
+    # half can still refuse. It stays under review until there is an offer.
+    if decision is AdminDecision.rejected:
+        row.status = "REJECTED"
     db.add(row)
     append_audit(
         db,
@@ -335,11 +348,15 @@ async def decide_application(
         action="APPLICATION_ADMIN_DECIDED",
         actor_id=actor.id,
         before_state=before,
-        after_state={"admin_approval": row.admin_approval, "note": note},
+        after_state={
+            "admin_approval": row.admin_approval,
+            "status": row.status,
+            "note": note,
+        },
         ip_address=ip_address,
     )
     await db.commit()
-    await db.refresh(row, ["admin_approval", "decided_at", "decision_note"])
+    await db.refresh(row, ["admin_approval", "status", "decided_at", "decision_note"])
     return AdminLoanApplicationRow.model_validate(row)
 
 
