@@ -29,6 +29,7 @@ from app.users.router import router as users_router
 from app.verification.router import kyb_router, kyc_router
 from app.gverify.router import kyb_router as gverify_kyb_router, router as gverify_router
 from app.contact.router import router as contact_router
+from app.notifications.router import router as notifications_router
 
 # /docs, /redoc and /openapi.json are development tools. Served publicly they
 # hand any visitor the full route inventory and request/response schemas of the
@@ -136,6 +137,7 @@ app.include_router(banking_router)
 app.include_router(admin_router)
 app.include_router(system_router)
 app.include_router(contact_router)
+app.include_router(notifications_router)
 
 if __name__ == "__main__":
     # Get the port from Cloud Run environment (default to 8080 if not set)

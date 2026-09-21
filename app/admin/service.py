@@ -37,6 +37,11 @@ from app.lending.models import (
     ProjectOwnership,
     ScoreRun,
 )
+from app.notifications.models import (
+    EVENT_APPLICATION_APPROVED,
+    EVENT_APPLICATION_REJECTED,
+)
+from app.notifications.service import create_notification
 from app.users.models import Role, User
 from app.utils import r2
 from app.utils.audit import append_audit
@@ -341,6 +346,43 @@ async def decide_application(
     if decision is AdminDecision.rejected:
         row.status = "REJECTED"
     db.add(row)
+
+    # Tell the applicant. Staged on THIS transaction, not sent from it: if the
+    # decision rolls back the notification goes with it, so nobody is ever told
+    # about a verdict that was not recorded.
+    #
+    # One per owner rather than one per project: co-owners both act on the
+    # company's behalf, and a decision only the first of them heard about is
+    # how a company misses its own answer.
+    owner_ids = (
+        (
+            await db.execute(
+                select(ProjectOwnership.user_id).where(
+                    ProjectOwnership.project_id == row.project_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    event = (
+        EVENT_APPLICATION_REJECTED
+        if decision is AdminDecision.rejected
+        else EVENT_APPLICATION_APPROVED
+    )
+    for owner_id in owner_ids:
+        create_notification(
+            db,
+            user_id=owner_id,
+            event=event,
+            entity_type="LOAN_APPLICATION",
+            entity_id=row.id,
+            # Only what the copy needs to name the request. The operator's
+            # note is deliberately absent: it is already on the application
+            # the notification points at, and a copy here would go stale the
+            # moment anyone edited the original.
+            data={"amount_vnd": int(row.requested_amount)},
+        )
     append_audit(
         db,
         entity_type="LOAN_APPLICATION",
