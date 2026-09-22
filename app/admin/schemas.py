@@ -25,9 +25,16 @@ class Page(BaseModel, Generic[T]):
     total_pages: int
 
 
+# The bucket users with no role yet are counted under. A real key rather than
+# `None`, because JSON object keys cannot be null and `dict[str, int]` rejects
+# one outright.
+UNASSIGNED_ROLE = "UNASSIGNED"
+
+
 class AdminStats(BaseModel):
     total_users: int
     total_projects: int
+    # Keys are Role values plus UNASSIGNED_ROLE — see get_stats().
     users_by_role: dict[str, int]
     users_by_status: dict[str, int]
     projects_by_status: dict[str, int]
@@ -37,7 +44,10 @@ class UserRow(BaseModel):
     id: UUID
     email: str
     full_name: str | None
-    role: str
+    # Nullable since f2b3c4d5e6f7: a user has no role until they pick one at
+    # /select-role. `str` here made every admin list containing such a user
+    # fail validation, which is exactly the state a fresh signup is in.
+    role: str | None
     status: str
     email_verified: bool
     created_at: datetime | None

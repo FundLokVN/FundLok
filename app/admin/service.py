@@ -26,6 +26,7 @@ from app.admin.schemas import (
     AuditLogOut,
     Page,
     ProjectRow,
+    UNASSIGNED_ROLE,
     UserRow,
 )
 from app.gverify.models import STATUS_MANUAL_REVIEW, GVerifyKybVerification
@@ -69,9 +70,18 @@ async def get_stats(db: AsyncSession) -> AdminStats:
     total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
     total_projects = (await db.execute(select(func.count(Project.id)))).scalar() or 0
 
-    users_by_role = dict(
-        (await db.execute(select(User.role, func.count(User.id)).group_by(User.role))).all()
-    )
+    # A user who has registered but not yet picked a role at /select-role has
+    # role NULL (migration f2b3c4d5e6f7), so this group_by returns a None key.
+    # It is bucketed under a real label rather than dropped: "how many people
+    # signed up and never chose a role" is a number an operator wants, and a
+    # None key fails `dict[str, int]` validation outright -- which 500'd the
+    # whole overview endpoint in BOTH modes, since get_stats runs either way.
+    users_by_role = {
+        (role or UNASSIGNED_ROLE): count
+        for role, count in (
+            await db.execute(select(User.role, func.count(User.id)).group_by(User.role))
+        ).all()
+    }
     users_by_status = dict(
         (await db.execute(select(User.status, func.count(User.id)).group_by(User.status))).all()
     )
