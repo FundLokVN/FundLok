@@ -428,6 +428,47 @@ async def test_kyb_status_returns_latest_attempt(client, make_sme, mock_gverify_
     assert data["business_name"] == "CÔNG TY TNHH FUNDLOK TEST"
 
 
+async def test_kyb_status_exposes_address_and_establishment_date(
+    client, make_sme, mock_gverify_kyb
+):
+    """The SME project application prefills its Location and Company age steps
+    from these two, so they must survive the OCR -> row -> status round trip."""
+    sme = await make_sme()
+    mock_gverify_kyb.ocr = _ocr_data(
+        company_address="Thửa đất số 7, Phường Bình Minh, Tỉnh Vĩnh Long, Việt Nam",
+        date_of_establishment="15/03/2019",
+    )
+    await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
+
+    resp = await client.get("/gverify/kyb/status", headers=sme["headers"])
+    assert resp.status_code == 200
+    data = resp.json()
+    # Verbatim: Decode Address is out of scope (spec §2), so the status must not
+    # reformat or split the line the certificate carried.
+    assert (
+        data["company_address"]
+        == "Thửa đất số 7, Phường Bình Minh, Tỉnh Vĩnh Long, Việt Nam"
+    )
+    assert data["date_of_establishment"] == "15/03/2019"
+
+
+async def test_kyb_status_address_fields_null_when_ocr_omits_them(
+    client, make_sme, mock_gverify_kyb
+):
+    """Both are nullable on the model. A certificate the OCR could not read
+    them off must yield null, not a missing key -- the client distinguishes
+    "not available" from "absent field" when deciding whether to prefill."""
+    sme = await make_sme()
+    mock_gverify_kyb.ocr = _ocr_data(company_address=None, date_of_establishment=None)
+    await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
+
+    resp = await client.get("/gverify/kyb/status", headers=sme["headers"])
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "company_address" in data and data["company_address"] is None
+    assert "date_of_establishment" in data and data["date_of_establishment"] is None
+
+
 async def test_kyb_status_not_found_when_never_attempted(client, make_sme):
     sme = await make_sme()
     resp = await client.get("/gverify/kyb/status", headers=sme["headers"])

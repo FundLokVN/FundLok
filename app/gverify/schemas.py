@@ -107,4 +107,10 @@ class KybStatusResponse(BaseModel):
     rejection_reason: str | None = None
     tax_code: str | None = None
     business_name: str | None = None
+    # Verbatim from the certificate OCR (see spec §2: the 63->34 Decode Address
+    # API is out of scope, so this is one free-text line, not structured
+    # parts). Exposed so the SME's project application can prefill the details
+    # already read off the certificate instead of asking them to retype.
+    company_address: str | None = None
+    date_of_establishment: str | None = None
     updated_at: datetime | None = None
