@@ -1,23 +1,50 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased, selectinload
 from sqlalchemy.sql import Select
+
+# Only HTTPException: `status` is already a filter-parameter name all through
+# this module, so importing fastapi.status would shadow it inside every list
+# function. The one status code used below is written out instead.
+from fastapi import HTTPException
 
 from app.admin.schemas import (
     ActorOut,
+    AdminDecision,
+    AdminDocumentUrlResponse,
+    AdminKybVerificationOut,
+    AdminLoanApplicationRow,
     AdminMode,
     AdminOverview,
+    AdminProjectDetail,
+    AdminScoreRunOut,
     AdminStats,
+    AdminUserDetail,
     AuditLogOut,
     Page,
     ProjectRow,
     UserRow,
 )
-from app.lending.models import AuditLog, Project
-from app.users.models import User
+from app.gverify.models import STATUS_MANUAL_REVIEW, GVerifyKybVerification
+from app.lending.models import (
+    AuditLog,
+    LoanApplication,
+    LoanApplicationDocument,
+    Project,
+    ProjectOwnership,
+    ScoreRun,
+)
+from app.notifications.models import (
+    EVENT_APPLICATION_APPROVED,
+    EVENT_APPLICATION_REJECTED,
+)
+from app.notifications.service import create_notification
+from app.users.models import Role, User
+from app.utils import r2
+from app.utils.audit import append_audit
 
 
 async def _paginate(db: AsyncSession, stmt: Select, *, page: int, page_size: int, row_model, order_col) -> Page:
@@ -123,6 +150,346 @@ async def get_overview(
             db, page=page, page_size=page_size, search=search, status=status, role=role
         )
     return AdminOverview(stats=stats, mode=mode, table=table)
+
+
+async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProjectDetail:
+    """One company and every funding request it has made.
+
+    Not paginated: applications are per-company and a handful at most, so an
+    envelope would cost the caller a second round trip to learn there was
+    nothing on page two. Ordered newest first — an admin opening this is
+    looking at the latest request, not the first one ever filed.
+    """
+    project = await db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    rows = (
+        await db.execute(
+            select(LoanApplication)
+            .where(LoanApplication.project_id == project_id)
+            # Eager-loaded: the panel renders every application's uploads, so
+            # lazy loading here would be one query per funding request.
+            .options(selectinload(LoanApplication.documents))
+            .order_by(LoanApplication.created_at.desc())
+        )
+    ).scalars().all()
+
+    # Newest score run per application, in one query rather than N.
+    # A company with several funding requests would otherwise cost a round
+    # trip each, and the panel renders them all at once.
+    latest_runs: dict[UUID, ScoreRun] = {}
+    if rows:
+        run_rows = (
+            await db.execute(
+                select(ScoreRun)
+                .where(ScoreRun.application_id.in_([r.id for r in rows]))
+                .order_by(ScoreRun.created_at.desc())
+            )
+        ).scalars().all()
+        for run in run_rows:
+            latest_runs.setdefault(run.application_id, run)
+
+    def _row(application) -> AdminLoanApplicationRow:
+        out = AdminLoanApplicationRow.model_validate(application)
+        run = latest_runs.get(application.id)
+        if run is not None:
+            out = out.model_copy(
+                update={
+                    "score_run": AdminScoreRunOut(
+                        id=run.id,
+                        status=run.status,
+                        decision=run.decision,
+                        final_grade=run.final_grade_precise,
+                        interest_rate_pct=run.interest_rate_pct,
+                        engine_version=run.engine_version,
+                        params_version=run.params_version,
+                        created_at=run.created_at,
+                    )
+                }
+            )
+        return out
+
+    return AdminProjectDetail(
+        id=project.id,
+        legal_name=project.legal_name,
+        tax_id=project.tax_id,
+        industry=project.industry,
+        status=project.status,
+        address=project.address,
+        incorporation_date=project.incorporation_date,
+        created_at=project.created_at,
+        applications=[_row(row) for row in rows],
+        kyb=await _latest_kyb_for_project(db, project_id),
+    )
+
+
+async def _latest_kyb_for_project(
+    db: AsyncSession, project_id: UUID
+) -> AdminKybVerificationOut | None:
+    """The engine half of the gate, for whoever owns this company.
+
+    Joined through project_ownerships because KYB is a property of the USER who
+    verified, not of the project row. Newest attempt wins, matching
+    gverify.kyb_service.latest_for_user — a retry after a rejection is the one
+    that counts.
+    """
+    row = (
+        await db.execute(
+            select(GVerifyKybVerification)
+            .join(
+                ProjectOwnership,
+                ProjectOwnership.user_id == GVerifyKybVerification.user_id,
+            )
+            .where(ProjectOwnership.project_id == project_id)
+            .order_by(GVerifyKybVerification.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    return AdminKybVerificationOut.model_validate(row) if row else None
+
+
+async def resolve_kyb_verification(
+    db: AsyncSession,
+    verification_id: UUID,
+    *,
+    decision: AdminDecision,
+    note: str | None,
+    actor: User,
+    ip_address: str | None = None,
+) -> AdminKybVerificationOut:
+    """Settle a KYB attempt the engine parked for a human.
+
+    Only MANUAL_REVIEW is resolvable. An APPROVED or REJECTED attempt is the
+    provider's own verdict and an operator must not quietly overwrite it — a
+    retry creates a new attempt, which is the supported way to change the
+    answer.
+    """
+    row = await db.get(GVerifyKybVerification, verification_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="KYB verification not found")
+    if row.status != STATUS_MANUAL_REVIEW:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Only a MANUAL_REVIEW attempt can be resolved (this one is {row.status})",
+        )
+
+    before = {"status": row.status}
+    row.status = decision.value
+    if decision is AdminDecision.rejected:
+        row.rejection_reason = note or row.rejection_reason
+    db.add(row)
+    append_audit(
+        db,
+        entity_type="GVERIFY_KYB_VERIFICATION",
+        entity_id=row.id,
+        action="KYB_MANUAL_REVIEW_RESOLVED",
+        actor_id=actor.id,
+        before_state=before,
+        after_state={"status": row.status, "note": note},
+        ip_address=ip_address,
+    )
+    await db.commit()
+    await db.refresh(row)
+    return AdminKybVerificationOut.model_validate(row)
+
+
+async def decide_application(
+    db: AsyncSession,
+    application_id: UUID,
+    *,
+    decision: AdminDecision,
+    note: str | None,
+    actor: User,
+    ip_address: str | None = None,
+) -> AdminLoanApplicationRow:
+    """Record the operator half of the two-approval gate.
+
+    One-way: a decided application cannot be re-decided. The decision is an
+    audited event that downstream steps rely on, so flipping it after a
+    contract exists would rewrite the basis that contract was created on.
+    """
+    # selectinload, not db.get(): the response model carries `documents`, and
+    # validating a bare ORM row would lazy-load that relationship inside an
+    # async session — which raises MissingGreenlet rather than emitting SQL.
+    row = (
+        await db.execute(
+            select(LoanApplication)
+            .where(LoanApplication.id == application_id)
+            .options(selectinload(LoanApplication.documents))
+        )
+    ).scalars().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if row.admin_approval != "PENDING":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Application has already been {row.admin_approval.lower()}",
+        )
+
+    before = {"admin_approval": row.admin_approval, "status": row.status}
+    row.admin_approval = decision.value
+    row.admin_approved_by = actor.id
+    row.decided_at = datetime.now(timezone.utc)
+    row.decision_note = note
+
+    # A rejection ends the application, so the applicant-facing `status` has to
+    # move with it. `admin_approval` is an internal gate column -- the SME
+    # dashboard renders `status` -- so a rejection that only set the gate left
+    # the applicant on "Submitted -- awaiting review" forever, waiting for an
+    # answer that had already been given.
+    #
+    # An approval deliberately does NOT move `status`. This is one half of a
+    # two-approval gate: create_contract() still requires the engine's, so
+    # telling the applicant "approved" here would promise an outcome the other
+    # half can still refuse. It stays under review until there is an offer.
+    if decision is AdminDecision.rejected:
+        row.status = "REJECTED"
+    db.add(row)
+
+    # Tell the applicant. Staged on THIS transaction, not sent from it: if the
+    # decision rolls back the notification goes with it, so nobody is ever told
+    # about a verdict that was not recorded.
+    #
+    # One per owner rather than one per project: co-owners both act on the
+    # company's behalf, and a decision only the first of them heard about is
+    # how a company misses its own answer.
+    owner_ids = (
+        (
+            await db.execute(
+                select(ProjectOwnership.user_id).where(
+                    ProjectOwnership.project_id == row.project_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    event = (
+        EVENT_APPLICATION_REJECTED
+        if decision is AdminDecision.rejected
+        else EVENT_APPLICATION_APPROVED
+    )
+    for owner_id in owner_ids:
+        create_notification(
+            db,
+            user_id=owner_id,
+            event=event,
+            entity_type="LOAN_APPLICATION",
+            entity_id=row.id,
+            # Only what the copy needs to name the request. The operator's
+            # note is deliberately absent: it is already on the application
+            # the notification points at, and a copy here would go stale the
+            # moment anyone edited the original.
+            data={"amount_vnd": int(row.requested_amount)},
+        )
+    append_audit(
+        db,
+        entity_type="LOAN_APPLICATION",
+        entity_id=row.id,
+        action="APPLICATION_ADMIN_DECIDED",
+        actor_id=actor.id,
+        before_state=before,
+        after_state={
+            "admin_approval": row.admin_approval,
+            "status": row.status,
+            "note": note,
+        },
+        ip_address=ip_address,
+    )
+    await db.commit()
+    await db.refresh(row, ["admin_approval", "status", "decided_at", "decision_note"])
+    return AdminLoanApplicationRow.model_validate(row)
+
+
+# Ten minutes, matching the KYB certificate link: long enough to read a
+# document, short enough that a pasted URL stops working quickly.
+DOCUMENT_URL_TTL_SECONDS = 600
+
+
+async def get_document_url(
+    db: AsyncSession, document_id: UUID
+) -> AdminDocumentUrlResponse:
+    """A short-lived read URL for an uploaded application document.
+
+    Admin-only at the route. No ownership filter is applied here on purpose —
+    an operator reviewing applications is meant to see any of them — but the
+    URL is still presigned and expiring rather than a public object.
+    """
+    row = await db.get(LoanApplicationDocument, document_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if row.status != "UPLOADED":
+        # A presigned URL for an object that was never confirmed would 404 at
+        # the storage layer; say so here instead.
+        raise HTTPException(
+            status_code=409, detail="This document was never finished uploading"
+        )
+    if not r2.is_configured():
+        raise HTTPException(status_code=503, detail="Document storage is not configured")
+
+    return AdminDocumentUrlResponse(
+        url=r2.presign_get(row.file_key, expires_in=DOCUMENT_URL_TTL_SECONDS),
+        expires_in=DOCUMENT_URL_TTL_SECONDS,
+        content_type=row.content_type,
+        original_filename=row.original_filename,
+    )
+
+
+async def set_user_status(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    new_status: str,
+    note: str | None,
+    actor: User,
+    ip_address: str | None = None,
+) -> AdminUserDetail:
+    """Change an account's status.
+
+    SUSPENDED is a real deny: get_current_user rejects the account on every
+    request and login refuses to mint a new session. So the two guards below
+    are not politeness, they are the difference between a reversible action
+    and an unrecoverable one.
+    """
+    target = await db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # 1. No self-suspension. An operator who suspends their own account cannot
+    #    undo it — the endpoint that would restore it is the one they just
+    #    locked themselves out of.
+    if target.id == actor.id:
+        raise HTTPException(
+            status_code=409, detail="You cannot change your own account status"
+        )
+
+    # 2. Only a SYSTEM_ADMIN may act on an admin-level account. Otherwise any
+    #    ADMIN can suspend their peers — and every other ADMIN plus the
+    #    SYSTEM_ADMIN — which is a takeover, not moderation.
+    privileged = (Role.ADMIN.value, Role.SYSTEM_ADMIN.value)
+    if target.role in privileged and actor.role != Role.SYSTEM_ADMIN.value:
+        raise HTTPException(
+            status_code=403,
+            detail="Only a system admin can change an admin account's status",
+        )
+
+    before = {"status": target.status}
+    target.status = new_status
+    db.add(target)
+    append_audit(
+        db,
+        entity_type="USER",
+        entity_id=target.id,
+        action="USER_STATUS_CHANGED",
+        actor_id=actor.id,
+        before_state=before,
+        after_state={"status": new_status, "note": note},
+        ip_address=ip_address,
+    )
+    await db.commit()
+    await db.refresh(target)
+    return AdminUserDetail.model_validate(target)
 
 
 async def list_audit_logs(

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.auth.schemas import TokenData
-from app.users.models import User
+from app.users.models import USER_STATUS_SUSPENDED, User
 
 # HTTPBearer parses Authorization: Bearer <token> reliably for API clients (curl, Postman).
 http_bearer = HTTPBearer(auto_error=False)
@@ -110,6 +110,19 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if user is None:
         raise credentials_exception
+
+    # A suspension has to end the sessions that already exist, not just block
+    # the next login — otherwise an operator suspends an account and the holder
+    # keeps working for as long as their access token lives. Checked here
+    # because this is what every authenticated endpoint depends on.
+    #
+    # Deny-list, not allow-list: PENDING_KYC is a normal onboarding state and
+    # must keep working. Only SUSPENDED is a decision to shut someone out.
+    if user.status == USER_STATUS_SUSPENDED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has been suspended",
+        )
     return user
 
 

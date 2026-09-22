@@ -8,6 +8,15 @@ from sqlalchemy.orm import relationship
 from app.core.base import Base
 
 
+# Account statuses. Only SUSPENDED is a deny: PENDING_KYC is a normal
+# onboarding state and ACTIVE is the default. Stored as free text (no CHECK
+# constraint) — these names are the contract.
+USER_STATUS_ACTIVE = "ACTIVE"
+USER_STATUS_PENDING_KYC = "PENDING_KYC"
+USER_STATUS_SUSPENDED = "SUSPENDED"
+USER_STATUSES = (USER_STATUS_ACTIVE, USER_STATUS_PENDING_KYC, USER_STATUS_SUSPENDED)
+
+
 class Role(str, PyEnum):
     SME = "SME"
     INVESTOR = "INVESTOR"

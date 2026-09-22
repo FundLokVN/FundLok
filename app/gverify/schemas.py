@@ -114,3 +114,15 @@ class KybStatusResponse(BaseModel):
     company_address: str | None = None
     date_of_establishment: str | None = None
     updated_at: datetime | None = None
+
+
+class KybCertificateResponse(BaseModel):
+    """A short-lived read URL for the certificate the SME already submitted
+    for KYB, so the loan application does not ask for the same file twice."""
+
+    url: str
+    # Seconds the URL stays valid. Surfaced so the client can say so rather
+    # than handing the user a link that silently dies.
+    expires_in: int
+    content_type: str
+    verification_id: UUID

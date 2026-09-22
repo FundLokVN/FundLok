@@ -1,11 +1,22 @@
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin import service
-from app.admin.schemas import AdminMode, AdminOverview, AuditLogOut
+from app.admin.schemas import (
+    AdminDecisionRequest,
+    AdminDocumentUrlResponse,
+    AdminKybVerificationOut,
+    AdminLoanApplicationRow,
+    AdminMode,
+    AdminOverview,
+    AdminProjectDetail,
+    AdminUserDetail,
+    AdminUserStatusRequest,
+    AuditLogOut,
+)
 from app.core.database import get_db
 from app.users.models import Role, User
 from app.utils.rbac import require_roles
@@ -36,6 +47,100 @@ async def get_overview(
         status=status,
         role=role,
         industry=industry,
+    )
+
+
+@router.get("/projects/{project_id}", response_model=AdminProjectDetail)
+async def get_project_detail(
+    project_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The admin project preview: one company plus every funding request it has
+    made. Admin-only, like every route on this router — SMEs read their own
+    applications through /loans, never through here."""
+    return await service.get_project_detail(db, project_id)
+
+
+@router.post(
+    "/kyb-verifications/{verification_id}/resolve",
+    response_model=AdminKybVerificationOut,
+)
+async def resolve_kyb_verification(
+    verification_id: UUID,
+    body: AdminDecisionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Settle a KYB attempt the engine parked in MANUAL_REVIEW. Admin-only."""
+    return await service.resolve_kyb_verification(
+        db,
+        verification_id,
+        decision=body.decision,
+        note=body.note,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.post(
+    "/applications/{application_id}/decision",
+    response_model=AdminLoanApplicationRow,
+)
+async def decide_application(
+    application_id: UUID,
+    body: AdminDecisionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Record the operator half of the two-approval gate. Admin-only.
+
+    An application needs BOTH this and an approved verification before
+    create_contract will let it become a facility.
+    """
+    return await service.decide_application(
+        db,
+        application_id,
+        decision=body.decision,
+        note=body.note,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.get("/documents/{document_id}/url", response_model=AdminDocumentUrlResponse)
+async def get_document_url(
+    document_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A 10-minute read URL for an uploaded application document. Admin-only."""
+    return await service.get_document_url(db, document_id)
+
+
+@router.patch("/users/{user_id}/status", response_model=AdminUserDetail)
+async def set_user_status(
+    user_id: UUID,
+    body: AdminUserStatusRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Change an account's status. Admin-only.
+
+    SUSPENDED genuinely denies: existing sessions stop working and no new one
+    can be minted. Two guards apply — nobody may change their own status, and
+    only a SYSTEM_ADMIN may act on an admin-level account.
+    """
+    return await service.set_user_status(
+        db,
+        user_id,
+        new_status=body.status,
+        note=body.note,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
     )
 
 

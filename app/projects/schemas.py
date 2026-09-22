@@ -100,6 +100,16 @@ class ProjectLoanApplicationOut(BaseModel):
     status: str
     submitted_at: datetime | None
     created_at: datetime | None
+    # The operator's reason, shown to the applicant on a decided application.
+    # It was internal-only until the SME dashboard started rendering it, so
+    # the admin panel now says out loud that the applicant reads it -- an
+    # operator must never be surprised by where their words end up.
+    #
+    # `admin_approval` is NOT exposed: it is the internal half of the
+    # two-approval gate, and `status` already carries what the applicant is
+    # entitled to know about the outcome.
+    decision_note: str | None = None
+    decided_at: datetime | None = None
     documents: list[LoanApplicationDocumentOut] = []
 
     model_config = {"from_attributes": True}

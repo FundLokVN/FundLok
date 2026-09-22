@@ -36,6 +36,19 @@ BEGIN
     TRUNCATE TABLE users                         CASCADE;
 END $$;
 
+-- 0b. Put the board bank rate back --------------------------------------
+-- `TRUNCATE users CASCADE` also empties `bank_rate_config`: Postgres cascades
+-- a truncate to every table with an FK referencing the truncated one, and
+-- `bank_rate_config.created_by_actor_id` is one -- the ON DELETE SET NULL does
+-- not spare it. Without this row `get_current_bank_rate()` raises "no
+-- bank_rate_config row is in force", so scoring 500s on every application
+-- until someone re-runs the migration's seed by hand. Same row and same date
+-- as migration 298cd240e4f1 (the T0b resolution date), so re-seeding a dev DB
+-- leaves it in the state a fresh migration would.
+INSERT INTO bank_rate_config (id, rate_pct, effective_from)
+VALUES (gen_random_uuid(), 12.0, '2026-09-17')
+ON CONFLICT (effective_from) DO NOTHING;
+
 -- =====================================================================
 -- 1. Users (11: 1 SYSTEM_ADMIN, 1 ADMIN, 4 SME, 5 INVESTOR) — password = Password123!
 -- =====================================================================

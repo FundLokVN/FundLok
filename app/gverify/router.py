@@ -19,12 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.gverify import kyb_service, service
+from app.gverify import storage
 from app.gverify.client import GVerifyError
 from app.gverify.schemas import (
     HandoffResponse,
     KybRepresentative,
     KybStatusResponse,
     KybVerifyRequest,
+    KybCertificateResponse,
     KybVerifyResponse,
     KycStatusResponse,
     KycVerifyRequest,
@@ -32,7 +34,7 @@ from app.gverify.schemas import (
 )
 from app.gverify.service import ImageValidationError
 from app.gverify.tokens import HANDOFF_TTL, create_handoff_token, verify_handoff_token
-from app.users.models import Role, User
+from app.users.models import USER_STATUS_SUSPENDED, Role, User
 from app.utils.audit import append_audit
 from app.utils.rbac import require_roles
 
@@ -146,6 +148,12 @@ async def verify_via_handoff(
     user = result.scalar_one_or_none()
     if user is None or user.role != Role.INVESTOR.value:
         raise HTTPException(status_code=401, detail="Invalid or expired handoff token")
+    # This route authenticates by handoff token, so it never passes through
+    # get_current_user and does NOT inherit the suspension check from there.
+    # Without this, a suspended investor's phone could still submit a
+    # verification using a token minted before the suspension.
+    if user.status == USER_STATUS_SUSPENDED:
+        raise HTTPException(status_code=403, detail="This account has been suspended")
 
     return await _run_verification(request, body, db, user)
 
@@ -242,6 +250,39 @@ async def kyb_verify(
             for rep in (attempt.representatives or [])
         ],
         created_at=attempt.created_at,
+    )
+
+
+@kyb_router.get("/certificate", response_model=KybCertificateResponse)
+async def kyb_certificate(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_sme_authorized),
+):
+    """A 10-minute read URL for the caller's OWN business registration
+    certificate, as submitted for KYB.
+
+    Scoped to the caller by construction: the attempt is looked up by
+    current_user.id, never by an id from the request, so there is no key to
+    tamper with. The object stays private — a presigned URL is the only way to
+    reach it, and it expires.
+    """
+    attempt = await kyb_service.latest_for_user(db, current_user.id)
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="No KYB verification found")
+
+    located = storage.find_kyb_certificate(attempt.id)
+    if located is None:
+        # Retention is best-effort, so an attempt can legitimately have no
+        # stored file. 404 lets the client fall back to asking for an upload
+        # instead of rendering a broken preview.
+        raise HTTPException(status_code=404, detail="No stored certificate for this verification")
+
+    key, content_type = located
+    return KybCertificateResponse(
+        url=storage.presign_kyb_certificate(key),
+        expires_in=storage.CERTIFICATE_URL_TTL_SECONDS,
+        content_type=content_type,
+        verification_id=attempt.id,
     )
 
 

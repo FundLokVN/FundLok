@@ -77,3 +77,39 @@ async def store_kyc_documents(
 
 async def store_kyb_document(verification_id, *, certificate: bytes) -> None:
     await _store("KYB", verification_id, {"certificate": certificate})
+
+
+# The extensions _ext_and_type can produce. The chosen one is NOT recorded in
+# Postgres — the key is derived from the bytes at upload time — so a reader has
+# to probe. Three HEADs at worst, and only when someone opens the document.
+_CERTIFICATE_EXTENSIONS = (("pdf", "application/pdf"), ("jpg", "image/jpeg"), ("png", "image/png"))
+
+# Ten minutes: long enough to open and read a certificate, short enough that a
+# leaked link (a pasted URL, a shared screenshot) stops working quickly. The
+# object itself stays private — this is the only way to reach it.
+CERTIFICATE_URL_TTL_SECONDS = 600
+
+
+def find_kyb_certificate(verification_id) -> tuple[str, str] | None:
+    """Locate a stored KYB certificate: (object key, content type), or None.
+
+    None is a normal answer, not an error. Retention is best-effort by design
+    (see the module docstring): an attempt can exist with no stored object if
+    R2 was unconfigured or erroring at the time, and the caller has to render
+    that case rather than assume the file is there.
+    """
+    if not r2.is_configured():
+        return None
+    bucket = _bucket()
+    for ext, content_type in _CERTIFICATE_EXTENSIONS:
+        key = f"verification/KYB/{verification_id}/certificate.{ext}"
+        if r2.head_object(key, bucket=bucket) is not None:
+            return key, content_type
+    return None
+
+
+def presign_kyb_certificate(key: str) -> str:
+    """A short-lived read URL for a located certificate."""
+    return r2.presign_get(
+        key, bucket=_bucket(), expires_in=CERTIFICATE_URL_TTL_SECONDS
+    )

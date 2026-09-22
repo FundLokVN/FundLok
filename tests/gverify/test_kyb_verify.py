@@ -548,3 +548,91 @@ async def test_kyb_verify_invalid_tax_code_error_rejects_not_502(client, make_sm
     assert resp.status_code == 201, resp.text
     assert resp.json()["status"] == "REJECTED"
     assert "not valid in the state registry" in resp.json()["rejection_reason"]
+
+
+# --------------------------------------------------------------------------- #
+# GET /gverify/kyb/certificate
+#
+# The SME already handed us their business registration certificate for KYB.
+# The loan application asks for the same document, so this lets the client
+# reuse the stored one instead of demanding a second upload.
+# --------------------------------------------------------------------------- #
+
+
+async def test_certificate_returns_a_short_lived_url(
+    client, make_sme, mock_gverify_kyb, monkeypatch
+):
+    sme = await make_sme()
+    await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
+
+    monkeypatch.setattr(
+        "app.gverify.storage.find_kyb_certificate",
+        lambda vid: (f"verification/KYB/{vid}/certificate.pdf", "application/pdf"),
+    )
+    monkeypatch.setattr(
+        "app.gverify.storage.presign_kyb_certificate",
+        lambda key: f"https://r2.example/{key}?sig=abc",
+    )
+
+    resp = await client.get("/gverify/kyb/certificate", headers=sme["headers"])
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["content_type"] == "application/pdf"
+    # Ten minutes. Long enough to read a certificate, short enough that a
+    # pasted link stops working quickly.
+    assert data["expires_in"] == 600
+    assert data["url"].startswith("https://r2.example/")
+
+
+async def test_certificate_is_404_when_nothing_was_retained(
+    client, make_sme, mock_gverify_kyb, monkeypatch
+):
+    """Retention is best-effort by design, so an attempt can exist with no
+    stored object. The client must be able to fall back to asking for an
+    upload rather than rendering a broken preview."""
+    sme = await make_sme()
+    await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
+    monkeypatch.setattr(
+        "app.gverify.storage.find_kyb_certificate", lambda vid: None
+    )
+
+    resp = await client.get("/gverify/kyb/certificate", headers=sme["headers"])
+
+    assert resp.status_code == 404, resp.text
+
+
+async def test_certificate_is_404_when_the_sme_never_verified(client, make_sme):
+    sme = await make_sme()
+    resp = await client.get("/gverify/kyb/certificate", headers=sme["headers"])
+    assert resp.status_code == 404
+
+
+async def test_certificate_is_scoped_to_the_caller(
+    client, make_sme, make_user, mock_gverify_kyb, monkeypatch
+):
+    """The attempt is resolved from the session, never from a request
+    parameter — so one SME cannot name another's verification."""
+    owner = await make_sme()
+    await client.post("/gverify/kyb/verify", json=_body(), headers=owner["headers"])
+    monkeypatch.setattr(
+        "app.gverify.storage.find_kyb_certificate",
+        lambda vid: (f"verification/KYB/{vid}/certificate.pdf", "application/pdf"),
+    )
+
+    # A different SME, with no verification of their own.
+    stranger = await make_user(role="SME")
+    resp = await client.get("/gverify/kyb/certificate", headers=stranger["headers"])
+
+    assert resp.status_code == 404, resp.text
+
+
+async def test_certificate_rejects_a_non_sme(client, make_user):
+    investor = await make_user(role="INVESTOR")
+    resp = await client.get("/gverify/kyb/certificate", headers=investor["headers"])
+    assert resp.status_code == 403, resp.text
+
+
+async def test_certificate_rejects_an_anonymous_caller(client):
+    resp = await client.get("/gverify/kyb/certificate")
+    assert resp.status_code in (401, 403)
