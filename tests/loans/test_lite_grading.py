@@ -22,6 +22,7 @@ from app.loans.lite_grading import (
     grade_lite,
     synthesize_monthly_revenue,
 )
+from app.projects.engine_constraints import params
 from app.underwriting.grading.engine import _is_insufficient_data
 from app.underwriting.grading.factors import AI_SCORE_KEYS
 
@@ -301,10 +302,12 @@ class TestGradeLite:
             grade_lite(**application(duration_months=10), figures=figures())
 
     def test_rejects_a_loan_outside_the_engine_bounds(self):
+        # Read from the params file rather than typed here: a literal below the
+        # old floor quietly became a VALID loan when the floor was lowered, and
+        # the test went on passing against nothing.
+        below_floor = Decimal(str(params().loan_constraints["min_vnd"])) - 1
         with pytest.raises(ValueError):
-            grade_lite(
-                **application(loan_size_vnd=Decimal("100000000")), figures=figures()
-            )
+            grade_lite(**application(loan_size_vnd=below_floor), figures=figures())
 
     def test_a_seasonal_business_is_priced_differently_from_a_steady_one(self):
         # If this ever stops holding, the best/worst fields have become

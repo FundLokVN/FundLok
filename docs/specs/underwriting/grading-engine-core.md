@@ -85,7 +85,7 @@ GradingInput  (frozen)
 ├── company_code                    str
 ├── industry                        str          must be in params.supported_industries
 ├── company_size                    Literal["micro","small","medium"]
-├── loan_size_vnd                   Decimal      200_000_000 … 5_000_000_000
+├── loan_size_vnd                   Decimal      20_000_000 … 5_000_000_000
 ├── duration_months                 int          one of 3, 6, 9, 12
 ├── operating_months                int          ≥ 0
 ├── monthly_revenue                 tuple[Decimal, ...]   EXACTLY 24 values, m1 … m24
