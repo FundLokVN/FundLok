@@ -98,7 +98,10 @@ async def test_industry_may_still_be_omitted(client, make_user):
 # --- loan size --------------------------------------------------------------
 
 
-@pytest.mark.parametrize("amount", [MIN_VND - 1, 100_000_000, MAX_VND + 1])
+# Derived, not retyped: this file's own rule (see the module docstring). The
+# middle case used to be a literal 100,000,000, which silently stopped testing
+# anything the moment the floor moved below it.
+@pytest.mark.parametrize("amount", [MIN_VND - 1, MIN_VND // 2, MAX_VND + 1])
 async def test_loan_size_outside_engine_bounds_rejected(client, make_user, amount):
     sme = await make_user(role="SME")
     resp = await client.post(

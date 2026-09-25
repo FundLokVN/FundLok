@@ -124,6 +124,9 @@ class LiteBand:
     sector_reference_version: str
     provisional: bool
     assumptions: Tuple[str, ...]
+    # Parallel to `assumptions`, same order. Codes for the UI to
+    # translate; the prose above is the fallback.
+    assumption_codes: Tuple[str, ...]
 
 
 @lru_cache(maxsize=1)
@@ -362,20 +365,28 @@ def grade_lite(
             f"{high.decision}). Figures are insufficient to estimate a band."
         )
 
+    # Each assumption carries a CODE as well as English prose. The prose is the
+    # log line and the fallback; the code is what a bilingual UI translates.
+    # Without it a Vietnamese visitor reads English on a public page, which is
+    # exactly what the assumptions are there to prevent -- they explain what the
+    # number took on faith, and an explanation nobody can read explains nothing.
     assumptions = [
         f"CIC score is not known; bracketed across {CIC_BRACKET_LOW}-{CIC_BRACKET_HIGH}.",
         "Identity and AML checks are assumed to pass; they are verified for real later.",
         "Monthly revenue is modelled from the annual totals provided, not from filings.",
     ]
+    assumption_codes = ["CIC_BRACKETED", "KYC_ASSUMED_PASS", "REVENUE_MODELLED"]
     if not _as_int(figures.get("revenue_best_month")):
         assumptions.append(
             "No best/worst month given, so revenue is modelled as flat — a real "
             "seasonal business may price differently."
         )
+        assumption_codes.append("REVENUE_FLAT")
     if not _sector_is_reviewed():
         assumptions.append(
             "Industry risk data is a draft pending review, so this is provisional."
         )
+        assumption_codes.append("SECTOR_TABLE_DRAFT")
 
     # A higher CIC is better, so `high` carries the lower rate. Ordered on the
     # values rather than assumed, so the band cannot come out inverted if the
@@ -399,4 +410,5 @@ def grade_lite(
         ),
         provisional=not _sector_is_reviewed(),
         assumptions=tuple(assumptions),
+        assumption_codes=tuple(assumption_codes),
     )

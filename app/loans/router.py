@@ -7,8 +7,15 @@ from app.loans.schemas import (
     LoanApplicationFiguresIn,
     LoanApplicationFiguresOut,
     LoanApplicationOut,
+    PublicRateEstimateIn,
+    PublicRateEstimateOut,
 )
-from app.loans.service import create_application, save_figures, submit_application
+from app.loans.service import (
+    create_application,
+    public_rate_estimate,
+    save_figures,
+    submit_application,
+)
 from uuid import UUID
 
 from app.users.models import Role, User
@@ -98,3 +105,25 @@ async def submit_loan_application(
     )
     await db.commit()
     return row
+
+
+@router.post(
+    "/rate-estimate",
+    response_model=PublicRateEstimateOut,
+    # 200, not 201: nothing is created. POST rather than GET only because the
+    # answers are a body, and a business's revenue has no place in a URL, a
+    # proxy log or a browser history entry.
+    status_code=200,
+)
+async def post_public_rate_estimate(body: PublicRateEstimateIn):
+    """Indicative rate for a visitor with no account (landing page calculator).
+
+    Deliberately unauthenticated and deliberately stateless -- it reads nothing
+    and writes nothing, so being open costs no data and creates no rows.
+
+    The engine runs here rather than in the browser because the reference rate
+    and the rating formula are internal pricing inputs. The response carries a
+    band, a score band and the assumptions behind them; nothing it contains can
+    reconstruct the pricing.
+    """
+    return await public_rate_estimate(body)

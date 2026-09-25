@@ -1,11 +1,18 @@
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, status
 
 from app.lending.models import LoanApplication
-from app.loans.schemas import LoanApplicationCreate, LoanApplicationFiguresIn
+from app.loans.lite_grading import LiteGradingError, grade_lite
+from app.loans.schemas import (
+    LoanApplicationCreate,
+    LoanApplicationFiguresIn,
+    PublicRateEstimateIn,
+    PublicRateEstimateOut,
+)
 from app.projects.service import user_owns_project
 from app.users.models import Role, User
 from uuid import UUID
@@ -94,3 +101,64 @@ async def submit_application(db: AsyncSession, application_id: UUID, current_use
     await db.flush()
     await db.refresh(row)
     return row
+
+
+async def public_rate_estimate(body: PublicRateEstimateIn) -> PublicRateEstimateOut:
+    """An indicative band for an anonymous landing-page visitor.
+
+    No database, no account, no stored application -- the visitor's answers go
+    straight into the engine and the band comes straight back. Nothing is
+    persisted: this is a calculator, and keeping it stateless is what lets it be
+    unauthenticated without becoming a way to write rows.
+
+    The engine is called SERVER-side deliberately. The bank reference rate and
+    the rating formula are internal pricing inputs and never leave the server;
+    the browser receives a rate band, a score band and the assumptions behind
+    them, and nothing it could reconstruct the pricing from.
+    """
+    try:
+        band = grade_lite(
+            # No company exists yet, so there is no tax id to carry. The engine
+            # never reads this field -- it is a label on GradingInput.
+            company_code="public-estimate",
+            industry=body.industry,
+            employee_count=body.employee_count,
+            incorporation_date_months=body.operating_months,
+            loan_size_vnd=Decimal(body.loan_amount),
+            duration_months=body.duration_months,
+            figures={
+                "revenue_last_12m": body.revenue_last_12m,
+                "revenue_prior_12m": body.revenue_prior_12m,
+                "revenue_best_month": body.revenue_best_month,
+                "revenue_worst_month": body.revenue_worst_month,
+                "cogs_y1": body.cogs_y1,
+                "fixed_cost_y1": body.fixed_cost_y1,
+                "variable_cost_excl_cogs_y1": body.variable_cost_excl_cogs_y1,
+                # Not asked on a public form: it is a question about the owner's
+                # personal draw, which is too intrusive for a calculator and only
+                # refines the score rather than enabling it.
+                "owner_withdrawal_pct": None,
+                "conc_top1_pct": body.conc_top1_pct,
+                "conc_top3_pct": body.conc_top3_pct,
+            },
+        )
+    except LiteGradingError as exc:
+        # A real answer about the visitor's numbers -- costs above revenue, an
+        # unscoreable industry, a headcount outside every band.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        # grade()'s own input validation: loan size or term outside what the
+        # engine accepts. Bounded in PublicRateEstimateIn, so reaching here
+        # means a bound drifted -- still a 422, never a 500 on a public page.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return PublicRateEstimateOut(
+        rate_low_pct=band.rate_low_pct,
+        rate_high_pct=band.rate_high_pct,
+        score_low=band.grade_low,
+        score_high=band.grade_high,
+        engine_version=band.engine_version,
+        provisional=band.provisional,
+        assumptions=list(band.assumptions),
+        assumption_codes=list(band.assumption_codes),
+    )
