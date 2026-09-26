@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import ipaddress
 
-from app.core.config import settings
+# The MODULE, not `settings` itself: resolved per request so a reloaded config
+# (tests/scheduler/test_worker_scaffold.py reloads it) is seen rather than a
+# stale object captured at import time.
+from app.core import config
 
 
 def trusted_client_ip(forwarded_for: str | None, hops: int) -> str | None:
@@ -52,7 +55,7 @@ class TrustedProxyMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] in ("http", "websocket"):
-            hops = settings.TRUSTED_PROXY_HOPS
+            hops = config.settings.TRUSTED_PROXY_HOPS
             if hops > 0:
                 # A header may legally be repeated; RFC 7230 says the values
                 # join with commas in order, which is exactly the list we walk.
