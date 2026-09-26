@@ -103,7 +103,17 @@ class LiteGradingError(ValueError):
     malformed input, which is a bug. This means the applicant's own numbers
     describe a company the engine has no rule for — most often costs at or above
     revenue, where `derive.compute_derived` raises (D21).
+
+    Carries a `code` as well as the English prose for the same reason `LiteBand`
+    carries `assumption_codes`: these messages are shown to a visitor on a page
+    that defaults to Vietnamese, and an English sentence is not an explanation
+    to someone who cannot read it. The prose stays as the log line and the
+    fallback for a code a client has not been taught yet.
     """
+
+    def __init__(self, message: str, code: str = "UNSCOREABLE") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -146,7 +156,8 @@ def _sector_row(industry: str) -> Mapping[str, float]:
         # but unscoreable — there is deliberately no sector data for them.
         raise LiteGradingError(
             f"No sector reference data for industry {industry!r}; it cannot be "
-            "given an indicative rate."
+            "given an indicative rate.",
+            code="INDUSTRY_UNSCOREABLE",
         )
     return row
 
@@ -178,7 +189,9 @@ def synthesize_monthly_revenue(
     stability factor actually reads.
     """
     if total_vnd <= 0:
-        raise LiteGradingError("Annual revenue must be greater than zero.")
+        raise LiteGradingError(
+            "Annual revenue must be greater than zero.", code="REVENUE_NOT_POSITIVE"
+        )
 
     months = 12
     have_shape = (
@@ -230,7 +243,8 @@ def synthesize_monthly_revenue(
         # months at all. Raising beats returning a series the engine will refuse
         # to score for reasons the applicant could never guess.
         raise LiteGradingError(
-            "Annual revenue is too small to model as twelve monthly figures."
+            "Annual revenue is too small to model as twelve monthly figures.",
+            code="REVENUE_TOO_SMALL",
         )
 
     return tuple(rounded)
@@ -258,13 +272,16 @@ def build_grading_input(
         bands = params().company_sizes
         raise LiteGradingError(
             f"An employee count of {employee_count} is outside the sizes the "
-            f"engine grades ({bands['micro']['min']}-{bands['medium']['max']})."
+            f"engine grades ({bands['micro']['min']}-{bands['medium']['max']}).",
+            code="HEADCOUNT_OUT_OF_BAND",
         )
 
     revenue_last = figures.get("revenue_last_12m")
     revenue_prior = figures.get("revenue_prior_12m")
     if not revenue_last or not revenue_prior:
-        raise LiteGradingError("Both years of revenue are required.")
+        raise LiteGradingError(
+            "Both years of revenue are required.", code="REVENUE_BOTH_YEARS_REQUIRED"
+        )
 
     # m1..m12 is the EARLIER year and m13..m24 the most recent, matching the
     # ordering grading-input-sources.md ยง3.1 assigns to `monthly_revenue`.
@@ -349,7 +366,8 @@ def grade_lite(
             if "profit <= 0" in message:
                 raise LiteGradingError(
                     "Your stated costs are equal to or greater than your "
-                    "revenue, so an indicative rate cannot be calculated."
+                    "revenue, so an indicative rate cannot be calculated.",
+                    code="COSTS_EXCEED_REVENUE",
                 ) from exc
             raise
 
@@ -362,7 +380,8 @@ def grade_lite(
         # has drifted and a silent fallback would hide it.
         raise LiteGradingError(
             f"The engine returned no rate (decisions: {low.decision}, "
-            f"{high.decision}). Figures are insufficient to estimate a band."
+            f"{high.decision}). Figures are insufficient to estimate a band.",
+            code="NO_RATE_RETURNED",
         )
 
     # Each assumption carries a CODE as well as English prose. The prose is the

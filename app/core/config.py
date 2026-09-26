@@ -41,6 +41,27 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,https://fundlok-front-end.vercel.app"
     CLOUDFLARE_TURNSTILE_SECRET_KEY: str | None = None
 
+    # How many reverse proxies sit in front of the app. X-Forwarded-For is
+    # APPENDED to by each hop, so any entry a proxy did not write itself was
+    # supplied by the client and is a free-text field. Reading the leftmost
+    # entry — the obvious implementation — reads exactly the part the caller
+    # controls, which turns a stored client IP into a value the caller chooses.
+    #
+    # 0 (the default) means trust nothing and use the socket peer. Set it to
+    # the real number of hops in each deployment: 1 behind Cloud Run, 2 behind
+    # Cloudflare in front of Cloud Run. The Nth entry from the RIGHT is then
+    # the address the innermost trusted proxy observed, and is the first one
+    # the client could not have forged.
+    #
+    # This is only the single control point because uvicorn is started with
+    # --no-proxy-headers (docker/entrypoint.sh, package.json). Uvicorn's
+    # ProxyHeadersMiddleware is ON by default and rewrites request.client from
+    # X-Forwarded-For itself, which silently overrode a 0 here — verified: with
+    # it enabled, a request carrying a forged XFF stored the forged address
+    # despite this setting being 0. If that flag is ever dropped, this setting
+    # stops meaning anything.
+    TRUSTED_PROXY_HOPS: int = 0
+
     # --- Passkeys / WebAuthn ---
     # The Relying Party ID is the domain a credential is bound to, and a
     # passkey registered against one RP ID cannot be used against another —

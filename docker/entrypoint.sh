@@ -52,4 +52,12 @@ DATABASE_URL="$SYNC_URL" alembic upgrade head
 
 echo "[entrypoint] Starting API server on port ${PORT:-8080}..."
 export DATABASE_URL="$ASYNC_URL"
-exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8080}"
+# --no-proxy-headers is deliberate. Uvicorn enables ProxyHeadersMiddleware by
+# default, which REWRITES request.client from X-Forwarded-For whenever the peer
+# is in FORWARDED_ALLOW_IPS (default 127.0.0.1). That gives the app two separate
+# places deciding how far to trust a caller-appended header, and the implicit
+# one wins because it runs first -- so app-level code that carefully declines to
+# read X-Forwarded-For still ends up with an XFF-derived address and no way to
+# tell. Turning it off leaves request.client as the real socket peer, and
+# TRUSTED_PROXY_HOPS in app/core/config.py is the single control point.
+exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8080}" --no-proxy-headers
