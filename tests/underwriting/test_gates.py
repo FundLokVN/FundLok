@@ -28,7 +28,7 @@ def test_no_gate_produces_approved():
     # with a long operating history relative to the term.
     inputs = make_valid_input(
         loan_size_vnd=Decimal("500000000"),
-        duration_months=12,
+        duration_months=6,
         operating_months=48,
         monthly_revenue=tuple(Decimal("300000000") for _ in range(24)),
         cogs_y1=Decimal("1500000000"),

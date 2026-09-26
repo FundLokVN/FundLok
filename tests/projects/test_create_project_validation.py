@@ -31,7 +31,7 @@ def _payload(**overrides):
         "incorporation_date": "2023-05-10",
         "loan_application": {
             "requested_amount": 800000000,
-            "duration_months": 9,
+            "duration_months": 6,
             "purpose": "Working capital",
             "repayment_preference": "MONTHLY",
         },
@@ -123,7 +123,7 @@ async def test_loan_size_at_the_boundaries_accepted(client, make_user, amount):
 # --- duration ---------------------------------------------------------------
 
 
-@pytest.mark.parametrize("months", [0, 4, 11, 24])
+@pytest.mark.parametrize("months", [0, 7, 11, 24])
 async def test_disallowed_duration_rejected(client, make_user, months):
     sme = await make_user(role="SME")
     resp = await client.post(

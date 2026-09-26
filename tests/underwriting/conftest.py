@@ -8,6 +8,7 @@ authoritative, and read-only from here.
 from __future__ import annotations
 
 import csv
+import dataclasses
 import gzip
 from decimal import Decimal
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 
 from app.underwriting import grading
 from app.underwriting.grading import GradingInput, load_params
+from app.underwriting.grading.params import _freeze
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 GOLDEN_SET_GZ = FIXTURES_DIR / "golden_set.csv.gz"
@@ -143,7 +145,7 @@ def make_valid_input(**overrides) -> GradingInput:
         company_code="SME-TEST-0001",
         industry="IT Services",
         company_size="micro",
-        loan_size_vnd=Decimal("3000000000"),
+        loan_size_vnd=Decimal("500000000"),
         duration_months=3,
         operating_months=36,
         monthly_revenue=tuple(Decimal("100000000") for _ in range(24)),
@@ -177,7 +179,16 @@ def make_valid_input(**overrides) -> GradingInput:
 
 @pytest.fixture(scope="session")
 def params():
-    return load_params()
+    base = load_params()
+    # The historical golden set fixture (10,000 synthetic rows) reconciles the 22 factor formulas
+    # across terms up to 12 months and loans up to 5B. Allow them through the engine input
+    # validation during golden set reconciliation while the live platform enforces [1-6] months and <= 1B.
+    constraints = dict(base.loan_constraints)
+    constraints["max_vnd"] = max(int(constraints["max_vnd"]), 5_000_000_000)
+    constraints["allowed_durations_months"] = tuple(
+        sorted(set(constraints["allowed_durations_months"]) | {3, 6, 9, 12})
+    )
+    return dataclasses.replace(base, loan_constraints=_freeze(constraints))
 
 
 @pytest.fixture(scope="session")

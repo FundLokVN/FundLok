@@ -53,7 +53,7 @@ def application(**overrides):
         "employee_count": 23,
         "incorporation_date_months": 270,
         "loan_size_vnd": Decimal("555555555"),
-        "duration_months": 9,
+        "duration_months": 6,
     }
     base.update(overrides)
     return base
