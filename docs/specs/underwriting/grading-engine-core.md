@@ -85,7 +85,7 @@ GradingInput  (frozen)
 ├── company_code                    str
 ├── industry                        str          must be in params.supported_industries
 ├── company_size                    Literal["micro","small","medium"]
-├── loan_size_vnd                   Decimal      20_000_000 … 5_000_000_000
+├── loan_size_vnd                   Decimal      20_000_000 … 1_000_000_000
 ├── duration_months                 int          one of 3, 6, 9, 12
 ├── operating_months                int          ≥ 0
 ├── monthly_revenue                 tuple[Decimal, ...]   EXACTLY 24 values, m1 … m24
@@ -352,7 +352,7 @@ against the fixture's pricing columns (which is why the fixture does not include
 | A bonus factor is `None` | Contributes 0 to its group | normal result, that factor `None` |
 | **`profit ≤ 0`** (so `scsr_ratio` is negative or undefined) | `raise ValueError` — see §9 Q3. Do **not** score it; a negative ratio scores ~100 on this curve, i.e. a loss-making SME would be rewarded | exception propagates to spec 2's service layer |
 | `duration_months` not in {3,6,9,12} | `raise ValueError` | exception |
-| `loan_size_vnd` outside 200m–5bn | `raise ValueError` | exception |
+| `loan_size_vnd` outside 20m–1bn | `raise ValueError` | exception |
 | `industry` not in `supported_industries` | `raise ValueError` | exception |
 | `bank_rate_pct >= 20` | `raise ValueError` | exception |
 | Any factor score outside [0,100] after clamping | `raise AssertionError` — indicates a params or code bug | exception |

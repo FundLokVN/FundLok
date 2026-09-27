@@ -56,7 +56,7 @@ Status: ✅ available today · ⚠️ collected but not usable (unparsed, or dro
 | 1 | `company_code` | str | form | ✅ | `legal_name` + `tax_id` on `projects` |
 | 2 | `industry` | str | form | ✅ | Must be one of the 15 `supported_industries`. Frontend now submits the engine's exact strings (`lib/constants/industries.ts`) |
 | 3 | `company_size` | micro/small/medium | derived | ⚠️ | Derived from `employee_count` via `company_sizes` bands. Form collects it; **`projects` has no column, so it is dropped** |
-| 4 | `loan_size_vnd` | Decimal | form | ✅ | `loan_applications.requested_amount`. Engine bounds 200M–5bn |
+| 4 | `loan_size_vnd` | Decimal | form | ✅ | `loan_applications.requested_amount`. Engine bounds 20M–1bn |
 | 5 | `duration_months` | int (3/6/9/12) | form | ⚠️ | Form collects it; **`loan_applications` has no column, so it is dropped** |
 | 6 | `operating_months` | int | derived | ⚠️ | From `projects.incorporation_date`; derivation not implemented anywhere yet |
 | 7 | `monthly_revenue` | 24 × Decimal | doc | ⚠️ | VAT declarations and/or e-invoice data. Unparsed. See §6.2 — quarterly filers cannot satisfy this from VAT alone |
@@ -233,7 +233,7 @@ may pass through as null.
 | Condition | Engine behaviour | Ingest must |
 |---|---|---|
 | `industry` in neither supported nor excluded list | `ValueError` | Validate before calling `grade()` |
-| `loan_size_vnd` outside 200M–5bn | `ValueError` | Validate at the form and again server-side |
+| `loan_size_vnd` outside 20M–1bn | `ValueError` | Validate at the form and again server-side |
 | `duration_months` not in {3,6,9,12} | `ValueError` | As above |
 | `bank_rate_pct >= rate_cap_pct` | `ValueError` | Config error; never user-driven |
 | Fewer than 24 months, or any month null | returns `INSUFFICIENT_DATA` | Surface which document is missing — the engine does not say |
