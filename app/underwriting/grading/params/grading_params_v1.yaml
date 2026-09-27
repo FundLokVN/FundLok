@@ -416,8 +416,8 @@ company_sizes:
   medium: {min: 51, max: 200}
 
 loan_constraints:
-  min_vnd: 200000000
-  max_vnd: 5000000000
+  min_vnd: 20000000
+  max_vnd: 1000000000
   allowed_durations_months: [3, 6, 9, 12]
 
 decision_states: [APPROVED, REVIEW, REJECT, INSUFFICIENT_DATA, AI_PENDING]
