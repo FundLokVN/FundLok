@@ -227,6 +227,8 @@ async def upsert_application_financials(
     row.cic_score = body.cic_score
     row.kyc_aml_passed = body.kyc_aml_passed
     row.fraud_flags = list(body.fraud_flags)
+    # Typed by an operator: the evidence fill at score time leaves it alone.
+    row.source = "admin"
 
     db.add(row)
     await db.flush()
@@ -241,14 +243,46 @@ async def start_score_run(
     app = result.scalar_one_or_none()
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
-    if app.status != "SUBMITTED":
+    # The first run moves SUBMITTED -> UNDER_REVIEW. A re-run is allowed while
+    # the application is still under review and undecided, so an operator can
+    # score again after the evidence or the financials change. Each run is a
+    # NEW score_runs row (the old ones stay, append-only), so nothing is ever
+    # recomputed silently (INV-5). Refused once a decision or a locked run
+    # exists: from then on the score is what the decision was made on.
+    if app.status not in ("SUBMITTED", "UNDER_REVIEW"):
         raise HTTPException(
             status_code=400,
             detail="Application must be in SUBMITTED status before scoring",
         )
+    if app.status == "UNDER_REVIEW":
+        if app.admin_approval != "PENDING":
+            raise HTTPException(
+                status_code=409,
+                detail="This application has been decided; its score is not re-run",
+            )
+        locked = (
+            await db.execute(
+                select(ScoreRun.id).where(
+                    ScoreRun.application_id == application_id, ScoreRun.status == "LOCKED"
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if locked is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="A locked score run already backs this application; it is not re-run",
+            )
 
     params = load_params()
     bank_rate_row = await get_current_bank_rate(db)
+
+    # Fill the financials row from what the application already holds (the
+    # parsed uploads, the company form, the business verification) unless an
+    # operator typed it. Imported here: app.loans.grading_inputs imports this
+    # module for the bank rate.
+    from app.loans.grading_inputs import sync_financials
+
+    await sync_financials(db, application_id)
 
     result = await db.execute(
         select(LoanApplicationFinancials).where(LoanApplicationFinancials.application_id == application_id)
@@ -335,6 +369,17 @@ async def start_score_run(
 
     await db.refresh(sr)
     return sr, grading_result
+
+
+async def latest_score_run_id(db: AsyncSession, application_id: UUID) -> Optional[UUID]:
+    return (
+        await db.execute(
+            select(ScoreRun.id)
+            .where(ScoreRun.application_id == application_id)
+            .order_by(ScoreRun.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 async def get_score_run(db: AsyncSession, score_run_id: UUID) -> ScoreRun:

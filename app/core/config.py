@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     # stops meaning anything.
     TRUSTED_PROXY_HOPS: int = 0
 
+
     # --- Passkeys / WebAuthn ---
     # The Relying Party ID is the domain a credential is bound to, and a
     # passkey registered against one RP ID cannot be used against another —

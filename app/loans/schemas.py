@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -64,7 +65,11 @@ class LoanApplicationFiguresIn(BaseModel):
     revenue_prior_12m: int = VndAmount
     cogs_y1: int = VndAmount
     fixed_cost_y1: int = VndAmount
-    variable_cost_excl_cogs_y1: int = VndAmount
+    # Zero is a real answer, not a blank: a company that books every overhead
+    # as administration (TT133 account 6422) has no selling cost to report,
+    # and the statements say so. The engine sums it into total cost, so 0 is
+    # safe there. The other two cost lines stay strictly positive.
+    variable_cost_excl_cogs_y1: int = Field(ge=0, le=VND_MAX)
 
     # --- Optional: they sharpen the band rather than enable it --------------
     revenue_best_month: int | None = OptionalVndAmount
@@ -105,6 +110,16 @@ class LoanApplicationFiguresIn(BaseModel):
         if top1 is not None and top3 is not None and top1 > top3:
             # The top 3 include the top 1 by definition.
             raise ValueError("conc_top1_pct cannot exceed conc_top3_pct")
+
+        # The engine refuses to grade a year that made no profit (R8/R10,
+        # deviations register D21): revenue minus cost of goods sold, fixed
+        # and variable cost must stay above zero. Refused here, at the figures,
+        # so the SME fixes the number instead of the score run failing later.
+        total_cost = self.cogs_y1 + self.fixed_cost_y1 + self.variable_cost_excl_cogs_y1
+        if total_cost >= self.revenue_last_12m:
+            raise ValueError(
+                "cogs_y1 + fixed_cost_y1 + variable_cost_excl_cogs_y1 must be below revenue_last_12m"
+            )
 
         return self
 
@@ -236,3 +251,63 @@ class PublicRateEstimateOut(BaseModel):
     # for -- a backend deployed ahead of the frontend.
     assumptions: list[str]
     assumption_codes: list[str]
+
+
+# --------------------------------------------------------------------------- #
+# Admin: grading inputs assembled from an application's evidence
+# (app/loans/grading_inputs.py)
+# --------------------------------------------------------------------------- #
+
+
+class GradingInputField(BaseModel):
+    value: Any = None
+    source: Literal["vat", "statements", "e-invoice", "cic", "kyb", "project", "typed", "sector", "config"] | None = None
+    status: Literal["filled", "missing", "partial"]
+    note: str | None = None
+
+
+class EInvoiceEvidenceOut(BaseModel):
+    parser_version: str
+    seller_tax_code: str
+    period: str
+    months_covered: int
+    signed: bool
+    related_party_pct: float | None = None
+    total_revenue_vnd: int | None = None
+    warnings: list[dict[str, str]] = []
+
+
+class TaxFilingsEvidenceOut(BaseModel):
+    parser_version: str
+    tax_code: str
+    fiscal_year: int
+    vat_months: int
+    signed: bool
+    interest_expense_vnd: int | None = None
+    warnings: list[dict[str, str]] = []
+
+
+class CicEvidenceOut(BaseModel):
+    parser_version: str
+    subject_type: str
+    score: int | None
+    rank: int | None
+    scored_on: str | None
+    # Million đồng, CIC's unit.
+    debt_total_vnd_million: float | None
+    debt_attention_vnd_million: float | None
+    debt_bad_vnd_million: float | None
+    negative_history: bool | None
+    warnings: list[dict[str, str]]
+
+
+class GradingInputsOut(BaseModel):
+    application_id: UUID
+    gradeable: bool
+    # Inputs whose absence stops a grade outright (engine R8 / NOT NULL), as
+    # opposed to optional ones that only score lower.
+    blockers: list[str]
+    fields: dict[str, GradingInputField]
+    tax_filings: TaxFilingsEvidenceOut | None = None
+    e_invoice: EInvoiceEvidenceOut | None = None
+    cic: CicEvidenceOut | None = None

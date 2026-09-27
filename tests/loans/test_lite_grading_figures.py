@@ -1,3 +1,4 @@
+import pytest
 """PUT /loans/applications/{id}/figures — the Lite grading capture.
 
 The applicant types these figures instead of uploading the VAT and annual
@@ -329,6 +330,27 @@ async def test_top1_cannot_exceed_top3(
     )
 
     assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("fixed,variable", [
+    (600_000_000, 1_000_000_000),  # costs exactly equal revenue: no profit
+    (64_130_972_146, 64_130_972_146),  # the reported case: each line typed as COGS
+])
+async def test_costs_must_stay_below_revenue(
+    client, make_user, make_project, make_loan_application, fixed, variable
+):
+    """The engine refuses to grade a year with no profit (D21), so the
+    figures that would produce one are refused where the SME can fix them."""
+    sme, application = await _draft(make_user, make_project, make_loan_application)
+
+    resp = await client.put(
+        f"/loans/applications/{application['id']}/figures",
+        json=figures(fixed_cost_y1=fixed, variable_cost_excl_cogs_y1=variable),
+        headers=auth_headers(sme),
+    )
+
+    assert resp.status_code == 422
+    assert "must be below revenue_last_12m" in resp.text
 
 
 async def test_unknown_fields_are_rejected(

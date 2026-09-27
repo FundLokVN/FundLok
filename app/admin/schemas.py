@@ -179,6 +179,10 @@ class AdminScoreRunOut(BaseModel):
     engine_version: str | None
     params_version: str | None
     created_at: datetime | None
+    # On an INSUFFICIENT_DATA run: the grading inputs still missing now
+    # (app/loans/grading_inputs.py blockers), so the operator sees why there
+    # is no score and what a re-run needs. Empty otherwise.
+    missing_inputs: list[str] = []
 
     model_config = {"from_attributes": True}
 

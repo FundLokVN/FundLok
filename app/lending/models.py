@@ -31,6 +31,10 @@ class Project(Base):
     industry = Column(Text)
     address = Column(JSONB)
     incorporation_date = Column(Date)
+    # Headcount as the SME entered it on the company form. Only the count is
+    # stored: `company_size` is derived from it at grading time, because the
+    # bands live in the params file and may change (input-sources spec §6.3).
+    employee_count = Column(Integer)
     status = Column(
         Text,
         nullable=False,
@@ -83,6 +87,9 @@ class LoanApplication(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     requested_amount = Column(Numeric(20, 0), nullable=False)
+    # Loan term in months, as requested on the company form. Validated against
+    # the engine's allowed durations on the way in.
+    duration_months = Column(Integer)
     purpose = Column(Text)
     repayment_preference = Column(Text)
     status = Column(Text, nullable=False, server_default="DRAFT")
@@ -203,6 +210,14 @@ class LoanApplicationFinancials(Base):
     cic_score = Column(Integer)
     kyc_aml_passed = Column(Boolean)
     fraud_flags = Column(ARRAY(Text), nullable=False, server_default="{}")
+
+    # Who wrote this row. "evidence": filled at score time from what the
+    # application holds (app/loans/grading_inputs.py sync_financials), and
+    # refilled on every run so it tracks the latest evidence. "admin": typed
+    # through PUT /underwriting/applications/{id}/financials, and never
+    # overwritten by the evidence fill. Existing rows predate the fill, so
+    # they are all admin-entered.
+    source = Column(Text, nullable=False, server_default="admin")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

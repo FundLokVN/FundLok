@@ -18,6 +18,8 @@ from app.admin.schemas import (
     AuditLogOut,
 )
 from app.core.database import get_db
+from app.loans import grading_inputs
+from app.loans.schemas import GradingInputsOut
 from app.users.models import Role, User
 from app.utils.rbac import require_roles
 
@@ -142,6 +144,18 @@ async def set_user_status(
         actor=current_user,
         ip_address=request.client.host if request.client else None,
     )
+
+
+@router.get("/applications/{application_id}/grading-inputs", response_model=GradingInputsOut)
+async def get_grading_inputs(
+    application_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Every grading-engine input for an application: its value, where it came
+    from (parsed e-invoices, KYB, the form, typed figures, the sector table)
+    and what is still missing. Read-only; see app/loans/grading_inputs.py."""
+    return await grading_inputs.assemble(db, application_id)
 
 
 @router.get("/audit-logs", response_model=list[AuditLogOut])

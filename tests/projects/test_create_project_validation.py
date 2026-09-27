@@ -145,7 +145,7 @@ async def test_every_allowed_duration_accepted(client, make_user):
 
 
 async def test_duration_may_be_omitted(client, make_user):
-    """Optional while the column does not exist — an older client must not 422."""
+    """Optional so an older client that predates the field does not 422."""
     sme = await make_user(role="SME")
     payload = _payload()
     payload["loan_application"].pop("duration_months")
@@ -190,3 +190,53 @@ def test_client_supplied_company_size_is_overwritten():
         legal_name="Derive Co", employee_count=5, company_size="medium"
     )
     assert model.company_size == "micro"
+
+
+# --- stored for grading -----------------------------------------------------
+# The form's headcount and loan term are what the grading engine's
+# company_size and duration_months come from, so they must survive the create.
+
+
+async def test_headcount_and_term_are_stored(client, db_session, make_user):
+    from sqlalchemy import select
+
+    from app.lending.models import LoanApplication, Project
+
+    sme = await make_user(role="SME")
+    resp = await client.post(
+        "/projects",
+        json=_payload(employee_count=33, loan_application={
+            "requested_amount": 500000000, "duration_months": 3, "purpose": "Working capital",
+        }),
+        headers=auth_headers(sme),
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["employee_count"] == 33
+    assert body["loan_application"]["duration_months"] == 3
+
+    project = (await db_session.execute(select(Project).where(Project.id == uuid.UUID(body["id"])))).scalar_one()
+    assert project.employee_count == 33
+    application = (
+        await db_session.execute(select(LoanApplication).where(LoanApplication.project_id == project.id))
+    ).scalar_one()
+    assert application.duration_months == 3
+
+
+async def test_grading_inputs_use_the_form_headcount_and_term(client, make_user, make_admin):
+    sme = await make_user(role="SME")
+    resp = await client.post(
+        "/projects",
+        json=_payload(employee_count=33, loan_application={"requested_amount": 500000000, "duration_months": 3}),
+        headers=auth_headers(sme),
+    )
+    assert resp.status_code == 201, resp.text
+    app_id = resp.json()["loan_application"]["id"]
+
+    admin = await make_admin()
+    inputs = (await client.get(f"/admin/applications/{app_id}/grading-inputs", headers=auth_headers(admin))).json()
+    assert inputs["fields"]["company_size"]["value"] == "small"  # 11-50
+    assert inputs["fields"]["company_size"]["source"] == "project"
+    assert inputs["fields"]["duration_months"]["value"] == 3
+    assert "company_size" not in inputs["blockers"]
+    assert "duration_months" not in inputs["blockers"]

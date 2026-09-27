@@ -200,6 +200,15 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
         for run in run_rows:
             latest_runs.setdefault(run.application_id, run)
 
+    # Why an ungraded run has no score, as of now. One assemble per such
+    # application; the panel shows few, and only ungraded ones pay for it.
+    from app.loans.grading_inputs import assemble
+
+    missing: dict[UUID, list[str]] = {}
+    for application_id, run in latest_runs.items():
+        if run.decision == "INSUFFICIENT_DATA":
+            missing[application_id] = (await assemble(db, application_id))["blockers"]
+
     def _row(application) -> AdminLoanApplicationRow:
         out = AdminLoanApplicationRow.model_validate(application)
         run = latest_runs.get(application.id)
@@ -215,6 +224,7 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
                         engine_version=run.engine_version,
                         params_version=run.params_version,
                         created_at=run.created_at,
+                        missing_inputs=missing.get(application.id, []),
                     )
                 }
             )

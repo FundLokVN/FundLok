@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -13,8 +14,17 @@ DOCUMENT_TYPE_RULES: dict[str, dict] = {
     "business_registration": {"extensions": {"pdf"}, "max_size": 25 * MB},
     "vat_tax_zip": {"extensions": {"zip"}, "max_size": 200 * MB},
     "financial_report": {"extensions": {"pdf"}, "max_size": 25 * MB},
-    "e_invoice_data": {"extensions": {"zip", "xlsx", "csv", "xml"}, "max_size": 100 * MB},
+    # One .zip: the folder of the tax portal's monthly invoice-list exports
+    # (.xlsx, one per month), parsed at confirm by
+    # app/uploads/parsers/einvoice.py. Loose .xlsx/.csv/.xml are refused: the
+    # parser reads the zip, and a single loose month is not a 12-month history.
+    "e_invoice_data": {"extensions": {"zip"}, "max_size": 100 * MB},
     "cic_report": {"extensions": {"pdf"}, "max_size": 25 * MB},
+    # Step 3: the SME's tax filings as HTKK produced them — one .zip of the
+    # folder (monthly VAT declaration zips + the year-end statement XML), or
+    # the statement XML alone. Parsed at confirm by
+    # app/uploads/parsers/tax_filings.py.
+    "tax_filings": {"extensions": {"zip", "xml"}, "max_size": 100 * MB},
 }
 
 EXTENSION_CONTENT_TYPES: dict[str, frozenset[str]] = {
@@ -162,3 +172,76 @@ class FileCommitRequest(BaseModel):
 class FileCommitResponse(BaseModel):
     file_id: UUID
     status: str
+
+
+class EInvoiceMonthOut(BaseModel):
+    period: str  # MM/YYYY
+    revenue_vnd: int
+
+
+class EInvoicePreviewOut(BaseModel):
+    """The step-2 prefill: what the SME's e-invoice zip says, before Send.
+
+    Advisory only. Confirm re-parses the stored file, so nothing here can plant
+    a figure the stored evidence does not support.
+    """
+
+    seller_tax_code: str
+    period_start: str
+    period_end: str
+    months_covered: int
+    monthly_revenue: list[EInvoiceMonthOut]
+    # Set only from 12 consecutive months: a partial year is not "the last 12
+    # months", and the SME types the figure instead.
+    revenue_last_12m: int | None
+    revenue_best_month: int | None
+    revenue_worst_month: int | None
+    conc_top1_pct: float | None
+    conc_top3_pct: float | None
+    warnings: list[dict[str, str]]
+
+
+class TaxFilingsPreviewOut(BaseModel):
+    """The step-3 prefill from the SME's tax filings, before Send. Advisory:
+    confirm re-parses the stored file."""
+
+    fiscal_year: int
+    regime: str
+    signed: bool
+    tax_code: str
+    cogs_y1: int
+    owner_withdrawal_pct: float | None
+    # Hints only: no filing splits costs into fixed and variable, so step 3
+    # asks the SME to type both and shows these beside the fields.
+    admin_expense_vnd: int
+    selling_expense_vnd: int
+    revenue_net_vnd: int
+    net_profit_vnd: int
+    interest_expense_vnd: int
+    vat_months: int
+    vat_period: str | None
+    warnings: list[dict[str, str]]
+
+
+class CicPreviewOut(BaseModel):
+    """What step 4 shows the moment the SME picks the CIC report. Advisory:
+    confirm re-parses the stored file. Amounts are CIC's own unit, million
+    đồng."""
+
+    subject_type: Literal["individual", "business"]
+    subject_name: str | None
+    score: int | None
+    rank: int | None
+    rank_band: list[int] | None
+    rank_label: Literal["very_good", "good", "average", "below_average", "poor"] | None
+    percentile: int | None
+    scored_on: str | None
+    queried_on: str | None
+    age_days: int | None
+    lenders: int
+    debt_total_vnd_million: float | None
+    debt_attention_vnd_million: float | None
+    debt_bad_vnd_million: float | None
+    negative_history: bool | None
+    signed: bool
+    warnings: list[dict[str, str]]

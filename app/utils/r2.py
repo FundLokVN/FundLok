@@ -53,6 +53,25 @@ def put_bytes(file_key: str, data: bytes, content_type: str, *, bucket: str | No
     )
 
 
+def get_bytes(file_key: str, *, max_bytes: int, bucket: str | None = None) -> bytes:
+    """Read an object into memory, refusing anything over ``max_bytes``.
+
+    The cap is read-side, not trusted from the object's metadata alone: the
+    body stream is cut at ``max_bytes + 1`` so an object larger than it claims
+    still cannot exhaust memory. Used where the backend must parse an upload
+    (e-invoice listings); the caller decides the ceiling.
+    """
+    resp = _client().get_object(Bucket=bucket or settings.R2_BUCKET, Key=file_key)
+    body = resp["Body"]
+    try:
+        data = body.read(max_bytes + 1)
+    finally:
+        body.close()
+    if len(data) > max_bytes:
+        raise ValueError(f"Object {file_key} exceeds {max_bytes} bytes")
+    return data
+
+
 def presign_put(file_key: str, content_type: str) -> str:
     """Presigned PUT URL; the client must send the same Content-Type header."""
     return _client().generate_presigned_url(

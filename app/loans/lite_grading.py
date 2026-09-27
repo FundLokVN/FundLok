@@ -48,6 +48,7 @@ import yaml
 
 from app.projects.engine_constraints import company_size_for_headcount, params
 from app.underwriting.grading import GradingInput, grade
+from app.underwriting.grading.curves import cubic
 
 __all__ = [
     "LiteBand",
@@ -317,11 +318,33 @@ def build_grading_input(
         tcp=None,
         sector_cagr_pct=float(sector["cagr_pct"]),
         ai_scores=ai_scores,
-        owner_withdrawal=_as_float(figures.get("owner_withdrawal_pct")),
+        owner_withdrawal=owner_withdrawal_score(_as_float(figures.get("owner_withdrawal_pct"))),
         cic_score=cic_score,
         kyc_aml_passed=ASSUMED_KYC_AML_PASSED,
         fraud_flags=(),
     )
+
+
+def owner_withdrawal_score(withdrawn_pct: Optional[float]) -> Optional[float]:
+    """The engine's owner-withdrawal input, from the share of profit withdrawn.
+
+    The SME states WHAT SHARE OF PROFIT the owner took out (0-100, higher is
+    worse). The engine does not want that: under deviations register D22 it
+    reads `owner_withdrawal` as an already-computed 0-100 SCORE (higher is
+    better) and applies no curve itself. Passing the percentage straight
+    through inverted the factor — withdrawing nothing scored 0, the worst
+    possible, and withdrawing everything scored 100, the best.
+
+    The conversion is the curve the params file already defines for this
+    factor (id 21, a cubic over the withdrawn RATIO, 0-1): 0% scores 100, 50%
+    about 68, 100% scores 0. Coefficients are read from the params, never
+    retyped, so a recalibration there is picked up here.
+    """
+    if withdrawn_pct is None:
+        return None
+    factor = next(f for f in params().factors if f.key == "owner_withdrawal")
+    ratio = min(1.0, max(0.0, withdrawn_pct / 100.0))
+    return cubic(ratio, a=factor.a, b=factor.b, c=factor.c, d=factor.d)
 
 
 def _as_int(value: object) -> Optional[int]:

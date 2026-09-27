@@ -18,9 +18,8 @@ class LoanApplicationCreateInline(BaseModel):
     requested_amount: int
     # Loan term in months. Optional so an existing client that predates the
     # field keeps working; validated against the engine's
-    # allowed_durations_months when present. NOTE: not persisted yet —
-    # `loan_applications` has no column for it. Adding one is a shared-model
-    # change (see docs/specs/underwriting/grading-input-sources.md §3.3).
+    # allowed_durations_months when present, and stored on
+    # `loan_applications.duration_months`.
     duration_months: int | None = None
     purpose: str | None = None
     repayment_preference: str | None = None
@@ -40,9 +39,9 @@ class ProjectCreate(BaseModel):
     legal_name: str
     tax_id: str | None = None
     industry: str | None = None
-    # Headcount as entered by the SME. `company_size` is derived from it below
-    # rather than trusted from the client. Neither is persisted yet — see
-    # docs/specs/underwriting/grading-input-sources.md §3.3.
+    # Headcount as entered by the SME, stored on `projects.employee_count`.
+    # `company_size` is derived from it below rather than trusted from the
+    # client, and is not stored (it is re-derived at grading time).
     employee_count: int | None = None
     company_size: str | None = None
     address: dict[str, Any] | None = None
@@ -84,6 +83,7 @@ class ProjectOut(BaseModel):
     industry: str | None
     address: dict[str, Any] | None
     incorporation_date: date | None
+    employee_count: int | None = None
     status: str
     created_at: datetime | None
     updated_at: datetime | None
@@ -95,6 +95,7 @@ class ProjectLoanApplicationOut(BaseModel):
     id: UUID
     project_id: UUID
     requested_amount: int
+    duration_months: int | None = None
     purpose: str | None
     repayment_preference: str | None
     status: str

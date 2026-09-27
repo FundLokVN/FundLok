@@ -19,6 +19,7 @@ from app.underwriting.service import (
     approve_score_run,
     get_score_run,
     get_supported_industries,
+    latest_score_run_id,
     replay_score_run,
     set_bank_rate,
     start_score_run,
@@ -47,14 +48,22 @@ async def post_score_run(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
+    previous = await latest_score_run_id(db, body.application_id)
     sr, grading_result = await start_score_run(db, body.application_id, body.mode)
     append_audit(
         db,
         entity_type="SCORE_RUN",
         entity_id=sr.id,
-        action="START",
+        # A re-run names the run it follows, so the audit log shows which
+        # score an operator replaced and when.
+        action="RERUN" if previous else "START",
         actor_id=current_user.id,
-        after_state={"status": sr.status, "decision": sr.decision, "application_id": str(sr.application_id)},
+        after_state={
+            "status": sr.status,
+            "decision": sr.decision,
+            "application_id": str(sr.application_id),
+            "previous_score_run_id": str(previous) if previous else None,
+        },
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()

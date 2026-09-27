@@ -321,3 +321,37 @@ class TestGradeLite:
             figures=figures(revenue_best_month=700_000_000, revenue_worst_month=90_000_000),
         )
         assert steady.rate_low_pct != swingy.rate_low_pct
+
+
+# --- owner withdrawal: the SME states a share, the engine wants a score -------
+
+
+def test_withdrawing_nothing_is_the_best_owner_withdrawal_score():
+    """The bug this pins: the percentage used to reach the engine unconverted,
+    and the engine reads the field as a 0-100 score where higher is better
+    (deviations register D22) — so 0% withdrawn scored 0, the worst."""
+    from app.loans.lite_grading import owner_withdrawal_score
+
+    assert owner_withdrawal_score(0) == 100.0
+    assert owner_withdrawal_score(100) == 0.0
+
+
+def test_owner_withdrawal_score_falls_as_more_is_withdrawn():
+    from app.loans.lite_grading import owner_withdrawal_score
+
+    scores = [owner_withdrawal_score(p) for p in (0, 25, 50, 75, 100)]
+    assert scores == sorted(scores, reverse=True)
+    assert 60 < owner_withdrawal_score(50) < 75
+
+
+def test_owner_withdrawal_blank_stays_blank():
+    from app.loans.lite_grading import owner_withdrawal_score
+
+    assert owner_withdrawal_score(None) is None
+
+
+def test_the_grading_input_carries_the_score_not_the_percentage():
+    from app.loans.lite_grading import owner_withdrawal_score
+
+    built = build_grading_input(**application(), figures=figures(owner_withdrawal_pct=25.0), cic_score=600)
+    assert built.owner_withdrawal == owner_withdrawal_score(25.0)
