@@ -206,12 +206,11 @@ class AdminLoanApplicationRow(BaseModel):
     decided_at: datetime | None
     decision_note: str | None
     created_at: datetime | None
-    # The wizard's uploads (legal charter, business registration, e-invoice
-    # data, CIC report). Empty when the SME has not reached those steps.
     documents: list[AdminApplicationDocument]
-    # The most recent run, so the operator sees the engine's answer before
-    # giving theirs. None until a score run exists.
     score_run: AdminScoreRunOut | None = None
+    # Required documents this request does not have yet (document_type keys),
+    # in wizard order. Approval is refused while any is listed.
+    missing_documents: list[str] = []
 
     model_config = {"from_attributes": True}
 

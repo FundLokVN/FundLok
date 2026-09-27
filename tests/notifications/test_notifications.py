@@ -16,7 +16,7 @@ from app.notifications.models import Notification
 
 @pytest.fixture
 def make_submitted_application(
-    make_user, make_project, make_loan_application, submit_loan_application
+    make_user, make_project, make_loan_application, submit_loan_application, attach_required_documents
 ):
     async def _make():
         sme = await make_user(role="SME")
@@ -26,6 +26,7 @@ def make_submitted_application(
         )
         resp = await submit_loan_application(sme, application["id"])
         assert resp.status_code == 200, resp.text
+        await attach_required_documents(application["id"])
         return sme, project, application
 
     return _make

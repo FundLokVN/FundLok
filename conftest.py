@@ -407,7 +407,46 @@ def run_and_lock_score(client):
 
 
 @pytest.fixture
-def make_contract(client):
+def attach_required_documents(db_session):
+    """Put every document the wizard requires on an application, as uploaded.
+
+    An operator approval is refused until they are all on file
+    (app/admin/service.py REQUIRED_DOCUMENT_TYPES), and most suites want an
+    approved application rather than a rehearsal of the upload flow — which is
+    covered in tests/uploads. Rows only: nothing is written to storage.
+    """
+    from app.admin.service import REQUIRED_DOCUMENT_TYPES
+    from app.lending.models import LoanApplicationDocument
+
+    from sqlalchemy import select
+
+    async def _attach(application_id: str, types=REQUIRED_DOCUMENT_TYPES):
+        app_id = uuid.UUID(str(application_id))
+        # Idempotent: a test that already attached some keeps them.
+        held = set((
+            await db_session.execute(
+                select(LoanApplicationDocument.document_type).where(
+                    LoanApplicationDocument.loan_application_id == app_id
+                )
+            )
+        ).scalars())
+        for document_type in types:
+            if document_type in held:
+                continue
+            db_session.add(LoanApplicationDocument(
+                loan_application_id=app_id,
+                document_type=document_type,
+                file_key=f"test/{app_id}/{document_type}",
+                original_filename=f"{document_type}.pdf",
+                status="UPLOADED",
+            ))
+        await db_session.commit()
+
+    return _attach
+
+
+@pytest.fixture
+def make_contract(client, attach_required_documents):
     """Take an application all the way to a contract.
 
     A contract needs BOTH approvals (migration 9f2c4a7d1e30): the engine's,
@@ -419,14 +458,12 @@ def make_contract(client):
     """
 
     async def _make(admin: dict, application_id: str, score_run_id: str):
+        await attach_required_documents(application_id)
         decision = await client.post(
             f"/admin/applications/{application_id}/decision",
             json={"decision": "APPROVED"},
             headers=auth_headers(admin),
         )
-        # 409 = already decided by the test itself, which is fine; anything
-        # else means the approval step is broken and the contract assertion
-        # below would report a confusing 409 instead.
         assert decision.status_code in (200, 409), decision.text
 
         resp = await client.post(

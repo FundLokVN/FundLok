@@ -23,7 +23,7 @@ from app.lending.models import LoanApplication
 
 @pytest.fixture
 def make_submitted_application(
-    make_user, make_project, make_loan_application, submit_loan_application
+    make_user, make_project, make_loan_application, submit_loan_application, attach_required_documents
 ):
     """An SME with a submitted application — the state an operator reviews."""
 
@@ -35,6 +35,8 @@ def make_submitted_application(
         )
         resp = await submit_loan_application(sme, application["id"])
         assert resp.status_code == 200, resp.text
+        # Complete, so an approval is not refused for missing documents.
+        await attach_required_documents(application["id"])
         return sme, project, application
 
     return _make
@@ -476,3 +478,99 @@ async def test_project_detail_shows_both_halves_of_the_gate(
     data = resp.json()
     assert data["kyb"]["status"] == STATUS_MANUAL_REVIEW
     assert data["applications"][0]["admin_approval"] == "PENDING"
+
+
+# --------------------------------------------------------------------------- #
+# Approval needs the required documents on file
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def make_incomplete_application(make_user, make_project, make_loan_application, submit_loan_application):
+    async def _make():
+        sme = await make_user(role="SME")
+        project = await make_project(sme)
+        application = await make_loan_application(sme, project["id"], requested_amount="500000000")
+        assert (await submit_loan_application(sme, application["id"])).status_code == 200
+        return sme, project, application
+
+    return _make
+
+
+async def _decide(client, admin, application_id, decision):
+    return await client.post(
+        f"/admin/applications/{application_id}/decision",
+        json={"decision": decision, "note": None},
+        headers=admin["headers"],
+    )
+
+
+async def test_approval_is_refused_while_documents_are_missing(
+    client, make_admin, make_incomplete_application, attach_required_documents
+):
+    _, _, application = await make_incomplete_application()
+    admin = await make_admin()
+    await attach_required_documents(application["id"], types=("legal_charter",))
+
+    resp = await _decide(client, admin, application["id"], "APPROVED")
+    assert resp.status_code == 409
+    assert resp.headers["x-error-code"] == "DOCUMENTS_MISSING"
+    for missing in ("business_registration", "e_invoice_data", "tax_filings", "cic_report"):
+        assert missing in resp.json()["detail"]
+    assert "legal_charter" not in resp.json()["detail"]
+
+
+async def test_a_pending_upload_is_not_a_document(
+    client, db_session, make_admin, make_incomplete_application, attach_required_documents
+):
+    _, _, application = await make_incomplete_application()
+    admin = await make_admin()
+    await attach_required_documents(application["id"])
+    from app.lending.models import LoanApplicationDocument
+
+    row = (
+        await db_session.execute(
+            select(LoanApplicationDocument).where(
+                LoanApplicationDocument.loan_application_id == uuid.UUID(application["id"]),
+                LoanApplicationDocument.document_type == "cic_report",
+            )
+        )
+    ).scalar_one()
+    row.status = "PENDING"
+    await db_session.commit()
+
+    resp = await _decide(client, admin, application["id"], "APPROVED")
+    assert resp.status_code == 409 and "cic_report" in resp.json()["detail"]
+
+
+async def test_the_verified_certificate_stands_in_for_the_registration(
+    client, db_session, make_admin, make_incomplete_application, attach_required_documents
+):
+    sme, _, application = await make_incomplete_application()
+    admin = await make_admin()
+    await attach_required_documents(
+        application["id"], types=("legal_charter", "e_invoice_data", "tax_filings", "cic_report")
+    )
+    db_session.add(GVerifyKybVerification(user_id=uuid.UUID(sme["id"]), status=STATUS_APPROVED, document_type="COMPANY"))
+    await db_session.commit()
+
+    resp = await _decide(client, admin, application["id"], "APPROVED")
+    assert resp.status_code == 200, resp.text
+
+
+async def test_an_incomplete_request_can_still_be_rejected(client, make_admin, make_incomplete_application):
+    _, _, application = await make_incomplete_application()
+    admin = await make_admin()
+
+    resp = await _decide(client, admin, application["id"], "REJECTED")
+    assert resp.status_code == 200, resp.text
+
+
+async def test_the_panel_lists_what_is_missing(client, make_admin, make_incomplete_application):
+    _, project, _ = await make_incomplete_application()
+    admin = await make_admin()
+
+    detail = (await client.get(f"/admin/projects/{project['id']}", headers=admin["headers"])).json()
+    assert detail["applications"][0]["missing_documents"] == [
+        "legal_charter", "business_registration", "e_invoice_data", "tax_filings", "cic_report",
+    ]

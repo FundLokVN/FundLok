@@ -29,7 +29,7 @@ from app.admin.schemas import (
     UNASSIGNED_ROLE,
     UserRow,
 )
-from app.gverify.models import STATUS_MANUAL_REVIEW, GVerifyKybVerification
+from app.gverify.models import STATUS_APPROVED, STATUS_MANUAL_REVIEW, GVerifyKybVerification
 from app.lending.models import (
     AuditLog,
     LoanApplication,
@@ -209,8 +209,18 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
         if run.decision == "INSUFFICIENT_DATA":
             missing[application_id] = (await assemble(db, application_id))["blockers"]
 
+    kyb = await _latest_kyb_for_project(db, project_id)
+    registration_verified = bool(kyb and kyb.is_approved)
+
     def _row(application) -> AdminLoanApplicationRow:
         out = AdminLoanApplicationRow.model_validate(application)
+        out = out.model_copy(
+            update={
+                "missing_documents": missing_documents(
+                    application.documents, registration_verified=registration_verified
+                )
+            }
+        )
         run = latest_runs.get(application.id)
         if run is not None:
             out = out.model_copy(
@@ -240,8 +250,31 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
         incorporation_date=project.incorporation_date,
         created_at=project.created_at,
         applications=[_row(row) for row in rows],
-        kyb=await _latest_kyb_for_project(db, project_id),
+        kyb=kyb,
     )
+
+
+# What the SME wizard requires, in wizard order. The business registration is
+# normally not uploaded: the wizard takes it from the verified business
+# certificate, so an approved verification covers it.
+REQUIRED_DOCUMENT_TYPES = (
+    "legal_charter",
+    "business_registration",
+    "e_invoice_data",
+    "tax_filings",
+    "cic_report",
+)
+
+
+def missing_documents(documents, *, registration_verified: bool) -> list[str]:
+    """Required document types without a confirmed upload. A PENDING row (a
+    presign whose object never landed) is not a document."""
+    uploaded = {d.document_type for d in documents if d.status == "UPLOADED"}
+    return [
+        t
+        for t in REQUIRED_DOCUMENT_TYPES
+        if t not in uploaded and not (t == "business_registration" and registration_verified)
+    ]
 
 
 async def _latest_kyb_for_project(
@@ -346,6 +379,27 @@ async def decide_application(
             status_code=409,
             detail=f"Application has already been {row.admin_approval.lower()}",
         )
+
+    if decision.value == "APPROVED":
+        owner_kyb = (
+            await db.execute(
+                select(GVerifyKybVerification)
+                .join(ProjectOwnership, ProjectOwnership.user_id == GVerifyKybVerification.user_id)
+                .where(ProjectOwnership.project_id == row.project_id)
+                .order_by(GVerifyKybVerification.created_at.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        missing = missing_documents(
+            row.documents,
+            registration_verified=bool(owner_kyb and owner_kyb.status == STATUS_APPROVED),
+        )
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Required documents missing: {', '.join(missing)}",
+                headers={"X-Error-Code": "DOCUMENTS_MISSING"},
+            )
 
     before = {"admin_approval": row.admin_approval, "status": row.status}
     row.admin_approval = decision.value
