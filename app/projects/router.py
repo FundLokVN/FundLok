@@ -11,6 +11,7 @@ from app.projects.schemas import (
     ProjectWithApplicationOut,
 )
 from app.projects.service import (
+    approval_for,
     create_project,
     get_my_projects,
     display_projects,
@@ -45,9 +46,9 @@ async def list_my_projects(
     for project in projects:
         out = ProjectWithApplicationOut.model_validate(project)
         if project.loan_applications:
-            out.loan_application = ProjectLoanApplicationOut.model_validate(
-                project.loan_applications[0]
-            )
+            application = project.loan_applications[0]
+            out.loan_application = ProjectLoanApplicationOut.model_validate(application)
+            out.loan_application.approval = await approval_for(db, application)
         results.append(out)
     return results
 

@@ -91,6 +91,31 @@ class ProjectOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class LoanApprovalOut(BaseModel):
+    """What the applicant is shown once an operator has approved the request.
+
+    The business score and reference rate are the STORED result of the score
+    run the operator decided on (INV-5: never recomputed here). A decided
+    request cannot be re-scored, so these do not change after approval. The
+    repayment figures follow INV-2 (flat interest, charged once); the daily
+    amount is an estimate on the params' working-day count until the
+    business-day calendar exists (INV-6). The offer the SME signs is the
+    binding version.
+
+    Deliberately absent: the bank reference rate, factor scores and every
+    other pricing input — internal, never on an applicant surface.
+    """
+
+    approved_at: datetime | None
+    business_score: float | None
+    reference_rate_pct: float | None
+    duration_months: int | None
+    total_repayment_vnd: int | None
+    estimated_daily_repayment_vnd: int | None
+    engine_version: str | None
+    params_version: str | None
+
+
 class ProjectLoanApplicationOut(BaseModel):
     id: UUID
     project_id: UUID
@@ -106,12 +131,14 @@ class ProjectLoanApplicationOut(BaseModel):
     # the admin panel now says out loud that the applicant reads it -- an
     # operator must never be surprised by where their words end up.
     #
-    # `admin_approval` is NOT exposed: it is the internal half of the
-    # two-approval gate, and `status` already carries what the applicant is
-    # entitled to know about the outcome.
+    # `admin_approval` itself is NOT exposed. An approval does not move
+    # `status` (it is one half of the two-approval gate), so the applicant
+    # learns of it through `approval` below, which carries the score and rate
+    # the decision was made on.
     decision_note: str | None = None
     decided_at: datetime | None = None
     documents: list[LoanApplicationDocumentOut] = []
+    approval: LoanApprovalOut | None = None
 
     model_config = {"from_attributes": True}
 

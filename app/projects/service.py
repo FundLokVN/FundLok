@@ -140,3 +140,58 @@ async def display_projects(db: AsyncSession, current_user: User):
         )
     )
     return result.scalars().all()
+
+
+
+async def approval_for(db: AsyncSession, application):
+    """The applicant-facing summary of an operator approval, or None.
+
+    Uses the score run the decision rests on: a LOCKED run when one exists,
+    otherwise the latest run that produced a grade. Re-runs are refused once
+    a request is decided, so that run is final. An approval made without any
+    graded run still returns, with the score fields empty.
+    """
+    from decimal import ROUND_HALF_UP, Decimal
+
+    from app.lending.models import ScoreRun
+    from app.projects.engine_constraints import params
+    from app.projects.schemas import LoanApprovalOut
+    from app.underwriting.models import ScoreRunInput
+
+    if application.admin_approval != "APPROVED":
+        return None
+    runs = (
+        await db.execute(
+            select(ScoreRun)
+            .where(ScoreRun.application_id == application.id, ScoreRun.final_grade_precise.is_not(None))
+            .order_by(ScoreRun.created_at.desc())
+        )
+    ).scalars().all()
+    run = next((r for r in runs if r.status == "LOCKED"), runs[0] if runs else None)
+
+    duration = application.duration_months
+    total = daily = None
+    if run is not None:
+        snapshot = (
+            await db.execute(select(ScoreRunInput).where(ScoreRunInput.score_run_id == run.id))
+        ).scalar_one_or_none()
+        # The term the rate was priced on.
+        duration = snapshot.duration_months if snapshot else duration
+    if run is not None and run.interest_rate_pct is not None and duration:
+        # INV-2: flat interest on the principal, charged once.
+        rate = Decimal(str(run.interest_rate_pct)) / Decimal("100")
+        total_dec = Decimal(int(application.requested_amount)) * (1 + rate * Decimal(duration) / Decimal(12))
+        days = Decimal(str(params().repayment["working_days_per_month"])) * Decimal(duration)
+        total = int(total_dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        daily = int((total_dec / days).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    return LoanApprovalOut(
+        approved_at=application.decided_at,
+        business_score=round(float(run.final_grade_precise), 2) if run else None,
+        reference_rate_pct=round(float(run.interest_rate_pct), 2) if run and run.interest_rate_pct is not None else None,
+        duration_months=duration,
+        total_repayment_vnd=total,
+        estimated_daily_repayment_vnd=daily,
+        engine_version=run.engine_version if run else None,
+        params_version=run.params_version if run else None,
+    )
