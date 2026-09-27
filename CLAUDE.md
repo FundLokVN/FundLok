@@ -226,3 +226,6 @@ Edward is CTO and backend/architecture owner. **Edward does not write UI code.**
 - [x] Internal ledger foundation — double-entry ledger, custodial/ledger accounts, immutability trigger (spec ACCEPTED `docs/specs/ledger/ledger-foundation.md`, ADR-003; implemented in `app/ledger/` + migration `862160bce972`, merged PR #18)
 - [ ] Banking Open API integration (Circular 64) + `bank_transactions` + reconciliation
 - [ ] Compliance module — Decree 94 exposure caps, CIC data, reporting (ADR-004)
+
+**MVP scope (decided 27 Sep 2026)**
+MVP is the full platform happy path, end to end: registration → KYC/KYB → project/listing creation → search/browse → investor order (invest) → disbursement → repayment collection → closing. Repayment includes extension/relief re-pricing (`docs/specs/repayment_schedule/fixed-daily-repayment-mechanism-v1.4.md`, D23) but **not** its fee (D27, deferred). Explicitly **out of scope for MVP**: all lateness/arrears handling — no `ARREARS_WARNING`, `ARREARS`, `ACCELERATED`, `IN_RECOVERY`, or `WRITTEN_OFF` states, no late-rate interest. MVP's practical repayment state machine is `DRAFT → APPROVED → DISBURSED → ACTIVE ⇄ UNDER_REVIEW → SETTLED` only.
