@@ -1,9 +1,10 @@
 import math
+import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.projects.engine_constraints import (
     params,
@@ -307,3 +308,155 @@ class RateInquiriesAdminListResponse(BaseModel):
     page: int
     page_size: int
     items: list[RateInquiryAdminItem]
+
+
+# --------------------------------------------------------------------------- #
+# Investor tab
+# --------------------------------------------------------------------------- #
+
+# Floor and ceiling on the amount an investor types. The prototype only had
+# min="1"; a 1-dong commitment tells sales nothing and an unbounded one is the
+# BIGINT overflow already fixed on the SME side. 1 trillion VND is far above
+# any retail or HNW ticket this page is for.
+INVESTOR_AMOUNT_MIN_VND = 1_000_000
+INVESTOR_AMOUNT_MAX_VND = 1_000_000_000_000
+
+_PHONE_ALLOWED = re.compile(r"^[0-9+()\s.\-]{8,20}$")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+class InvestorChoices(BaseModel):
+    """The four inputs the yield depends on. No personal data."""
+
+    amount_vnd: int = Field(..., ge=INVESTOR_AMOUNT_MIN_VND, le=INVESTOR_AMOUNT_MAX_VND)
+    commitment_months: Literal[6, 12]
+    risk_tier: Literal["conservative", "balanced", "growth"]
+    reinvestment_cadence: Literal["none", "quarterly", "monthly", "weekly", "daily"]
+
+    @field_validator("amount_vnd", mode="before")
+    @classmethod
+    def validate_amount(cls, v: Any) -> int:
+        return _sanitize_money_value(v)
+
+
+class InvestorLeadCreate(InvestorChoices):
+    """Pressing "Calculate my target yield": the lead-capture moment."""
+
+    full_name: str = Field(..., min_length=2, max_length=120)
+    email: EmailStr = Field(..., max_length=254)
+    phone: str | None = Field(default=None, max_length=20)
+    locale: Literal["vi", "en"] | None = None
+
+    # Must be literally true. The gate ("this is an illustration, not an
+    # offer") is the page's compliance posture, and contact consent is what
+    # makes storing a name and email lawful under Decree 13/2023. A client that
+    # skipped either gets a 422, not a quietly stored row.
+    acknowledged_illustrative: Literal[True]
+    consent_contact: Literal[True]
+
+    session_id: str | None = Field(default=None, max_length=128)
+    turnstile_token: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        # Shown to staff in the admin table and possibly pasted into email; a
+        # name carrying newlines or control characters is either broken input
+        # or an attempt to inject into whatever consumes it next.
+        cleaned = " ".join(v.split())
+        if _CONTROL_CHARS.search(v) or len(cleaned) < 2:
+            raise ValueError("full_name must be a plain name")
+        return cleaned
+
+    @field_validator("email")
+    @classmethod
+    def normalise_email(cls, v: str) -> str:
+        return v.strip().lower()
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def validate_phone(cls, v: Any) -> str | None:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        if not isinstance(v, str) or not _PHONE_ALLOWED.match(v.strip()):
+            raise ValueError("phone must be digits, spaces, +, (), . or -")
+        digits = sum(ch.isdigit() for ch in v)
+        if not 8 <= digits <= 15:
+            raise ValueError("phone must contain 8 to 15 digits")
+        return v.strip()
+
+
+class InvestorEstimateOut(BaseModel):
+    """The published walk-down. Deliberately absent: the internal rating each
+    tier maps to and the bank reference rate — together with `loan_rate_pct`
+    they solve the pricing formula."""
+
+    loan_rate_pct: float
+    expected_loss_pct: float
+    fee_pct: float
+    net_per_loan_pct: float
+    net_apy_pct: float
+    estimated_return_vnd: int
+    avg_loan_months: int
+    capital_turns: float
+
+
+class InvestorTierOut(BaseModel):
+    risk_tier: Literal["conservative", "balanced", "growth"]
+    loan_rate_pct: float
+
+
+class InvestorTiersResponse(BaseModel):
+    """For the tier hint shown BEFORE calculating ("loans priced around
+    14.0% a year"). A loan rate, never the yield — the yield stays behind the
+    lead capture, as the prototype specifies."""
+
+    tiers: list[InvestorTierOut]
+
+
+class InvestorLeadResponse(BaseModel):
+    lead_id: UUID
+    reference: str
+    estimate: InvestorEstimateOut
+
+
+class InvestorSignupResponse(BaseModel):
+    reference: str
+    signed_up_at: datetime
+
+
+class InvestorLeadAdminItem(BaseModel):
+    id: UUID
+    reference: str
+    created_at: datetime
+    full_name: str
+    email: str
+    phone: str | None
+    locale: str | None
+    amount_vnd: int
+    commitment_months: int
+    risk_tier: str
+    reinvestment_cadence: str
+    bank_rate_pct: float
+    loan_rate_pct: float
+    net_per_loan_pct: float
+    net_apy_pct: float
+    estimated_return_vnd: int
+    acknowledged_illustrative_at: datetime
+    consented_contact_at: datetime
+    signed_up_at: datetime | None
+    signup_amount_vnd: int | None
+    signup_commitment_months: int | None
+    signup_risk_tier: str | None
+    signup_reinvestment_cadence: str | None
+    signup_net_apy_pct: float | None
+    session_id: str | None
+    ip_address: str | None
+    user_agent: str | None
+
+
+class InvestorLeadsAdminListResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    items: list[InvestorLeadAdminItem]

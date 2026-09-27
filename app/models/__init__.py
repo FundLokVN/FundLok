@@ -36,4 +36,4 @@ from app.repayment_schedule.models import (  # noqa: F401
 )
 from app.underwriting.models import BankRateConfig, ScoreRunInput  # noqa: F401
 from app.notifications.models import Notification  # noqa: F401
-from app.rates.models import RateInquiry  # noqa: F401
+from app.rates.models import InvestorRateInquiry, RateInquiry  # noqa: F401

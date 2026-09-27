@@ -5,7 +5,16 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.rates import investor_service
 from app.rates.schemas import (
+    InvestorChoices,
+    InvestorEstimateOut,
+    InvestorLeadAdminItem,
+    InvestorLeadCreate,
+    InvestorLeadResponse,
+    InvestorLeadsAdminListResponse,
+    InvestorSignupResponse,
+    InvestorTiersResponse,
     RateCalculationRequest,
     RateCalculationResponse,
     RateInquiriesAdminListResponse,
@@ -118,3 +127,85 @@ async def get_rate_inquiry_detail(
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inquiry not found")
     return item
+
+
+# --------------------------------------------------------------------------- #
+# Investor tab — see app/rates/investor_service.py for the flow
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/investor/tiers", response_model=InvestorTiersResponse)
+async def investor_tiers(db: AsyncSession = Depends(get_db)):
+    """Loan rate per risk tier, for the hint under the tier buttons."""
+    return await investor_service.list_tiers(db)
+
+
+@router.post(
+    "/investor/leads",
+    response_model=InvestorLeadResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_investor_lead(
+    body: InvestorLeadCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """"Calculate my target yield": stores the lead, returns the first estimate.
+
+    Captcha-checked: it is public, unauthenticated, and writes a row holding
+    personal data.
+    """
+    await verify_turnstile_token_async(body.turnstile_token)
+    user_agent = request.headers.get("user-agent")
+    return await investor_service.create_lead(
+        db,
+        body,
+        client_ip=_extract_client_ip(request),
+        user_agent=user_agent[:_MAX_USER_AGENT] if user_agent else None,
+    )
+
+
+@router.post("/investor/leads/{lead_id}/estimate", response_model=InvestorEstimateOut)
+async def estimate_investor_lead(
+    lead_id: UUID,
+    body: InvestorChoices,
+    db: AsyncSession = Depends(get_db),
+):
+    """Live re-estimate after the first calculation. Writes nothing."""
+    return await investor_service.estimate_for_lead(db, lead_id, body)
+
+
+@router.post("/investor/leads/{lead_id}/signup", response_model=InvestorSignupResponse)
+async def sign_up_investor_lead(
+    lead_id: UUID,
+    body: InvestorChoices,
+    db: AsyncSession = Depends(get_db),
+):
+    """"Sign up for more information". Idempotent: the first sign-up stands."""
+    return await investor_service.sign_up(db, lead_id, body)
+
+
+# Admin only, and only under /admin: these rows hold names, emails and phone
+# numbers, so unlike the SME inquiry routes there is no /api/v1 alias.
+@admin_rates_router.get("/investor-leads", response_model=InvestorLeadsAdminListResponse)
+async def list_investor_leads(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=120),
+    risk_tier: str | None = Query(default=None, pattern=r"^(conservative|balanced|growth)$"),
+    signed_up: bool | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    return await investor_service.list_leads_admin(
+        db, page=page, page_size=page_size, search=search, risk_tier=risk_tier, signed_up=signed_up
+    )
+
+
+@admin_rates_router.get("/investor-leads/{lead_id}", response_model=InvestorLeadAdminItem)
+async def get_investor_lead(
+    lead_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    return await investor_service.get_lead_admin(db, lead_id)
