@@ -11,6 +11,8 @@ back out of the engine in the same test.
 import uuid
 from decimal import Decimal
 
+from uuid import UUID
+
 import pytest
 from sqlalchemy import select
 
@@ -49,6 +51,9 @@ def sample_inquiry_payload(**overrides) -> dict:
             "top_1_customer_share": 18.0,
             "top_3_customer_share": 41.0,
         },
+        "email": "Owner@Example.vn",
+        "phone": "0901 234 567",
+        "consent_contact": True,
     }
     body.update(overrides)
     return body
@@ -532,6 +537,10 @@ async def test_admin_get_endpoint_success_with_formatted_table_fields(client, ma
     assert item["estimated_rate_min"] == quoted["rate_range"]["min_rate_monthly"]
     assert item["estimated_rate_max"] == quoted["rate_range"]["max_rate_monthly"]
     assert item["risk_tier"] == quoted["risk_profile"]["tier"]
+    # And how to reach them.
+    assert item["email"] == "owner@example.vn"
+    assert item["phone"] == "0901 234 567"
+    assert item["consented_contact_at"] is not None
 
 
 async def test_admin_get_inquiry_by_id(client, make_admin):
@@ -812,3 +821,39 @@ async def test_no_bank_rate_in_force_is_a_503(client, monkeypatch):
     resp = await client.post("/api/v1/rates/calculate", json=sample_inquiry_payload())
     assert resp.status_code == 503
     assert resp.headers["x-error-code"] == "BANK_RATE_UNAVAILABLE"
+
+
+
+# --------------------------------------------------------------------------- #
+# Contact: email and phone, with consent
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_inquiry_keeps_how_to_reach_the_visitor(client, db_session):
+    from sqlalchemy import select
+
+    from app.rates.models import RateInquiry
+
+    resp = await client.post("/api/v1/rates/calculate", json=sample_inquiry_payload())
+    assert resp.status_code == 200, resp.text
+    row = (
+        await db_session.execute(select(RateInquiry).where(RateInquiry.id == UUID(resp.json()["inquiry_id"])))
+    ).scalar_one()
+    assert (row.email, row.phone) == ("owner@example.vn", "0901 234 567")
+    assert row.consented_contact_at is not None
+
+
+@pytest.mark.parametrize("change", [
+    {"email": None}, {"email": "not-an-email"},
+    {"phone": None}, {"phone": ""}, {"phone": "1234"}, {"phone": "call me maybe"},
+    {"consent_contact": False}, {"consent_contact": None},
+])
+async def test_contact_and_consent_are_required(client, change):
+    body = sample_inquiry_payload()
+    for key, value in change.items():
+        if value is None:
+            body.pop(key)
+        else:
+            body[key] = value
+    resp = await client.post("/api/v1/rates/calculate", json=body)
+    assert resp.status_code == 422, resp.text

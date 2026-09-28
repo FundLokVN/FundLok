@@ -1,5 +1,6 @@
 import ipaddress
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -260,6 +261,9 @@ async def process_rate_calculation(
         estimated_rate_max=rate_range.max_rate_monthly,
         risk_tier=risk_profile.tier,
         calculated_monthly_payment=stored_monthly_payment,
+        email=body.email,
+        phone=body.phone,
+        consented_contact_at=datetime.now(timezone.utc),
     )
     db.add(inquiry)
     await db.commit()
@@ -353,6 +357,9 @@ def format_inquiry_row(row: RateInquiry) -> RateInquiryAdminItem:
         session_id=row.session_id,
         ip_address=str(row.ip_address) if row.ip_address else None,
         user_agent=row.user_agent,
+        email=row.email,
+        phone=row.phone,
+        consented_contact_at=row.consented_contact_at,
     )
 
 

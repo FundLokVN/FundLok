@@ -139,9 +139,6 @@ async def public_rate_estimate(db: AsyncSession, body: PublicRateEstimateIn) -> 
                 "cogs_y1": body.cogs_y1,
                 "fixed_cost_y1": body.fixed_cost_y1,
                 "variable_cost_excl_cogs_y1": body.variable_cost_excl_cogs_y1,
-                # Not asked on a public form: it is a question about the owner's
-                # personal draw, which is too intrusive for a calculator and only
-                # refines the score rather than enabling it.
                 "owner_withdrawal_pct": None,
                 "conc_top1_pct": body.conc_top1_pct,
                 "conc_top3_pct": body.conc_top3_pct,

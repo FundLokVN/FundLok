@@ -97,6 +97,27 @@ class SeasonalityInput(BaseModel):
         return _sanitize_pct_value(v)
 
 
+_PHONE_ALLOWED = re.compile(r"^[0-9+()\s.\-]{8,20}$")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def normalise_contact_email(v: str) -> str:
+    return v.strip().lower()
+
+
+def validate_contact_phone(v: Any) -> str:
+    """A phone number a person could be called on: 8-15 digits, with the
+    separators people actually type. Shared by both rate-page forms."""
+    if not isinstance(v, str) or not v.strip():
+        raise ValueError("phone is required")
+    if not _PHONE_ALLOWED.match(v.strip()):
+        raise ValueError("phone must be digits, spaces, +, (), . or -")
+    digits = sum(ch.isdigit() for ch in v)
+    if not 8 <= digits <= 15:
+        raise ValueError("phone must contain 8 to 15 digits")
+    return v.strip()
+
+
 class RateCalculationRequest(BaseModel):
     # `validate_assignment` matters here, it is not decoration. The router used
     # to backfill `session_id` from a header or cookie by plain attribute
@@ -122,6 +143,14 @@ class RateCalculationRequest(BaseModel):
     seasonality: SeasonalityInput | None = None
     session_id: str | None = Field(default=None, max_length=128)
 
+    # Contact, so the team can follow up on the estimate. Consent must be
+    # literally true: it is what makes storing an email and phone lawful
+    # under Decree 13/2023, as on the investor form. A client that skipped it
+    # gets a 422, not a quietly stored row.
+    email: EmailStr = Field(..., max_length=254)
+    phone: str = Field(..., max_length=20)
+    consent_contact: Literal[True]
+
     # Cloudflare Turnstile. Optional on the type so the field can be absent in
     # tests and in local dev, where CLOUDFLARE_TURNSTILE_SECRET_KEY is unset and
     # `verify_turnstile_token` no-ops. In any environment that HAS the secret
@@ -133,6 +162,16 @@ class RateCalculationRequest(BaseModel):
     lowest_month_revenue: int | None = Field(default=None, ge=0, le=FIGURE_MAX_VND)
     top_1_customer_share: float | None = Field(default=None, ge=0, le=100)
     top_3_customer_share: float | None = Field(default=None, ge=0, le=100)
+
+    @field_validator("email")
+    @classmethod
+    def _normalise_email(cls, v: str) -> str:
+        return normalise_contact_email(v)
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def _validate_phone(cls, v: Any) -> str:
+        return validate_contact_phone(v)
 
     @field_validator("industry")
     @classmethod
@@ -299,6 +338,10 @@ class RateInquiryAdminItem(BaseModel):
     session_id: str | None = None
     ip_address: str | None = None
     user_agent: str | None = None
+    # Contact for follow-up. Null on inquiries made before the form asked.
+    email: str | None = None
+    phone: str | None = None
+    consented_contact_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -321,8 +364,6 @@ class RateInquiriesAdminListResponse(BaseModel):
 INVESTOR_AMOUNT_MIN_VND = 1_000_000
 INVESTOR_AMOUNT_MAX_VND = 1_000_000_000_000
 
-_PHONE_ALLOWED = re.compile(r"^[0-9+()\s.\-]{8,20}$")
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class InvestorChoices(BaseModel):
@@ -344,7 +385,8 @@ class InvestorLeadCreate(InvestorChoices):
 
     full_name: str = Field(..., min_length=2, max_length=120)
     email: EmailStr = Field(..., max_length=254)
-    phone: str | None = Field(default=None, max_length=20)
+    # Required, like the borrower form: the team follows up by phone.
+    phone: str = Field(..., max_length=20)
     locale: Literal["vi", "en"] | None = None
 
     # Must be literally true. The gate ("this is an illustration, not an
@@ -371,19 +413,12 @@ class InvestorLeadCreate(InvestorChoices):
     @field_validator("email")
     @classmethod
     def normalise_email(cls, v: str) -> str:
-        return v.strip().lower()
+        return normalise_contact_email(v)
 
     @field_validator("phone", mode="before")
     @classmethod
-    def validate_phone(cls, v: Any) -> str | None:
-        if v is None or (isinstance(v, str) and not v.strip()):
-            return None
-        if not isinstance(v, str) or not _PHONE_ALLOWED.match(v.strip()):
-            raise ValueError("phone must be digits, spaces, +, (), . or -")
-        digits = sum(ch.isdigit() for ch in v)
-        if not 8 <= digits <= 15:
-            raise ValueError("phone must contain 8 to 15 digits")
-        return v.strip()
+    def validate_phone(cls, v: Any) -> str:
+        return validate_contact_phone(v)
 
 
 class InvestorEstimateOut(BaseModel):

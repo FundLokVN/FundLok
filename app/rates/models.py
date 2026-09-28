@@ -53,6 +53,12 @@ class RateInquiry(Base):
     risk_tier = Column(String(20), nullable=True)
     calculated_monthly_payment = Column(BigInteger, nullable=True)
 
+    # Contact for follow-up (sales and marketing), given with consent on the
+    # form. Nullable: inquiries made before the form asked have none.
+    email = Column(String(254), nullable=True)
+    phone = Column(String(20), nullable=True)
+    consented_contact_at = Column(DateTime(timezone=True), nullable=True)
+
     # Metadata
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 

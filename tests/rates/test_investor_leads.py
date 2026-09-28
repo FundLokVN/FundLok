@@ -222,11 +222,12 @@ async def test_invalid_lead_input_rejected(client, db_session, overrides):
     assert len(after) == len(before), "a rejected request must not store a row"
 
 
-async def test_phone_is_optional(client):
+async def test_phone_is_required(client):
+    """Both rate-page forms collect a phone: the team follows up by phone."""
     body = lead_payload()
     del body["phone"]
-    assert (await client.post(LEADS, json=body)).status_code == 201
-    assert (await client.post(LEADS, json=lead_payload(phone=""))).status_code == 201
+    assert (await client.post(LEADS, json=body)).status_code == 422
+    assert (await client.post(LEADS, json=lead_payload(phone=""))).status_code == 422
 
 
 async def test_captcha_is_enforced_when_configured(client, monkeypatch):
