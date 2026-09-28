@@ -261,6 +261,7 @@ def build_grading_input(
     duration_months: int,
     figures: Mapping[str, Optional[float]],
     cic_score: int,
+    bank_rate_pct: float,
 ) -> GradingInput:
     """Assemble a `GradingInput` from the Lite figures plus the application form.
 
@@ -322,6 +323,10 @@ def build_grading_input(
         cic_score=cic_score,
         kyc_aml_passed=ASSUMED_KYC_AML_PASSED,
         fraud_flags=(),
+        # Required, and passed explicitly: the dataclass default is for
+        # hand-built test inputs, and an estimate priced on it drifts from the
+        # bank_rate_config row a real score run uses (app/rates/bank_rate.py).
+        bank_rate_pct=bank_rate_pct,
     )
 
 
@@ -364,8 +369,13 @@ def grade_lite(
     loan_size_vnd: Decimal,
     duration_months: int,
     figures: Mapping[str, Optional[float]],
+    bank_rate_pct: float,
 ) -> LiteBand:
-    """Run the engine twice across the CIC range and return the resulting band."""
+    """Run the engine twice across the CIC range and return the resulting band.
+
+    `bank_rate_pct` is the bank_rate_config rate in force
+    (app/rates/bank_rate.py::bank_rate_in_force), the one score runs use.
+    """
     p = params()
 
     def run(cic: int):
@@ -378,6 +388,7 @@ def grade_lite(
             duration_months=duration_months,
             figures=figures,
             cic_score=cic,
+            bank_rate_pct=bank_rate_pct,
         )
         try:
             return grade(inputs, p)

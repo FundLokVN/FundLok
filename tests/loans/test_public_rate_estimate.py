@@ -193,3 +193,23 @@ async def test_nothing_is_persisted(client, db_session):
     ).scalar()
 
     assert before == after
+
+
+
+async def test_the_public_estimate_follows_the_bank_rate_config(client, monkeypatch):
+    """Priced on the bank_rate_config row, like a score run: a higher rate in
+    the table raises the quoted band."""
+    from types import SimpleNamespace
+
+    from app.rates import bank_rate
+
+    at_12 = (await post(client)).json()
+
+    async def _fourteen(db):
+        return SimpleNamespace(rate_pct=14.0)
+
+    monkeypatch.setattr(bank_rate, "get_current_bank_rate", _fourteen)
+    at_14 = (await post(client)).json()
+    assert at_14["rate_low_pct"] > at_12["rate_low_pct"]
+    assert at_14["rate_high_pct"] > at_12["rate_high_pct"]
+    assert at_14["rate_high_pct"] <= 20.0

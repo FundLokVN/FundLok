@@ -58,6 +58,8 @@ def band_for(payload: dict):
     """The engine's own answer for a payload, for parity assertions."""
     seasonality = payload.get("seasonality") or {}
     return grade_lite(
+        # The seeded bank_rate_config row the endpoint reads.
+        bank_rate_pct=12.0,
         company_code="rate-calculator",
         industry=payload["industry"],
         employee_count=payload["employee_count"],
@@ -763,3 +765,50 @@ async def test_admin_industry_filter_escapes_like_wildcards(client, make_admin):
     )
     assert resp.status_code == 200
     assert resp.json()["total"] == 0
+
+
+
+# --------------------------------------------------------------------------- #
+# The bank rate: bank_rate_config only
+# --------------------------------------------------------------------------- #
+# Patched rather than inserted: conftest keeps bank_rate_config between tests
+# (seed reference data), so a written row would reprice the rest of the run.
+
+
+async def test_the_borrower_quote_follows_the_bank_rate_config(client, monkeypatch):
+    """Changing the rate in the table moves the borrower estimate, exactly as
+    it moves an admin score run. It once read the GradingInput dataclass
+    default instead, so only a code change could move it."""
+    from types import SimpleNamespace
+
+    from app.rates import bank_rate
+
+    payload = sample_inquiry_payload()
+
+    async def _fourteen(db):
+        return SimpleNamespace(rate_pct=14.0)
+
+    monkeypatch.setattr(bank_rate, "get_current_bank_rate", _fourteen)
+    resp = await client.post("/api/v1/rates/calculate", json=payload)
+    assert resp.status_code == 200, resp.text
+
+    band = band_for(payload)  # at the seeded 12.0
+    at_14 = resp.json()["data"]["rate_range"]
+    # rate = bank + (cap - bank) * (100 - grade) / 100: same grades, new bank.
+    assert at_14["apr_min"] == round(14 + (RATE_CAP_PCT - 14) * (100 - band.grade_high) / 100, 2)
+    assert at_14["apr_max"] == round(14 + (RATE_CAP_PCT - 14) * (100 - band.grade_low) / 100, 2)
+    assert at_14["apr_min"] > round(band.rate_low_pct, 2)
+
+
+async def test_no_bank_rate_in_force_is_a_503(client, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.rates import bank_rate
+
+    async def _none(db):
+        raise HTTPException(status_code=500, detail="no bank_rate_config row")
+
+    monkeypatch.setattr(bank_rate, "get_current_bank_rate", _none)
+    resp = await client.post("/api/v1/rates/calculate", json=sample_inquiry_payload())
+    assert resp.status_code == 503
+    assert resp.headers["x-error-code"] == "BANK_RATE_UNAVAILABLE"

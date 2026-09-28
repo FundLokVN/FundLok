@@ -103,7 +103,7 @@ async def submit_application(db: AsyncSession, application_id: UUID, current_use
     return row
 
 
-async def public_rate_estimate(body: PublicRateEstimateIn) -> PublicRateEstimateOut:
+async def public_rate_estimate(db: AsyncSession, body: PublicRateEstimateIn) -> PublicRateEstimateOut:
     """An indicative band for an anonymous landing-page visitor.
 
     No database, no account, no stored application -- the visitor's answers go
@@ -116,8 +116,13 @@ async def public_rate_estimate(body: PublicRateEstimateIn) -> PublicRateEstimate
     the browser receives a rate band, a score band and the assumptions behind
     them, and nothing it could reconstruct the pricing from.
     """
+    from app.rates.bank_rate import bank_rate_in_force
+
+    # Read-only: the rate in force, the same one a score run is priced on.
+    bank_rate_pct = await bank_rate_in_force(db)
     try:
         band = grade_lite(
+            bank_rate_pct=bank_rate_pct,
             # No company exists yet, so there is no tax id to carry. The engine
             # never reads this field -- it is a label on GradingInput.
             company_code="public-estimate",

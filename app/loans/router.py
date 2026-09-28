@@ -115,7 +115,7 @@ async def submit_loan_application(
     # proxy log or a browser history entry.
     status_code=200,
 )
-async def post_public_rate_estimate(body: PublicRateEstimateIn):
+async def post_public_rate_estimate(body: PublicRateEstimateIn, db: AsyncSession = Depends(get_db)):
     """Indicative rate for a visitor with no account (landing page calculator).
 
     Deliberately unauthenticated and deliberately stateless -- it reads nothing
@@ -126,4 +126,4 @@ async def post_public_rate_estimate(body: PublicRateEstimateIn):
     band, a score band and the assumptions behind them; nothing it contains can
     reconstruct the pricing.
     """
-    return await public_rate_estimate(body)
+    return await public_rate_estimate(db, body)

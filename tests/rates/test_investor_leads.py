@@ -110,30 +110,33 @@ async def test_loan_rate_follows_the_board_rate(client, monkeypatch):
     written here would reprice every later test in the session."""
     from types import SimpleNamespace
 
-    from app.rates import investor_service
+    from app.rates import bank_rate
 
     async def _ten_percent(db):
         return SimpleNamespace(rate_pct=10.0)
 
-    monkeypatch.setattr(investor_service, "get_current_bank_rate", _ten_percent)
+    monkeypatch.setattr(bank_rate, "get_current_bank_rate", _ten_percent)
     resp = await client.get("/api/v1/rates/investor/tiers")
     rates = {t["risk_tier"]: t["loan_rate_pct"] for t in resp.json()["tiers"]}
     # 10 + (20 - 10) * (100 - 75) / 100
     assert rates["balanced"] == 12.5
 
 
-async def test_missing_board_rate_falls_back_instead_of_500(client, monkeypatch):
-    """A public page shows a default-rate illustration, not a 500."""
+async def test_missing_board_rate_is_a_503_not_a_default(client, monkeypatch):
+    """bank_rate_config is the only source. Quoting on the params default
+    would show an investor a rate no score run uses, so a missing row is a
+    brief, logged outage instead."""
     from fastapi import HTTPException
 
-    from app.rates import investor_service
+    from app.rates import bank_rate
 
     async def _none_in_force(db):
         raise HTTPException(status_code=500, detail="no bank_rate_config row")
 
-    monkeypatch.setattr(investor_service, "get_current_bank_rate", _none_in_force)
+    monkeypatch.setattr(bank_rate, "get_current_bank_rate", _none_in_force)
     resp = await client.get("/api/v1/rates/investor/tiers")
-    assert resp.status_code == 200
+    assert resp.status_code == 503
+    assert resp.headers["x-error-code"] == "BANK_RATE_UNAVAILABLE"
 
 
 async def test_rating_and_bank_rate_are_never_returned(client):

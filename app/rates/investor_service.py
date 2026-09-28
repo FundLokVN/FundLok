@@ -20,7 +20,6 @@ It never grants read access to the stored name or email.
 """
 from __future__ import annotations
 
-import logging
 import secrets
 from datetime import datetime, timezone
 from uuid import UUID
@@ -30,7 +29,6 @@ from sqlalchemy import desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.projects.engine_constraints import params
 from app.rates import investor
 from app.rates.models import InvestorRateInquiry
 from app.rates.schemas import (
@@ -45,9 +43,8 @@ from app.rates.schemas import (
     InvestorTiersResponse,
 )
 from app.rates.service import parse_valid_ip
-from app.underwriting.service import get_current_bank_rate
+from app.rates.bank_rate import bank_rate_in_force
 
-logger = logging.getLogger(__name__)
 
 # No 0/O or 1/I/L: the reference is read out over the phone.
 _REFERENCE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
@@ -57,18 +54,12 @@ _REFERENCE_ATTEMPTS = 5
 async def _bank_rate_pct(db: AsyncSession) -> float:
     """The board rate in force, from the same table admin score runs read.
 
-    Falls back to the params default rather than failing: a missing
-    bank_rate_config row is a config error, and on a public page the right
-    response is a correct-as-of-default illustration plus a loud log line, not
-    a 500 in front of a prospective investor.
+    No fallback to the params default any more: the investor and borrower
+    tabs and the score runs are all priced on the bank_rate_config row, so a
+    missing row answers 503 rather than quoting on a different rate (see
+    app/rates/bank_rate.py).
     """
-    try:
-        row = await get_current_bank_rate(db)
-        return float(row.rate_pct)
-    except HTTPException:
-        fallback = float(params().pricing["bank_rate_default_pct"])
-        logger.error("No bank_rate_config row in force; investor estimate using default %s", fallback)
-        return fallback
+    return await bank_rate_in_force(db)
 
 
 def _to_out(result: investor.InvestorEstimate) -> InvestorEstimateOut:

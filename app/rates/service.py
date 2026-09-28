@@ -157,8 +157,12 @@ async def process_rate_calculation(
     # app/loans/service.py::public_rate_estimate); going through it means the
     # calculator is off from an admin score run only by the inputs it cannot
     # ask for, not by the arithmetic.
+    from app.rates.bank_rate import bank_rate_in_force
+
+    bank_rate_pct = await bank_rate_in_force(db)
     try:
         band = grade_lite(
+            bank_rate_pct=bank_rate_pct,
             # No company exists yet — the engine never reads this, it is a label.
             company_code="rate-calculator",
             industry=body.industry,

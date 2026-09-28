@@ -54,6 +54,8 @@ def application(**overrides):
         "incorporation_date_months": 270,
         "loan_size_vnd": Decimal("555555555"),
         "duration_months": 6,
+        # The seeded bank_rate_config row; callers pass the row in force.
+        "bank_rate_pct": 12.0,
     }
     base.update(overrides)
     return base
