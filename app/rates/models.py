@@ -55,6 +55,8 @@ class RateInquiry(Base):
 
     # Contact for follow-up (sales and marketing), given with consent on the
     # form. Nullable: inquiries made before the form asked have none.
+    full_name = Column(String(120), nullable=True)
+    company_name = Column(String(200), nullable=True)
     email = Column(String(254), nullable=True)
     phone = Column(String(20), nullable=True)
     consented_contact_at = Column(DateTime(timezone=True), nullable=True)

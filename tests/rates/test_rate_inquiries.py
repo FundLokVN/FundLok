@@ -51,6 +51,8 @@ def sample_inquiry_payload(**overrides) -> dict:
             "top_1_customer_share": 18.0,
             "top_3_customer_share": 41.0,
         },
+        "full_name": "  Nguyễn   Văn Chủ ",
+        "company_name": "Công ty TNHH Bán Lẻ Mẫu",
         "email": "Owner@Example.vn",
         "phone": "0901 234 567",
         "consent_contact": True,
@@ -538,6 +540,8 @@ async def test_admin_get_endpoint_success_with_formatted_table_fields(client, ma
     assert item["estimated_rate_max"] == quoted["rate_range"]["max_rate_monthly"]
     assert item["risk_tier"] == quoted["risk_profile"]["tier"]
     # And how to reach them.
+    assert item["full_name"] == "Nguyễn Văn Chủ"
+    assert item["company_name"] == "Công ty TNHH Bán Lẻ Mẫu"
     assert item["email"] == "owner@example.vn"
     assert item["phone"] == "0901 234 567"
     assert item["consented_contact_at"] is not None
@@ -840,10 +844,14 @@ async def test_the_inquiry_keeps_how_to_reach_the_visitor(client, db_session):
         await db_session.execute(select(RateInquiry).where(RateInquiry.id == UUID(resp.json()["inquiry_id"])))
     ).scalar_one()
     assert (row.email, row.phone) == ("owner@example.vn", "0901 234 567")
+    # Spacing normalised, as on the investor form.
+    assert (row.full_name, row.company_name) == ("Nguyễn Văn Chủ", "Công ty TNHH Bán Lẻ Mẫu")
     assert row.consented_contact_at is not None
 
 
 @pytest.mark.parametrize("change", [
+    {"full_name": None}, {"full_name": " "}, {"full_name": "A\nB"},
+    {"company_name": None}, {"company_name": ""},
     {"email": None}, {"email": "not-an-email"},
     {"phone": None}, {"phone": ""}, {"phone": "1234"}, {"phone": "call me maybe"},
     {"consent_contact": False}, {"consent_contact": None},

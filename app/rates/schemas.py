@@ -101,6 +101,16 @@ _PHONE_ALLOWED = re.compile(r"^[0-9+()\s.\-]{8,20}$")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
+def clean_plain_name(v: str, field: str) -> str:
+    """A person's or company's name as staff will see and paste it: single
+    spaces, no control characters (a name carrying newlines is broken input or
+    an injection into whatever consumes it next)."""
+    cleaned = " ".join(v.split())
+    if _CONTROL_CHARS.search(v) or len(cleaned) < 2:
+        raise ValueError(f"{field} must be a plain name")
+    return cleaned
+
+
 def normalise_contact_email(v: str) -> str:
     return v.strip().lower()
 
@@ -147,6 +157,8 @@ class RateCalculationRequest(BaseModel):
     # literally true: it is what makes storing an email and phone lawful
     # under Decree 13/2023, as on the investor form. A client that skipped it
     # gets a 422, not a quietly stored row.
+    full_name: str = Field(..., min_length=2, max_length=120)
+    company_name: str = Field(..., min_length=2, max_length=200)
     email: EmailStr = Field(..., max_length=254)
     phone: str = Field(..., max_length=20)
     consent_contact: Literal[True]
@@ -162,6 +174,16 @@ class RateCalculationRequest(BaseModel):
     lowest_month_revenue: int | None = Field(default=None, ge=0, le=FIGURE_MAX_VND)
     top_1_customer_share: float | None = Field(default=None, ge=0, le=100)
     top_3_customer_share: float | None = Field(default=None, ge=0, le=100)
+
+    @field_validator("full_name")
+    @classmethod
+    def _clean_full_name(cls, v: str) -> str:
+        return clean_plain_name(v, "full_name")
+
+    @field_validator("company_name")
+    @classmethod
+    def _clean_company_name(cls, v: str) -> str:
+        return clean_plain_name(v, "company_name")
 
     @field_validator("email")
     @classmethod
@@ -339,6 +361,8 @@ class RateInquiryAdminItem(BaseModel):
     ip_address: str | None = None
     user_agent: str | None = None
     # Contact for follow-up. Null on inquiries made before the form asked.
+    full_name: str | None = None
+    company_name: str | None = None
     email: str | None = None
     phone: str | None = None
     consented_contact_at: datetime | None = None
@@ -405,10 +429,7 @@ class InvestorLeadCreate(InvestorChoices):
         # Shown to staff in the admin table and possibly pasted into email; a
         # name carrying newlines or control characters is either broken input
         # or an attempt to inject into whatever consumes it next.
-        cleaned = " ".join(v.split())
-        if _CONTROL_CHARS.search(v) or len(cleaned) < 2:
-            raise ValueError("full_name must be a plain name")
-        return cleaned
+        return clean_plain_name(v, "full_name")
 
     @field_validator("email")
     @classmethod
