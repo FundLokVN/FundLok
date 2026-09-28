@@ -207,23 +207,95 @@ class GoogleOAuthProvider(OAuthProviderBase):
             email_verified=bool(claims.get("email_verified")),
         )
 
+    tokeninfo_url = "https://oauth2.googleapis.com/tokeninfo"
+    userinfo_url = "https://www.googleapis.com/oauth2/v3/userinfo"
+
     def verify_token(self, token: str) -> dict:
+        # An ID token is a JWT (header.payload.signature) and goes through the
+        # signed path: signature, aud == our client ID, issuer, email_verified.
+        # Anything else is treated as an access token from the frontend's
+        # implicit flow, which must prove it was issued to FundLok too.
+        if token.count(".") == 2:
+            return self.verify_id_token(token)
         return self.verify_access_token(token)
 
     def verify_access_token(self, access_token: str) -> dict:
-        url = "https://www.googleapis.com/oauth2/v3/userinfo"
+        """Accept a Google access token only if it was issued to FundLok.
 
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(url, headers={"Authorization": f"Bearer {access_token}"})
+        This used to call userinfo and trust whatever came back. userinfo
+        answers for ANY valid Google access token, whichever app it was issued
+        to, so a token a victim granted to some other site (one the attacker
+        runs, or one that leaked) could be replayed here and exchanged for a
+        full FundLok session on the account with that email.
 
-        if response.status_code != 200:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google access token")
+        tokeninfo reports who the token was issued to. We require aud/azp to
+        be our own client ID and the email to be verified before trusting it.
+        """
+        if not self.client_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"{self.provider.value} OAuth client ID is not configured",
+            )
 
-        claims = response.json()
-        if not claims.get("sub") or not claims.get("email"):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google access token payload")
+        invalid = HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google access token",
+        )
+
+        info = self._google_get(self.tokeninfo_url, params={"access_token": access_token})
+        if info is None:
+            raise invalid
+
+        # Both must name us: aud is the client the token is for, azp the one
+        # that requested it. A token for another client ID is someone else's.
+        if info.get("aud") != self.client_id or info.get("azp", self.client_id) != self.client_id:
+            raise invalid
+
+        # tokeninfo returns the flag as the string "true"; the ID-token path
+        # gets a real boolean. Accept only those two, never a truthy guess.
+        if info.get("email_verified") not in (True, "true"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Google email is not verified",
+            )
+
+        if not info.get("sub") or not info.get("email"):
+            raise invalid
+
+        claims = {
+            "sub": info["sub"],
+            "email": info["email"],
+            "email_verified": True,
+        }
+
+        # tokeninfo carries no display name. userinfo is fetched only for the
+        # name, now that the token is known to be ours, and must describe the
+        # same Google account.
+        profile = self._google_get(
+            self.userinfo_url, headers={"Authorization": f"Bearer {access_token}"}
+        )
+        if profile and profile.get("sub") == info["sub"] and profile.get("name"):
+            claims["name"] = profile["name"]
 
         return claims
+
+    def _google_get(
+        self,
+        url: str,
+        *,
+        params: dict | None = None,
+        headers: dict | None = None,
+    ) -> dict | None:
+        """GET a Google endpoint; None on any non-200 or unreadable body."""
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get(url, params=params, headers=headers)
+            if response.status_code != 200:
+                return None
+            body = response.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        return body if isinstance(body, dict) else None
 
     def _issuer_is_valid(self, issuer: str | None) -> bool:
         return issuer in {"https://accounts.google.com", "accounts.google.com"}
