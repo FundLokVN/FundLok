@@ -1,6 +1,9 @@
+from typing import Union
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.schemas import TotpChallengeOut
 from app.core.database import get_db
 from app.oauth.schema import OAuthLoginRequest, OAuthTokenResponse
 from app.auth.router import _set_auth_cookies
@@ -11,7 +14,7 @@ from app.utils.audit import append_audit
 router = APIRouter(prefix="/auth/oauth", tags=["oauth"])
 
 
-@router.post("/login", response_model=OAuthTokenResponse)
+@router.post("/login", response_model=Union[TotpChallengeOut, OAuthTokenResponse])
 async def oauth_login(
     body: OAuthLoginRequest,
     request: Request,
@@ -29,6 +32,14 @@ async def oauth_login(
         ip_address=ip_address,
         background_tasks=background_tasks,
     )
+
+    # 2FA pending: no cookies, no SIGN_IN audit, exactly like /auth/login.
+    # Nobody is signed in until POST /auth/login/2fa accepts a code. The
+    # reclaim of an unverified account (if any) is still committed; it is not
+    # a sign-in.
+    if tokens.get("totp_required"):
+        await db.commit()
+        return TotpChallengeOut(challenge_token=tokens["challenge_token"])
 
     # Same audit row as the password path, or a social sign-in would be
     # invisible in the account's security history.

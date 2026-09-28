@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import totp
 from app.auth.service import create_token_pair, is_unseen_device
 from app.auth.user_agent import describe_browser, describe_device
 from app.utils.audit import append_audit
@@ -15,6 +16,7 @@ from app.utils.email import send_new_device_signin_alert
 from app.core.config import settings
 from app.oauth.schema import OAuthProvider, OAuthUserInfo
 from app.users.models import (
+    USER_STATUS_SUSPENDED,
     RefreshToken,
     TotpRecoveryCode,
     User,
@@ -53,6 +55,18 @@ class OAuthProviderBase(ABC):
         claims = self.verify_token(token)
         user_info = self.map_claims(claims)
         user = await self.get_or_create_user(db, user_info)
+
+        if user.status == USER_STATUS_SUSPENDED:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account has been suspended",
+            )
+        if user.totp_enabled:
+            return (
+                user,
+                {"totp_required": True, "challenge_token": totp.create_challenge_token(user.id)},
+                False,
+            )
 
         # Asked before the new session row exists, or the sign-in being
         # recorded would count as its own prior history.
