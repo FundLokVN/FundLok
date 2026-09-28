@@ -3,15 +3,24 @@ from abc import ABC, abstractmethod
 import httpx
 from fastapi import BackgroundTasks, HTTPException, status
 from jose import jwt
-from sqlalchemy import select
+from datetime import datetime, timezone
+
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import create_token_pair, is_unseen_device
 from app.auth.user_agent import describe_browser, describe_device
+from app.utils.audit import append_audit
 from app.utils.email import send_new_device_signin_alert
 from app.core.config import settings
 from app.oauth.schema import OAuthProvider, OAuthUserInfo
-from app.users.models import User
+from app.users.models import (
+    RefreshToken,
+    TotpRecoveryCode,
+    User,
+    WebAuthnChallenge,
+    WebAuthnCredential,
+)
 
 
 class OAuthProviderBase(ABC):
@@ -123,8 +132,7 @@ class OAuthProviderBase(ABC):
             # existing account that signed up via email/password should be
             # considered verified once they log in through OAuth.
             if user_info.email_verified and not user.email_verified:
-                user.email_verified = True
-                await db.flush()
+                await self._reclaim_unverified_account(db, user)
             return user
 
         user = User(
@@ -149,6 +157,65 @@ class OAuthProviderBase(ABC):
         db.add(user)
         await db.flush()
         return user
+
+    async def _reclaim_unverified_account(self, db: AsyncSession, user: User) -> None:
+        """Hand an unverified account to the person who just proved the email.
+
+        /auth/register creates a password account for any address without
+        proving the registrant owns it. Nothing stops a stranger registering
+        the victim's email first and waiting: when the real owner later signs
+        in with Google or Microsoft, this lookup finds that account by email.
+        Before this, it was only marked verified, and the stranger's password
+        (and sessions, and any 2FA they enrolled) still worked, i.e. an
+        account takeover of whatever the owner then put in it.
+
+        This is the first moment anyone has proven ownership of the address,
+        so every sign-in credential set before it belongs to someone unproven
+        and is removed:
+
+          * the password (the owner can set their own via "Set password")
+          * every refresh session, so the stranger is signed out
+          * TOTP: the secret, the enabled flag and all recovery codes; left in
+            place it would lock the real owner out behind the stranger's
+            authenticator
+          * passkeys and pending passkey challenges
+
+        Deliberately a no-op for an account already verified: then its
+        credentials were set by someone who proved the email, i.e. the owner.
+        """
+        now = datetime.now(timezone.utc)
+        had = {
+            "password": user.password_hash is not None,
+            "totp": bool(user.totp_enabled or user.totp_secret),
+        }
+
+        user.email_verified = True
+        user.password_hash = None
+        user.totp_enabled = False
+        user.totp_secret = None
+        user.totp_confirmed_at = None
+
+        await db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=now)
+        )
+        await db.execute(delete(TotpRecoveryCode).where(TotpRecoveryCode.user_id == user.id))
+        await db.execute(delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user.id))
+        await db.execute(delete(WebAuthnChallenge).where(WebAuthnChallenge.user_id == user.id))
+
+        # Visible in the account's security history, so an operator can see
+        # why a password or authenticator the account used to have is gone.
+        append_audit(
+            db,
+            entity_type="USER",
+            entity_id=user.id,
+            action="UNVERIFIED_ACCOUNT_RECLAIMED",
+            actor_id=user.id,
+            before_state=had,
+            after_state={"provider": self.provider.value, "email_verified": True},
+        )
+        await db.flush()
 
     def _fetch_json(self, url: str) -> dict:
         with httpx.Client(timeout=10.0) as client:
