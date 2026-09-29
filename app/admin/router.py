@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -9,6 +10,8 @@ from app.admin.schemas import (
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
     AdminKybVerificationOut,
+    AdminKycImageUrlResponse,
+    AdminKycVerificationOut,
     AdminLoanApplicationRow,
     AdminMode,
     AdminOverview,
@@ -77,6 +80,64 @@ async def resolve_kyb_verification(
 ):
     """Settle a KYB attempt the engine parked in MANUAL_REVIEW. Admin-only."""
     return await service.resolve_kyb_verification(
+        db,
+        verification_id,
+        decision=body.decision,
+        note=body.note,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.get("/kyc-verifications", response_model=list[AdminKycVerificationOut])
+async def list_kyc_verifications(
+    status: Literal["MANUAL_REVIEW", "APPROVED", "REJECTED", "FAILED"] = "MANUAL_REVIEW",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """KYC attempts in one status, oldest first. Defaults to the review queue.
+    Admin-only."""
+    return await service.list_kyc_verifications(db, status=status)
+
+
+@router.get("/kyc-verifications/{verification_id}", response_model=AdminKycVerificationOut)
+async def get_kyc_verification(
+    verification_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """One KYC attempt with the accounts that share its ID number. Admin-only."""
+    return await service.get_kyc_verification(db, verification_id)
+
+
+@router.get(
+    "/kyc-verifications/{verification_id}/images/{name}",
+    response_model=AdminKycImageUrlResponse,
+)
+async def get_kyc_image_url(
+    verification_id: UUID,
+    name: Literal["id_front", "id_back", "portrait"],
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A 10-minute read URL for one submitted image. Admin-only."""
+    return await service.get_kyc_image_url(db, verification_id, name)
+
+
+@router.post(
+    "/kyc-verifications/{verification_id}/resolve",
+    response_model=AdminKycVerificationOut,
+)
+async def resolve_kyc_verification(
+    verification_id: UUID,
+    body: AdminDecisionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Settle a KYC attempt parked in MANUAL_REVIEW. Admin-only; approving
+    requires a note."""
+    return await service.resolve_kyc_verification(
         db,
         verification_id,
         decision=body.decision,

@@ -113,3 +113,35 @@ def presign_kyb_certificate(key: str) -> str:
     return r2.presign_get(
         key, bucket=_bucket(), expires_in=CERTIFICATE_URL_TTL_SECONDS
     )
+
+
+# The three images a KYC attempt stores (see store_kyc_documents), in the order
+# a reviewer reads them. Same probing as the certificate: the extension is
+# derived from the bytes at upload time and not recorded.
+KYC_DOCUMENT_NAMES = ("id_front", "id_back", "portrait")
+_KYC_IMAGE_EXTENSIONS = (("jpg", "image/jpeg"), ("png", "image/png"))
+
+
+def find_kyc_document(verification_id, name: str) -> tuple[str, str] | None:
+    """Locate one stored KYC image: (object key, content type), or None.
+
+    None covers an unknown name as well as a missing object, so a caller can't
+    use this to probe arbitrary keys. A missing object is a normal answer:
+    retention is best-effort, exactly as for certificates.
+    """
+    if name not in KYC_DOCUMENT_NAMES or not r2.is_configured():
+        return None
+    bucket = _bucket()
+    for ext, content_type in _KYC_IMAGE_EXTENSIONS:
+        key = f"verification/KYC/{verification_id}/{name}.{ext}"
+        if r2.head_object(key, bucket=bucket) is not None:
+            return key, content_type
+    return None
+
+
+def presign_kyc_document(key: str) -> str:
+    """A short-lived read URL for a located KYC image (same TTL as certificates:
+    these are ID cards and faces, so a leaked link must die quickly)."""
+    return r2.presign_get(
+        key, bucket=_bucket(), expires_in=CERTIFICATE_URL_TTL_SECONDS
+    )

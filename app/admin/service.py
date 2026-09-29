@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -16,6 +17,10 @@ from app.admin.schemas import (
     AdminDecision,
     AdminDocumentUrlResponse,
     AdminKybVerificationOut,
+    AdminKycAccountRef,
+    AdminKycConflict,
+    AdminKycImageUrlResponse,
+    AdminKycVerificationOut,
     AdminLoanApplicationRow,
     AdminMode,
     AdminOverview,
@@ -29,7 +34,14 @@ from app.admin.schemas import (
     UNASSIGNED_ROLE,
     UserRow,
 )
-from app.gverify.models import STATUS_APPROVED, STATUS_MANUAL_REVIEW, GVerifyKybVerification
+from app.gverify import service as gverify_service
+from app.gverify import storage as gverify_storage
+from app.gverify.models import (
+    STATUS_APPROVED,
+    STATUS_MANUAL_REVIEW,
+    GVerifyKybVerification,
+    GVerifyVerification,
+)
 from app.lending.models import (
     AuditLog,
     LoanApplication,
@@ -610,3 +622,184 @@ async def list_audit_logs(
         out.entity_user = ActorOut.model_validate(entity_user_row) if entity_user_row else None
         out_list.append(out)
     return out_list
+
+
+# --------------------------------------------------------------------------- #
+# KYC manual review
+#
+# The GVerify KYC engine parks an attempt in MANUAL_REVIEW when the face match
+# would approve but another account already holds an APPROVED KYC with the same
+# ID number (app/gverify/service.py). Face match alone can't tell a real selfie
+# from the card's own portrait cropped and resubmitted, so a person decides.
+# --------------------------------------------------------------------------- #
+
+KYC_REVIEW_LIST_LIMIT = 100
+
+# What the investor sees after a rejection. The operator's note is never shown
+# to them: it is written for colleagues and may name the suspected fraud or the
+# other account, which would confirm to an impostor whose identity they hold.
+KYC_REJECTED_REASON = (
+    "We could not complete your identity verification. Please contact support."
+)
+
+
+def _kyc_account_ref(user: User) -> AdminKycAccountRef:
+    return AdminKycAccountRef(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        status=user.status,
+        created_at=user.created_at,
+    )
+
+
+async def _kyc_verification_out(
+    db: AsyncSession, row: GVerifyVerification
+) -> AdminKycVerificationOut:
+    owner = await db.get(User, row.user_id)
+    conflicts = []
+    for other in await gverify_service.approved_elsewhere(db, row.person_number, row.user_id):
+        other_user = await db.get(User, other.user_id)
+        if other_user is None:
+            continue
+        conflicts.append(
+            AdminKycConflict(
+                verification_id=other.id,
+                user=_kyc_account_ref(other_user),
+                full_name=other.full_name,
+                date_of_birth=other.date_of_birth,
+                approved_at=other.updated_at or other.created_at,
+            )
+        )
+    return AdminKycVerificationOut(
+        id=row.id,
+        status=row.status,
+        is_approved=row.is_approved,
+        rejection_reason=row.rejection_reason,
+        person_number=row.person_number,
+        full_name=row.full_name,
+        date_of_birth=row.date_of_birth,
+        face_match_score=gverify_service.face_match_score(row),
+        created_at=row.created_at,
+        user=_kyc_account_ref(owner),
+        conflicts=conflicts,
+    )
+
+
+async def _get_kyc_verification(db: AsyncSession, verification_id: UUID, *, for_update=False):
+    query = select(GVerifyVerification).where(
+        GVerifyVerification.id == verification_id,
+        GVerifyVerification.verification_type == "KYC",
+    )
+    if for_update:
+        query = query.with_for_update()
+    row = (await db.execute(query)).scalars().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="KYC verification not found")
+    return row
+
+
+async def list_kyc_verifications(
+    db: AsyncSession, *, status: str = STATUS_MANUAL_REVIEW
+) -> list[AdminKycVerificationOut]:
+    """KYC attempts in one status, oldest first so the queue is worked in order.
+
+    Defaults to MANUAL_REVIEW, the only status an operator can act on. A parked
+    attempt is always its account's newest (resubmission is refused while one
+    is in review), so this is one row per waiting investor.
+    """
+    rows = (
+        await db.execute(
+            select(GVerifyVerification)
+            .where(
+                GVerifyVerification.verification_type == "KYC",
+                GVerifyVerification.status == status,
+            )
+            .order_by(GVerifyVerification.created_at)
+            .limit(KYC_REVIEW_LIST_LIMIT)
+        )
+    ).scalars().all()
+    return [await _kyc_verification_out(db, row) for row in rows]
+
+
+async def get_kyc_verification(
+    db: AsyncSession, verification_id: UUID
+) -> AdminKycVerificationOut:
+    return await _kyc_verification_out(db, await _get_kyc_verification(db, verification_id))
+
+
+async def get_kyc_image_url(
+    db: AsyncSession, verification_id: UUID, name: str
+) -> AdminKycImageUrlResponse:
+    """A 10-minute read URL for one of an attempt's submitted images."""
+    row = await _get_kyc_verification(db, verification_id)
+    if name not in gverify_storage.KYC_DOCUMENT_NAMES:
+        raise HTTPException(status_code=404, detail="Unknown KYC image")
+    located = await asyncio.to_thread(gverify_storage.find_kyc_document, row.id, name)
+    if located is None:
+        # Retention is best-effort: storage may have been down or unconfigured
+        # when the attempt ran. Say so rather than hand out a dead link.
+        raise HTTPException(status_code=404, detail="This image was not stored")
+    key, content_type = located
+    return AdminKycImageUrlResponse(
+        url=await asyncio.to_thread(gverify_storage.presign_kyc_document, key),
+        expires_in=gverify_storage.CERTIFICATE_URL_TTL_SECONDS,
+        content_type=content_type,
+    )
+
+
+async def resolve_kyc_verification(
+    db: AsyncSession,
+    verification_id: UUID,
+    *,
+    decision: AdminDecision,
+    note: str | None,
+    actor: User,
+    ip_address: str | None = None,
+) -> AdminKycVerificationOut:
+    """Settle a KYC attempt the engine parked for a human.
+
+    Rules, beyond the KYB equivalent:
+      * Approving needs a note. It overrides a fraud signal (this ID is already
+        verified on another account), so the reason has to be on record.
+      * Nobody may settle their own attempt.
+      * The row is locked, so two operators can't settle it at once.
+      * The note stays internal; a rejected investor sees a fixed message.
+    """
+    row = await _get_kyc_verification(db, verification_id, for_update=True)
+    if row.status != STATUS_MANUAL_REVIEW:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Only a MANUAL_REVIEW attempt can be resolved (this one is {row.status})",
+        )
+    if row.user_id == actor.id:
+        raise HTTPException(status_code=403, detail="You cannot review your own verification")
+    note = (note or "").strip() or None
+    if decision is AdminDecision.approved and not note:
+        raise HTTPException(
+            status_code=400,
+            detail="A note is required to approve a flagged verification",
+        )
+
+    conflicts = await gverify_service.approved_elsewhere(db, row.person_number, row.user_id)
+    before = {"status": row.status}
+    row.status = decision.value
+    row.rejection_reason = None if decision is AdminDecision.approved else KYC_REJECTED_REASON
+    append_audit(
+        db,
+        entity_type="GVERIFY_KYC_VERIFICATION",
+        entity_id=row.id,
+        action="KYC_MANUAL_REVIEW_RESOLVED",
+        actor_id=actor.id,
+        before_state=before,
+        after_state={
+            "status": row.status,
+            "note": note,
+            "user_id": str(row.user_id),
+            "conflicting_verification_ids": [str(c.id) for c in conflicts],
+        },
+        ip_address=ip_address,
+    )
+    await db.commit()
+    await db.refresh(row)
+    return await _kyc_verification_out(db, row)
