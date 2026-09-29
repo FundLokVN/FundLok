@@ -88,6 +88,8 @@ class KybVerifyResponse(BaseModel):
     status: str
     is_approved: bool
     rejection_reason: str | None = None
+    # Machine-readable cause, when defined (e.g. NOT_A_REPRESENTATIVE).
+    rejection_code: str | None = None
     tax_code: str | None = None
     license_code: str | None = None
     business_name: str | None = None
@@ -105,6 +107,8 @@ class KybStatusResponse(BaseModel):
     is_terminal: bool
     is_approved: bool
     rejection_reason: str | None = None
+    # Machine-readable cause, when defined (e.g. NOT_A_REPRESENTATIVE).
+    rejection_code: str | None = None
     tax_code: str | None = None
     business_name: str | None = None
     # Verbatim from the certificate OCR (see spec §2: the 63->34 Decode Address

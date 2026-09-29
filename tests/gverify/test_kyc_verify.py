@@ -236,8 +236,9 @@ async def test_kyc_verify_allows_retry_after_rejection(client, make_investor, mo
 
 
 async def test_kyc_verify_rejects_unauthorized_role(client, make_user, mock_gverify):
-    sme = await make_user(role="SME")
-    resp = await client.post("/gverify/kyc/verify", json=_body(), headers=sme["headers"])
+    # SMEs now verify here too (as a step of KYB); a roleless account cannot.
+    roleless = await make_user()
+    resp = await client.post("/gverify/kyc/verify", json=_body(), headers=roleless["headers"])
     assert resp.status_code == 403
     assert mock_gverify.ocr_calls == 0
 
@@ -317,9 +318,9 @@ async def test_kyc_handoff_token_flow_verifies(client, make_investor, mock_gveri
     assert status.json()["status"] == "APPROVED"
 
 
-async def test_kyc_handoff_requires_investor_role(client, make_user):
-    sme = await make_user(role="SME")
-    resp = await client.post("/gverify/kyc/handoff", headers=sme["headers"])
+async def test_kyc_handoff_requires_a_verifying_role(client, make_user):
+    roleless = await make_user()
+    resp = await client.post("/gverify/kyc/handoff", headers=roleless["headers"])
     assert resp.status_code == 403
 
 
@@ -541,3 +542,14 @@ async def test_kyc_manual_review_audit_names_the_cause(
     ).scalar_one()
     assert row.after_state["status"] == "MANUAL_REVIEW"
     assert row.after_state["review_cause"] == "PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT"
+
+
+async def test_kyc_502_does_not_leak_the_provider_error(client, make_investor, mock_gverify):
+    investor = await make_investor()
+    mock_gverify.ocr = GVerifyError("Could not reach GVerify: [Errno 8] nodename nor servname provided")
+
+    resp = await client.post("/gverify/kyc/verify", json=_body(), headers=investor["headers"])
+
+    assert resp.status_code == 502
+    assert "Errno" not in resp.text
+    assert resp.json() == {"detail": "The verification provider could not process the request. Please try again."}

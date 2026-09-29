@@ -167,14 +167,29 @@ def _cross_check_review_reason(ocr: dict, tax: dict, queried_tax_code: str) -> s
     return None
 
 
-async def _rep_match_rejection_reason(
-    db: AsyncSession, user_id, ocr: dict
-) -> str | None:
-    """Rule 7 (flag-gated): the SME's KYC-verified person_number must appear
-    among the certificate's legal representatives."""
-    if not settings.GVERIFY_KYB_REQUIRE_REP_MATCH:
-        return None
+# Rule 7 reasons. Constants because the router maps them to machine-readable
+# codes (rejection_code) so the frontend can explain them in the user's
+# language instead of showing this English text.
+KYC_REQUIRED_REASON = "Complete personal identity verification (KYC) first"
+NOT_A_REPRESENTATIVE_REASON = (
+    "Your verified identity is not listed as a legal representative of this business"
+)
+REJECTION_CODES = {NOT_A_REPRESENTATIVE_REASON: "NOT_A_REPRESENTATIVE"}
 
+
+def rejection_code(attempt: GVerifyKybVerification) -> str | None:
+    """Machine-readable cause of a REJECTED attempt, where one is defined."""
+    if attempt.status != STATUS_REJECTED:
+        return None
+    return REJECTION_CODES.get(attempt.rejection_reason or "")
+
+
+async def approved_kyc_person_number(db: AsyncSession, user_id) -> str | None:
+    """The CCCD number from the user's newest APPROVED KYC, or None.
+
+    SMEs complete the same GVerify KYC as investors (ID card + selfie) as a
+    step of the KYB flow; this is what Rule 7 compares with the certificate.
+    """
     result = await db.execute(
         select(GVerifyVerification.person_number)
         .where(
@@ -183,17 +198,33 @@ async def _rep_match_rejection_reason(
         )
         .order_by(GVerifyVerification.created_at.desc())
     )
-    person_number = result.scalars().first()
+    return result.scalars().first()
+
+
+async def _rep_match_rejection_reason(
+    db: AsyncSession, user_id, ocr: dict
+) -> str | None:
+    """Rule 7 (flag-gated): the SME's KYC-verified person_number must appear
+    among the certificate's legal representatives.
+
+    The router refuses a KYB submission with no approved KYC before any
+    provider call; the KYC_REQUIRED_REASON branch here is the backstop.
+    """
+    if not settings.GVERIFY_KYB_REQUIRE_REP_MATCH:
+        return None
+
+    person_number = await approved_kyc_person_number(db, user_id)
     if not person_number:
-        return "Complete personal identity verification (KYC) first"
+        return KYC_REQUIRED_REASON
 
     # Live payloads use identity_number; the API doc said id_number — accept both.
+    # Whitespace is dropped on both sides, as OCR output can vary in spacing.
     rep_ids = {
-        (rep.get("identity_number") or rep.get("id_number") or "").strip()
+        "".join((rep.get("identity_number") or rep.get("id_number") or "").split())
         for rep in (ocr.get("representatives") or [])
     }
-    if person_number.strip() not in rep_ids:
-        return "Your verified identity is not listed as a legal representative of this business"
+    if "".join(person_number.split()) not in rep_ids:
+        return NOT_A_REPRESENTATIVE_REASON
     return None
 
 

@@ -203,6 +203,16 @@ Retry = new row; latest APPROVED ⇒ 409 on further attempts.
    must appear among the certificate's `representatives[].id_number`. This
    binds "verified person" ⇔ "legal representative of the verified business".
    Default off until Edward decides (Open Question 2).
+   (v1.4) The SME completes that KYC **inside the KYB flow**: the KYB screen is
+   certificate → identity (same GVerify KYC as investors: ID front/back +
+   selfie, or the phone QR handoff) → review & submit. The `/gverify/kyc/*`
+   endpoints accept SME as well as INVESTOR for this. With the flag on, a KYB
+   submission without an APPROVED KYC is refused with **409
+   `X-Error-Code: KYC_REQUIRED` before any provider call** (it used to spend
+   the OCR call and then reject). A CCCD that is not among the
+   representatives ends REJECTED with `rejection_code: "NOT_A_REPRESENTATIVE"`
+   on the verify and status responses, so the UI can explain it in the user's
+   language. CCCD numbers are compared with whitespace removed.
 8. Both provider payloads persisted verbatim (JSONB). The certificate is
    retained in R2 under `verification/KYB/{verification_id}/certificate.*`
    (bucket `R2_VERIFICATION_BUCKET`, falling back to `R2_BUCKET`) — v1.1
@@ -293,3 +303,4 @@ Retry = new row; latest APPROVED ⇒ 409 on further attempts.
 | 1.1 | 2026-07-14 | Phat | Retain the certificate in R2 (`verification/KYB/<id>/`) |
 | 1.2 | 2026-07-15 | Phat | Aligned to the provider integration guide: dropped HOUSEHOLD; added MANUAL_REVIEW outcome (low OCR confidence, registry cross-check mismatches/incomplete data); added tax-code echo and legal-representative cross-checks |
 | 1.3 | 2026-07-20 | Phat | Tax-verify uses the VERIFIED working contract (lowercase `id` + required `license_code`, KYB plan §7.3), fixing ERROR_01; added `license_code` column, declared-fallback, cross-check, and a request contract test; ERROR_23 → REJECTED not 502 |
+| 1.4 | 2026-09-29 | Phat | Identity (KYC) step inside the KYB flow; KYC endpoints open to SME; flag-on submission without approved KYC → 409 KYC_REQUIRED before any provider call; `rejection_code` NOT_A_REPRESENTATIVE |

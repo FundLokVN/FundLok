@@ -13,10 +13,13 @@ Two ways to submit:
 """
 from uuid import UUID
 
+import logging
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.gverify import kyb_service, service
 from app.gverify import storage
@@ -39,9 +42,17 @@ from app.users.models import USER_STATUS_SUSPENDED, Role, User
 from app.utils.audit import append_audit
 from app.utils.rbac import require_roles
 
+logger = logging.getLogger(__name__)
+
+# Returned with every 502. Deliberately generic: the underlying message can
+# carry provider error bodies or resolver details ("[Errno 8] ...").
+PROVIDER_FAILED_DETAIL = "The verification provider could not process the request. Please try again."
+
 router = APIRouter(prefix="/gverify/kyc", tags=["gverify-kyc"])
 
-_authorized = require_roles(Role.INVESTOR)
+# Investors verify themselves here; SMEs do the same KYC as a step of KYB
+# (their CCCD is matched against the certificate's legal representatives).
+_authorized = require_roles(Role.INVESTOR, Role.SME)
 
 # KYB — business verification for SMEs (spec: ekyb-kyb-verification.md).
 kyb_router = APIRouter(prefix="/gverify/kyb", tags=["gverify-kyb"])
@@ -77,7 +88,10 @@ async def _run_verification(
     except GVerifyError as exc:
         # The FAILED attempt row is already flushed — commit so it's recorded.
         await db.commit()
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+        # The provider's own error text (and httpx/DNS details) goes to the
+        # log and the attempt row, never to the client.
+        logger.warning("GVerify call failed for user %s: %s", user.id, exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=PROVIDER_FAILED_DETAIL)
 
     append_audit(
         db,
@@ -161,7 +175,7 @@ async def verify_via_handoff(
 
     result = await db.execute(select(User).where(User.id == UUID(user_id)))
     user = result.scalar_one_or_none()
-    if user is None or user.role != Role.INVESTOR.value:
+    if user is None or user.role not in (Role.INVESTOR.value, Role.SME.value):
         raise HTTPException(status_code=401, detail="Invalid or expired handoff token")
     # This route authenticates by handoff token, so it never passes through
     # get_current_user and does NOT inherit the suspension check from there.
@@ -215,6 +229,16 @@ async def kyb_verify(
     latest = await kyb_service.latest_for_user(db, current_user.id)
     if latest is not None and latest.is_approved:
         raise HTTPException(status_code=409, detail="KYB is already approved")
+    # Rule 7 needs the SME's own verified identity. Refuse up front rather than
+    # after the (billable) certificate OCR, which could only end in rejection.
+    if settings.GVERIFY_KYB_REQUIRE_REP_MATCH and not await kyb_service.approved_kyc_person_number(
+        db, current_user.id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=kyb_service.KYC_REQUIRED_REASON,
+            headers={"X-Error-Code": "KYC_REQUIRED"},
+        )
 
     try:
         attempt = await kyb_service.run_kyb_verification(
@@ -230,7 +254,10 @@ async def kyb_verify(
     except GVerifyError as exc:
         # The FAILED attempt row is already flushed — commit so it's recorded.
         await db.commit()
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+        # The provider's own error text (and httpx/DNS details) goes to the
+        # log and the attempt row, never to the client.
+        logger.warning("GVerify call failed for user %s: %s", current_user.id, exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=PROVIDER_FAILED_DETAIL)
 
     append_audit(
         db,
@@ -249,6 +276,7 @@ async def kyb_verify(
         status=attempt.status,
         is_approved=attempt.is_approved,
         rejection_reason=attempt.rejection_reason,
+        rejection_code=kyb_service.rejection_code(attempt),
         tax_code=attempt.tax_code,
         license_code=attempt.license_code,
         business_name=attempt.business_name,
@@ -316,6 +344,7 @@ async def kyb_status(
         is_terminal=attempt.is_terminal,
         is_approved=attempt.is_approved,
         rejection_reason=attempt.rejection_reason,
+        rejection_code=kyb_service.rejection_code(attempt),
         tax_code=attempt.tax_code,
         business_name=attempt.business_name,
         company_address=attempt.company_address,

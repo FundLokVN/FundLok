@@ -324,13 +324,13 @@ async def test_kyb_verify_incomplete_representative_goes_to_manual_review(
 async def test_kyb_verify_rep_match_rule(client, make_sme, mock_gverify_kyb, monkeypatch):
     from app.core.config import settings as app_settings
 
-    # Flag ON, no approved KYC for this user -> rejected before the tax call.
+    # Flag ON, no approved KYC for this user -> refused before ANY provider call.
     monkeypatch.setattr(app_settings, "GVERIFY_KYB_REQUIRE_REP_MATCH", True)
     sme = await make_sme()
     resp = await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
-    assert resp.status_code == 201, resp.text
-    assert resp.json()["status"] == "REJECTED"
-    assert "identity verification" in resp.json()["rejection_reason"]
+    assert resp.status_code == 409, resp.text
+    assert resp.headers["x-error-code"] == "KYC_REQUIRED"
+    assert mock_gverify_kyb.ocr_calls == 0
     assert mock_gverify_kyb.tax_calls == 0
 
     # Flag OFF -> same certificate approves (fresh user, no KYC needed).

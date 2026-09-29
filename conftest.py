@@ -232,6 +232,21 @@ async def db_session():
 
 
 @pytest.fixture(autouse=True)
+def _pin_feature_flags(monkeypatch):
+    """Behaviour flags start at their code defaults in every test.
+
+    Settings load the developer's local .env, so a flag switched on there
+    (GVERIFY_KYB_REQUIRE_REP_MATCH was, on 2026-09-29) silently changed what
+    unrelated tests saw: every KYB happy path became a rejection locally while
+    CI, which has no .env, stayed green. A test that needs a flag on sets it
+    itself; this autouse fixture runs first, so the test's monkeypatch wins.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "GVERIFY_KYB_REQUIRE_REP_MATCH", False)
+
+
+@pytest.fixture(autouse=True)
 def _mock_external_io(monkeypatch):
     """Mock all external I/O per HANDOFF-01 guardrail: tests must never hit a
     real SMTP server, Cloudflare R2, Brankas, or Didit endpoint."""

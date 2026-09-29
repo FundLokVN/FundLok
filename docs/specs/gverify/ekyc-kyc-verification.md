@@ -188,7 +188,7 @@ PENDING ──[GVerify HTTP error / success=false]─► FAILED
 
 ## 6. Business Rules
 
-1. Only `INVESTOR` may call the KYC endpoints (mirrors Didit `/kyc/*`).
+1. `INVESTOR` and `SME` may call the KYC endpoints (v1.5: SMEs verify their own identity as a step of KYB; see the eKYB spec, Rule 7). Other roles get 403.
 2. Each image must be valid base64, decode to JPEG or PNG (magic-byte check),
    and be ≤ 10MB decoded (GVerify's documented limit).
 3. OCR passes iff: envelope `success=true`, AND `front_valid` and `back_valid`
@@ -294,3 +294,4 @@ outcome is in the body. Only provider failures surface as 5xx.
 | 1.2 | 2026-07-14 | Phat | Supersedes 1.1's invalid_message rule: face-match warning is advisory only (Datatrust guidance) — verdict decided by `is_matching` + `match` threshold alone |
 | 1.3 | 2026-07-15 | Phat | Verdict = `is_matching` alone (live testing showed `match` is a binary mirror, `matching` the similarity %); dropped `GVERIFY_FACE_MATCH_THRESHOLD`; image order fixed to img1 = ID front, img2 = portrait |
 | 1.4 | 2026-09-29 | Phat | vbsec [9]: a `person_number` already approved on another account parks the attempt in `MANUAL_REVIEW` (rule 9); resubmission refused while in review (rule 10). Liveness (OQ2) still open |
+| 1.5 | 2026-09-29 | Phat | KYC endpoints (verify, handoff, handoff/verify, status) also open to SME for the KYB identity step; provider connection failures retried, 502s carry a generic message |

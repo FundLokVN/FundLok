@@ -12,11 +12,29 @@ in the JSON body; calls must originate server-side.
 """
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import logging
+from typing import Any, Awaitable, Callable
 
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+# Connection failures are retried; nothing else is. A DNS or connect failure
+# means the request never reached GVerify, so a retry cannot double-bill.
+# Observed 2026-09-29: the provider's nameservers (tpv.vn) intermittently time
+# out, so a lookup made while the local cache is cold fails with
+# "[Errno 8] nodename nor servname provided" even though the host is up.
+# A read timeout is different: the provider may already have run (and billed)
+# the OCR or face match, so it is surfaced, not repeated.
+_CONNECT_RETRIES = 2
+_RETRY_BACKOFF_SECONDS = 0.5
+
+# What callers (and, through the router's 502, users) see. The underlying
+# exception text ("[Errno 8] ...", internal hostnames) goes to the log only.
+UNREACHABLE_MESSAGE = "Could not reach the verification provider"
 
 _TIMEOUT = 30.0  # OCR + biometric calls are slower than plain CRUD
 
@@ -70,16 +88,38 @@ def _unwrap(resp: httpx.Response, path: str) -> dict[str, Any]:
     return envelope.get("data") or {}
 
 
+async def _send(path: str, send: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
+    """Run one provider request, retrying only connection failures."""
+    for attempt in range(_CONNECT_RETRIES + 1):
+        try:
+            return await send()
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            if attempt < _CONNECT_RETRIES:
+                logger.warning(
+                    "GVerify %s: connection failed (%s), retry %d/%d",
+                    path, exc, attempt + 1, _CONNECT_RETRIES,
+                )
+                await asyncio.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                continue
+            logger.error("GVerify %s: unreachable after %d attempts: %s", path, attempt + 1, exc)
+            raise GVerifyError(UNREACHABLE_MESSAGE) from exc
+        except httpx.RequestError as exc:
+            logger.error("GVerify %s: request failed: %s", path, exc)
+            raise GVerifyError(UNREACHABLE_MESSAGE) from exc
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 async def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     """POST JSON to GVerify (partner code travels in the body)."""
     url = f"{_base_url()}{path}"
     body = {"code": settings.GVERIFY_PARTNER_CODE, **payload}
-    try:
+    headers = _headers()
+
+    async def send() -> httpx.Response:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.post(url, json=body, headers=_headers())
-    except httpx.RequestError as exc:
-        raise GVerifyError(f"Could not reach GVerify: {exc}") from exc
-    return _unwrap(resp, path)
+            return await client.post(url, json=body, headers=headers)
+
+    return _unwrap(await _send(path, send), path)
 
 
 async def verify_ocr_id(*, img_front_b64: str, img_back_b64: str) -> dict[str, Any]:
@@ -125,17 +165,17 @@ async def ocrx_decode(
     url = f"{_base_url()}{path}"
     headers = _headers(json_body=False)
     headers["code"] = settings.GVERIFY_PARTNER_CODE or ""
-    try:
+
+    async def send() -> httpx.Response:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.post(
+            return await client.post(
                 url,
                 files={"file": (filename, file_bytes, content_type)},
                 data={"type": document_type},
                 headers=headers,
             )
-    except httpx.RequestError as exc:
-        raise GVerifyError(f"Could not reach GVerify: {exc}") from exc
-    return _unwrap(resp, path)
+
+    return _unwrap(await _send(path, send), path)
 
 
 async def taxcode_verify(*, tax_code: str, license_code: str) -> dict[str, Any]:
