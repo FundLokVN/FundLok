@@ -4,8 +4,6 @@ This is the flow the profile page's "Change password" button sends users to, so
 it's where a real password change happens. The notice exists so a reset the
 owner didn't request is visible to them while they can still act on it.
 """
-from app.utils.jwt import create_password_reset_token
-
 NEW_PASSWORD = "Reset-Me-Passw0rd!"
 
 
@@ -17,7 +15,15 @@ async def test_reset_password_emails_the_owner(client, make_user, monkeypatch):
     )
 
     user = await make_user()
-    token = create_password_reset_token(user["id"])
+    # The link the user would get by email: the only way to mint a token that
+    # reset_password accepts (it is tied to the current password).
+    links: list[str] = []
+    monkeypatch.setattr(
+        "app.auth.service.send_password_reset_email",
+        lambda to_email, token: links.append(token),
+    )
+    await client.post("/auth/forgot-password", json={"email": user["email"]})
+    [token] = links
 
     resp = await client.post(
         "/auth/reset-password", json={"token": token, "new_password": NEW_PASSWORD}

@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -23,9 +24,9 @@ from app.utils.password import hash_password, verify_password
 from app.utils.jwt import (
     create_access_token,
     create_password_reset_token,
+    decode_password_reset_token,
     create_verification_token,
     verify_email_token,
-    verify_password_reset_token,
 )
 from app.utils.email import (
     send_existing_account_notice,
@@ -33,6 +34,7 @@ from app.utils.email import (
     send_password_reset_email,
     send_verification_email,
 )
+from app.utils.audit import append_audit
 from app.utils.captcha import verify_turnstile_token
 from app.core.config import settings
 
@@ -497,22 +499,67 @@ async def forgot_password(db: AsyncSession, body: ForgotPasswordRequest, backgro
     if not user:
         return response
 
-    token = create_password_reset_token(user.id)
+    token = issue_password_reset_token(user)
     background_tasks.add_task(send_password_reset_email, to_email=user.email, token=token)
     return response
+
+
+def password_fingerprint(password_hash: str | None) -> str:
+    """A keyed digest of the account's current password hash.
+
+    Put in a reset token (``pwv``) and checked at reset, it makes the token
+    single-use without a table of spent tokens: resetting changes the hash, so
+    the fingerprint no longer matches and the same link is dead. It also kills
+    every other outstanding link the moment the password changes by any route.
+    Keyed with SECRET_KEY because the token is readable by whoever holds it,
+    and a bare hash of the hash would still be something to attack offline.
+    An account with no password yet fingerprints the empty string.
+    """
+    return hmac.new(
+        settings.SECRET_KEY.encode(), (password_hash or "").encode(), hashlib.sha256
+    ).hexdigest()[:32]
+
+
+def issue_password_reset_token(user: User) -> str:
+    return create_password_reset_token(
+        user.id, password_fingerprint=password_fingerprint(user.password_hash)
+    )
 
 
 async def reset_password(
     db: AsyncSession, body: ResetPasswordRequest, background_tasks: BackgroundTasks
 ) -> dict:
-    uid = _parse_user_id(verify_password_reset_token(body.token))
+    user_id, token_fingerprint = decode_password_reset_token(body.token)
+    uid = _parse_user_id(user_id)
 
     result = await db.execute(select(User).where(User.id == uid))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Single use. The token only works against the password it was issued for:
+    # once that password changes (by this reset or any other way) the link is
+    # spent. A token with no fingerprint (issued before this check existed) is
+    # refused the same way. Same message as an expired token, deliberately.
+    if token_fingerprint is None or not hmac.compare_digest(
+        token_fingerprint, password_fingerprint(user.password_hash)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
     user.password_hash = hash_password(body.new_password)
+    # Sign out every session. A reset is what someone does when they think the
+    # account is compromised; leaving existing sessions alive meant whoever was
+    # already in stayed in with the new password set. Unlike change_password
+    # there is no "current" session to spare: this request is unauthenticated.
+    revoked = await revoke_other_sessions(db, user.id, current_token=None)
+    append_audit(
+        db,
+        entity_type="AUTH",
+        entity_id=user.id,
+        action="PASSWORD_RESET",
+        actor_id=user.id,
+        after_state={"sessions_revoked": revoked["revoked"]},
+    )
     await db.commit()
 
     # Queued only after the commit: the notice must never describe a change

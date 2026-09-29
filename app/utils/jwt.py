@@ -151,14 +151,19 @@ def verify_email_token(token: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid or expired verification token")
 
 
-def create_password_reset_token(user_id: str) -> str:
-    return create_access_token(
-        data={"sub": str(user_id), "purpose": "password_reset"},
-        expires_delta=timedelta(hours=1)
-    )
+def create_password_reset_token(user_id: str, *, password_fingerprint: str | None = None) -> str:
+    """A one-hour reset token. ``password_fingerprint`` (``pwv``) ties it to the
+    password the account has right now; see app/auth/service.reset_password,
+    which refuses a token whose fingerprint no longer matches. Without one the
+    token cannot reset anything there."""
+    data = {"sub": str(user_id), "purpose": "password_reset"}
+    if password_fingerprint is not None:
+        data["pwv"] = password_fingerprint
+    return create_access_token(data=data, expires_delta=timedelta(hours=1))
 
 
-def verify_password_reset_token(token: str) -> str:
+def decode_password_reset_token(token: str) -> tuple[str, str | None]:
+    """(user id, password fingerprint or None) from a valid reset token."""
     try:
         payload = jwt.decode(
             token,
@@ -166,11 +171,15 @@ def verify_password_reset_token(token: str) -> str:
             algorithms=[settings.ALGORITHM],
             options={"verify_aud": False},
         )
-        if payload.get("purpose") != "password_reset":
-            raise HTTPException(status_code=400, detail="Invalid token purpose")
-        user_id = payload.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=400, detail="Invalid token claim")
-        return user_id
     except JWTError:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    if payload.get("purpose") != "password_reset":
+        raise HTTPException(status_code=400, detail="Invalid token purpose")
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid token claim")
+    return user_id, payload.get("pwv")
+
+
+def verify_password_reset_token(token: str) -> str:
+    return decode_password_reset_token(token)[0]
