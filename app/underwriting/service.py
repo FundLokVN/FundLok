@@ -465,6 +465,11 @@ async def approve_score_run(db: AsyncSession, score_run_id: UUID) -> tuple[Score
     sr.locked_at = datetime.now(timezone.utc)
     db.add(sr)
     await db.flush()
+    # The engine's half just landed; if the operator already approved the
+    # application, the project goes on the marketplace now.
+    from app.projects.service import activate_project_if_approved
+
+    await activate_project_if_approved(db, sr.application_id)
     await db.refresh(sr)
     return sr, True
 

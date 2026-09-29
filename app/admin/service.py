@@ -55,6 +55,7 @@ from app.notifications.models import (
     EVENT_APPLICATION_REJECTED,
 )
 from app.notifications.service import create_notification
+from app.projects.service import activate_project_if_approved
 from app.users.models import Role, User
 from app.utils import r2
 from app.utils.audit import append_audit
@@ -432,6 +433,12 @@ async def decide_application(
     if decision is AdminDecision.rejected:
         row.status = "REJECTED"
     db.add(row)
+
+    # The operator's half just landed; if the engine's (a LOCKED score run) is
+    # already there, the project goes on the marketplace now.
+    if decision is AdminDecision.approved:
+        await db.flush()
+        await activate_project_if_approved(db, row.id, actor_id=actor.id)
 
     # Tell the applicant. Staged on THIS transaction, not sent from it: if the
     # decision rolls back the notification goes with it, so nobody is ever told

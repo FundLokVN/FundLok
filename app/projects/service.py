@@ -143,6 +143,67 @@ async def display_projects(db: AsyncSession, current_user: User):
 
 
 
+async def activate_project_if_approved(
+    db: AsyncSession, application_id: UUID, *, actor_id: UUID | None = None
+) -> bool:
+    """Put a DRAFT project on the marketplace once its application has BOTH
+    approvals: the operator's (admin_approval == APPROVED) and the engine's
+    (a LOCKED score run). Returns True when it flipped the project to ACTIVE.
+
+    Called from both places a half of the gate lands (admin decide_application
+    and underwriting approve_score_run), because either can come second.
+
+    Before this, nothing ever set a project ACTIVE: creation leaves it DRAFT,
+    ACTIVE was only the column's server default, so a genuinely approved SME
+    never reached /projects/public while seeded rows did whatever their state.
+
+    Only DRAFT moves. A SUSPENDED, CLOSED or ARCHIVED project was taken off the
+    marketplace on purpose, and an approval must not quietly put it back.
+    Staged on the caller's transaction; the caller commits.
+    """
+    from app.lending.models import ScoreRun
+    from app.utils.audit import append_audit
+
+    application = await db.get(LoanApplication, application_id)
+    if application is None or application.admin_approval != "APPROVED":
+        return False
+    locked = (
+        await db.execute(
+            select(ScoreRun.id)
+            .where(ScoreRun.application_id == application_id, ScoreRun.status == "LOCKED")
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if locked is None:
+        return False
+
+    project = (
+        await db.execute(
+            select(Project).where(Project.id == application.project_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if project is None or project.status != "DRAFT":
+        return False
+
+    project.status = "ACTIVE"
+    db.add(project)
+    append_audit(
+        db,
+        entity_type="PROJECT",
+        entity_id=project.id,
+        action="PROJECT_ACTIVATED",
+        actor_id=actor_id,
+        before_state={"status": "DRAFT"},
+        after_state={
+            "status": "ACTIVE",
+            "application_id": str(application_id),
+            "score_run_id": str(locked),
+        },
+    )
+    await db.flush()
+    return True
+
+
 async def approval_for(db: AsyncSession, application):
     """The applicant-facing summary of an operator approval, or None.
 
