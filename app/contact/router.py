@@ -20,7 +20,8 @@ def submit_contact_form(contact: ContactRequest, background_tasks: BackgroundTas
         purpose=contact.purpose,
     )
 
-    # ...and acknowledge to the sender.
-    background_tasks.add_task(send_contact_autoreply, to_email=contact.email, name=contact.name)
+    # ...and acknowledge to the sender. Nothing from the form goes into this
+    # email: the address is unverified, so it can be anyone's inbox.
+    background_tasks.add_task(send_contact_autoreply, to_email=contact.email)
 
     return {"status": "success", "message": "Information received"}

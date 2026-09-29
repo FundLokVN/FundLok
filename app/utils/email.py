@@ -1,3 +1,4 @@
+import logging
 import smtplib
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
@@ -6,7 +7,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from email_validator import EmailNotValidError, validate_email
+
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # The brand mark, embedded in every HTML email rather than linked.
 #
@@ -116,13 +121,49 @@ def cta_button(href: str, label: str) -> str:
       </table>"""
 
 
+def valid_email_address(address: object) -> str | None:
+    """The address in normalised form if it is a well-formed email, else None.
+
+    Syntax only (check_deliverability=False): no DNS lookup, so it is fast,
+    works offline, and never makes a send depend on a resolver. CR/LF are
+    refused outright because the address goes into a mail header, where a
+    newline would let the value add headers of its own (Bcc: ...).
+    """
+    if not isinstance(address, str) or "\r" in address or "\n" in address:
+        return None
+    try:
+        return validate_email(address, check_deliverability=False).normalized
+    except EmailNotValidError:
+        return None
+
+
 def send_email(
     to_email: str,
     subject: str,
     html_content: str,
     text_content: str | None = None,
     reply_to: str | None = None
-) -> None:
+) -> bool:
+    """Send one email. Returns False, without sending, if ``to_email`` is not a
+    well-formed address.
+
+    Checked here, at the one place every email leaves through, so no caller
+    can skip it. Callers run as background tasks after the response has gone,
+    so a bad address is logged and skipped rather than raised: raising would
+    only produce a traceback nobody sees. The address itself is not logged;
+    the subject says which email was skipped.
+    """
+    recipient = valid_email_address(to_email)
+    if recipient is None:
+        logger.warning("Email not sent, recipient is not a valid address: %s", subject)
+        return False
+    # Reply-To is a convenience, never a reason to drop an email: if it is
+    # malformed the email goes without it.
+    if reply_to is not None:
+        reply_to = valid_email_address(reply_to)
+        if reply_to is None:
+            logger.warning("Reply-To dropped, not a valid address: %s", subject)
+
     # 1. Create message
     #
     # multipart/related wrapping multipart/alternative -- the nesting matters.
@@ -133,7 +174,7 @@ def send_email(
     message = MIMEMultipart("related")
     message["Subject"] = subject
     message["From"] = f"{settings.EMAILS_FROM_NAME} <{settings.EMAILS_FROM_EMAIL}>"
-    message["To"] = to_email
+    message["To"] = recipient
     if reply_to:
         message["Reply-To"] = reply_to
 
@@ -166,9 +207,10 @@ def send_email(
     try:
         if settings.SMTP_USER and settings.SMTP_PASSWORD:
             server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-        server.sendmail(settings.EMAILS_FROM_EMAIL, to_email, message.as_string())
+        server.sendmail(settings.EMAILS_FROM_EMAIL, recipient, message.as_string())
     finally:
         server.quit()
+    return True
 
 
 def send_verification_email(to_email: str, token: str) -> None:
@@ -201,19 +243,31 @@ def send_verification_email(to_email: str, token: str) -> None:
         text_content=text_content
     )
 
-def send_contact_autoreply(to_email: str, name: str) -> None:
+def send_contact_autoreply(to_email: str) -> None:
+    """Acknowledge a contact-form submission to the address the sender typed.
+
+    Carries NO text from the submission, not even the name, and that is the
+    point. The form is anonymous and the address is unverified, so whatever
+    this email contains goes, under FundLok's brand and from FundLok's domain,
+    to any inbox the submitter chooses. It used to greet "Hi {name}" with the
+    name unescaped: a "name" of HTML became a FundLok-branded phishing email
+    (links, fake buttons) sent to a victim of the attacker's choosing. Escaping
+    would stop the HTML but not plain-text bait ("your account is locked, call
+    ..."), so the greeting is generic instead. The submitted details still
+    reach the team, escaped, in send_contact_notification.
+    """
     subject = "We have received your message - FundLok"
-    
+
     html_content = email_shell(
-        f"""
+        """
           <h2 style="margin:0 0 20px;font-size:22px;color:#111827;">Thank you for contacting FundLok!</h2>
-          <p>Hi {name},</p>
+          <p>Hello,</p>
           <p>We have successfully received your information. Our team will review your message and get back to you as soon as possible.</p>
           <p>Best regards,<br/>The FundLok Team</p>
         """
     )
-    
-    text_content = f"Hi {name},\n\nWe have successfully received your information. Our team will review your message and get back to you as soon as possible.\n\nBest regards,\nThe FundLok Team"
+
+    text_content = "Hello,\n\nWe have successfully received your information. Our team will review your message and get back to you as soon as possible.\n\nBest regards,\nThe FundLok Team"
 
     send_email(
         to_email=to_email,
@@ -441,9 +495,16 @@ def send_new_device_signin_alert(
     (users.signin_alerts_enabled), and only for an unrecognised device: mailing
     on every sign-in trains people to ignore it.
     """
+    import html as html_lib
+
     security_link = f"{settings.FRONTEND_URL}/dashboard/security"
     reset_link = f"{settings.FRONTEND_URL}/forgot-password"
-    where = ip_address or "an unknown address"
+    # Escaped although safe today: device/browser come from fixed labels plus
+    # digits (app/auth/user_agent.py), but they are derived from a header the
+    # signing-in party controls, and this email goes to the account owner.
+    browser = html_lib.escape(browser)
+    device = html_lib.escape(device)
+    where = html_lib.escape(ip_address or "an unknown address")
 
     html_content = email_shell(
         f"""
