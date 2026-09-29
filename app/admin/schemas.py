@@ -126,6 +126,58 @@ class AdminKybVerificationOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# --- KYC manual review ------------------------------------------------------ #
+
+
+class AdminKycAccountRef(BaseModel):
+    """The account an attempt belongs to, as a reviewer needs to recognise it."""
+
+    id: UUID
+    email: str
+    full_name: str | None
+    status: str
+    created_at: datetime | None
+
+
+class AdminKycConflict(BaseModel):
+    """Another account already APPROVED with the same ID number: the reason an
+    attempt is parked. A reviewer compares the two before deciding."""
+
+    verification_id: UUID
+    user: AdminKycAccountRef
+    full_name: str | None  # the name OCR read on THAT account's card
+    date_of_birth: str | None
+    approved_at: datetime | None
+
+
+class AdminKycVerificationOut(BaseModel):
+    """One GVerify KYC attempt, with everything needed to review it.
+
+    `rejection_reason` is what the investor sees. `conflicts` is recomputed on
+    every read rather than stored, so it reflects the accounts as they are now.
+    """
+
+    id: UUID
+    status: str
+    is_approved: bool
+    rejection_reason: str | None
+    person_number: str | None
+    full_name: str | None
+    date_of_birth: str | None
+    face_match_score: float | None
+    created_at: datetime | None
+    user: AdminKycAccountRef
+    conflicts: list[AdminKycConflict]
+
+
+class AdminKycImageUrlResponse(BaseModel):
+    """A short-lived read URL for one submitted KYC image."""
+
+    url: str
+    expires_in: int
+    content_type: str
+
+
 class AdminApplicationDocument(BaseModel):
     """One file the SME uploaded on the loan-application wizard.
 

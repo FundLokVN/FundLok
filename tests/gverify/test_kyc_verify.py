@@ -396,3 +396,148 @@ async def test_kyc_status_not_found_when_never_attempted(client, make_investor):
     investor = await make_investor()
     resp = await client.get("/gverify/kyc/status", headers=investor["headers"])
     assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# One CCCD, one verified account (vbsec [9])
+#
+# Face match can't tell a real selfie from the card's own portrait cropped and
+# resubmitted, so anyone holding a photo of someone else's ID could verify a
+# second account under that identity. A CCCD number already APPROVED on
+# another account is parked for manual review instead of auto-approved.
+# --------------------------------------------------------------------------- #
+
+
+async def _verify(client, user):
+    return await client.post("/gverify/kyc/verify", json=_body(), headers=user["headers"])
+
+
+async def test_kyc_same_id_on_a_second_account_goes_to_manual_review(
+    client, make_investor, mock_gverify
+):
+    owner, impostor = await make_investor(), await make_investor()
+    assert (await _verify(client, owner)).json()["status"] == "APPROVED"
+
+    resp = await _verify(client, impostor)
+
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    assert data["status"] == "MANUAL_REVIEW"
+    assert data["is_approved"] is False
+    assert data["rejection_reason"] == "Your verification needs a manual review"
+
+
+async def test_kyc_manual_review_reason_does_not_reveal_the_other_account(
+    client, make_investor, mock_gverify
+):
+    # Saying "already verified on another account" would confirm to whoever
+    # holds the card photo that its owner has a FundLok account.
+    owner, impostor = await make_investor(), await make_investor()
+    await _verify(client, owner)
+
+    reason = (await _verify(client, impostor)).json()["rejection_reason"].lower()
+
+    for leak in ("another", "other account", "already", "registered", "duplicate"):
+        assert leak not in reason
+
+
+async def test_kyc_duplicate_check_ignores_ocr_spacing(client, make_investor, mock_gverify):
+    owner, impostor = await make_investor(), await make_investor()
+    await _verify(client, owner)
+    mock_gverify.ocr = _ocr_data(person_number="0792 0300 1234")
+
+    assert (await _verify(client, impostor)).json()["status"] == "MANUAL_REVIEW"
+
+
+async def test_kyc_different_id_on_a_second_account_still_approves(
+    client, make_investor, mock_gverify
+):
+    first, second = await make_investor(), await make_investor()
+    await _verify(client, first)
+    mock_gverify.ocr = _ocr_data(person_number="001099009999")
+
+    assert (await _verify(client, second)).json()["status"] == "APPROVED"
+
+
+@pytest.mark.parametrize("first_outcome", ["REJECTED", "MANUAL_REVIEW"])
+async def test_kyc_only_an_approved_attempt_claims_the_id(
+    client, make_investor, mock_gverify, db_session, first_outcome
+):
+    # A rejected (or still-parked) attempt proves nothing about who owns the
+    # card, so it must not block the real owner verifying later.
+    from app.gverify.models import GVerifyVerification
+
+    squatter, owner = await make_investor(), await make_investor()
+    db_session.add(
+        GVerifyVerification(
+            user_id=squatter["id"], status=first_outcome, person_number="079203001234"
+        )
+    )
+    await db_session.commit()
+
+    assert (await _verify(client, owner)).json()["status"] == "APPROVED"
+
+
+async def test_kyc_duplicate_id_with_mismatched_face_is_rejected_not_reviewed(
+    client, make_investor, mock_gverify
+):
+    # A failed face match is a plain rejection; review is only for a face
+    # match that would otherwise have approved.
+    owner, impostor = await make_investor(), await make_investor()
+    await _verify(client, owner)
+    mock_gverify.face = _face_data(is_matching=False)
+
+    assert (await _verify(client, impostor)).json()["status"] == "REJECTED"
+
+
+async def test_kyc_cannot_resubmit_while_under_manual_review(
+    client, make_investor, mock_gverify
+):
+    owner, impostor = await make_investor(), await make_investor()
+    await _verify(client, owner)
+    await _verify(client, impostor)
+    calls_before = (mock_gverify.ocr_calls, mock_gverify.face_calls)
+
+    resp = await _verify(client, impostor)
+
+    assert resp.status_code == 409
+    assert resp.json() == {"detail": "KYC is under manual review"}
+    # Refused before any (billable) provider call.
+    assert (mock_gverify.ocr_calls, mock_gverify.face_calls) == calls_before
+
+
+async def test_kyc_status_reports_manual_review_as_terminal(
+    client, make_investor, mock_gverify
+):
+    owner, impostor = await make_investor(), await make_investor()
+    await _verify(client, owner)
+    await _verify(client, impostor)
+
+    data = (await client.get("/gverify/kyc/status", headers=impostor["headers"])).json()
+
+    assert data["status"] == "MANUAL_REVIEW"
+    assert data["is_terminal"] is True
+    assert data["is_approved"] is False
+
+
+async def test_kyc_manual_review_audit_names_the_cause(
+    client, make_investor, mock_gverify, db_session
+):
+    from sqlalchemy import select
+
+    from app.lending.models import AuditLog
+
+    owner, impostor = await make_investor(), await make_investor()
+    await _verify(client, owner)
+    verification_id = (await _verify(client, impostor)).json()["verification_id"]
+
+    row = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.entity_type == "GVERIFY_KYC_VERIFICATION",
+                AuditLog.entity_id == uuid.UUID(verification_id),
+            )
+        )
+    ).scalar_one()
+    assert row.after_state["status"] == "MANUAL_REVIEW"
+    assert row.after_state["review_cause"] == "PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT"

@@ -219,6 +219,20 @@ PENDING ──[GVerify HTTP error / success=false]─► FAILED
    billable provider call).
 8. Provider identifiers (`transaction_code`) are stored for reconciliation with
    GVerify's billing/console.
+9. One CCCD, one verified account (v1.4, vbsec finding [9]). When the face
+   match would approve but another account already holds an `APPROVED` KYC
+   attempt with the same `person_number` (compared with whitespace removed),
+   the attempt ends `MANUAL_REVIEW` instead. Face match cannot tell a real
+   selfie from the card's own portrait cropped and resubmitted, so without this
+   anyone holding a photo of someone else's ID could verify a second account
+   under that identity. The user-facing `rejection_reason` is the neutral
+   "Your verification needs a manual review"; it must not say the ID is in use
+   elsewhere, which would confirm the owner has an account. The cause is
+   recorded only in the audit row (`review_cause:
+   PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT`). A face mismatch still ends
+   `REJECTED`, and only `APPROVED` attempts claim a number.
+10. While the latest attempt is `MANUAL_REVIEW`, a new submission is refused
+    with 409 "KYC is under manual review" before any provider call.
 
 ---
 
@@ -264,9 +278,9 @@ outcome is in the body. Only provider failures surface as 5xx.
 | # | Question | Owner | Resolution |
 |---|---|---|---|
 | 1 | Which provider wins long-term — does GVerify replace Didit for KYC, and does the cut-over rewire `/kyc/*` or keep `/gverify/kyc/*`? Needs an ADR. | Edward | — |
-| 2 | Do we require a liveness step (passive liveness = 2 portraits) before APPROVED, or is OCR + face match enough for the sandbox? | Edward | — |
+| 2 | Do we require a liveness step (passive liveness = 2 portraits) before APPROVED, or is OCR + face match enough for the sandbox? | Edward | — Still open, and now the main gap: vbsec [9] showed a cropped card portrait passes face match. Rule 9 limits it to identities not yet verified on FundLok. |
 | 3 | Real `GVERIFY_BASE_URL` + credentials and sandbox access from Datatrust/PATK. | Phat | — |
-| 4 | Should `person_number` be unique-per-approved-user (block one CCCD across accounts)? | Edward | — |
+| 4 | Should `person_number` be unique-per-approved-user (block one CCCD across accounts)? | Edward | Interim (v1.4): a duplicate is parked in `MANUAL_REVIEW`, not auto-approved (§6 rule 9). Open: the final policy, a KYC review endpoint to settle parked attempts, and a DB-level guard against two approvals racing. |
 | 5 | KYB via `/ekyb/api/*` (business registration OCR + tax code verify) — separate spec. | Edward | — |
 
 ---
@@ -279,3 +293,4 @@ outcome is in the body. Only provider failures surface as 5xx.
 | 1.1 | 2026-07-14 | Phat | Retain submitted images in R2 (`verification/KYC/<id>/`); surface biometric invalid_message verbatim; phone QR handoff endpoints |
 | 1.2 | 2026-07-14 | Phat | Supersedes 1.1's invalid_message rule: face-match warning is advisory only (Datatrust guidance) — verdict decided by `is_matching` + `match` threshold alone |
 | 1.3 | 2026-07-15 | Phat | Verdict = `is_matching` alone (live testing showed `match` is a binary mirror, `matching` the similarity %); dropped `GVERIFY_FACE_MATCH_THRESHOLD`; image order fixed to img1 = ID front, img2 = portrait |
+| 1.4 | 2026-09-29 | Phat | vbsec [9]: a `person_number` already approved on another account parks the attempt in `MANUAL_REVIEW` (rule 9); resubmission refused while in review (rule 10). Liveness (OQ2) still open |

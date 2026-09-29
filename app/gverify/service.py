@@ -16,7 +16,7 @@ from __future__ import annotations
 import base64
 import binascii
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -24,6 +24,7 @@ from app.gverify import client, storage
 from app.gverify.models import (
     STATUS_APPROVED,
     STATUS_FAILED,
+    STATUS_MANUAL_REVIEW,
     STATUS_PENDING,
     STATUS_REJECTED,
     GVerifyVerification,
@@ -193,10 +194,61 @@ async def run_kyc_verification(
     if reason is not None:
         attempt.status = STATUS_REJECTED
         attempt.rejection_reason = reason
+    elif await person_number_approved_elsewhere(db, attempt.person_number, user.id):
+        # One CCCD, one verified account. Face match alone can't tell a real
+        # selfie from the card's own portrait cropped and resubmitted, so
+        # anyone holding a photo of someone else's ID could otherwise verify
+        # a second account under that identity. Parked for a human rather than
+        # rejected: a person may legitimately have lost access to an earlier
+        # account. The reason is deliberately neutral; saying the ID is
+        # already verified elsewhere would confirm the owner has an account.
+        attempt.status = STATUS_MANUAL_REVIEW
+        attempt.rejection_reason = MANUAL_REVIEW_REASON
     else:
         attempt.status = STATUS_APPROVED
     await db.flush()
     return attempt
+
+
+# Shown to the user; see run_kyc_verification for why it names no cause.
+MANUAL_REVIEW_REASON = "Your verification needs a manual review"
+
+
+def _normalize_person_number(value: str | None) -> str:
+    return "".join((value or "").split())
+
+
+async def approved_elsewhere(
+    db: AsyncSession, person_number: str | None, user_id
+) -> list[GVerifyVerification]:
+    """APPROVED KYC attempts on OTHER accounts with this ID number, oldest first.
+
+    Compared after removing whitespace, since OCR output can vary in spacing.
+    Any approved attempt counts, not only an account's newest one: an approval
+    is the claim that matters, whatever the account did afterwards. Also used
+    by the admin review screen to show the reviewer which accounts conflict.
+    """
+    wanted = _normalize_person_number(person_number)
+    if not wanted:
+        return []
+    result = await db.execute(
+        select(GVerifyVerification)
+        .where(
+            GVerifyVerification.verification_type == "KYC",
+            GVerifyVerification.status == STATUS_APPROVED,
+            GVerifyVerification.user_id != user_id,
+            func.replace(GVerifyVerification.person_number, " ", "") == wanted,
+        )
+        .order_by(GVerifyVerification.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def person_number_approved_elsewhere(
+    db: AsyncSession, person_number: str | None, user_id
+) -> bool:
+    """True if another account already holds an APPROVED KYC with this ID number."""
+    return bool(await approved_elsewhere(db, person_number, user_id))
 
 
 def face_match_score(attempt: GVerifyVerification) -> float | None:
