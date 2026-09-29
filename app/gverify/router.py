@@ -21,6 +21,7 @@ from app.core.database import get_db
 from app.gverify import kyb_service, service
 from app.gverify import storage
 from app.gverify.client import GVerifyError
+from app.gverify.models import STATUS_MANUAL_REVIEW
 from app.gverify.schemas import (
     HandoffResponse,
     KybRepresentative,
@@ -58,6 +59,10 @@ async def _run_verification(
     latest = await service.latest_for_user(db, user.id)
     if latest is not None and latest.is_approved:
         raise HTTPException(status_code=409, detail="KYC is already approved")
+    # A parked attempt waits for a person. Resubmitting would only park again,
+    # and every attempt is two billable provider calls.
+    if latest is not None and latest.status == STATUS_MANUAL_REVIEW:
+        raise HTTPException(status_code=409, detail="KYC is under manual review")
 
     try:
         attempt = await service.run_kyc_verification(
@@ -80,7 +85,17 @@ async def _run_verification(
         entity_id=attempt.id,
         action="VERIFY",
         actor_id=user.id,
-        after_state={"status": attempt.status, "person_number": attempt.person_number},
+        after_state={
+            "status": attempt.status,
+            "person_number": attempt.person_number,
+            # Internal only (never shown to the user): tells a reviewer why
+            # the attempt was parked. The only automatic cause today.
+            **(
+                {"review_cause": "PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT"}
+                if attempt.status == STATUS_MANUAL_REVIEW
+                else {}
+            ),
+        },
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()

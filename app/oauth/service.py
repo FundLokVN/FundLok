@@ -218,8 +218,9 @@ class OAuthProviderBase(ABC):
         await db.execute(delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user.id))
         await db.execute(delete(WebAuthnChallenge).where(WebAuthnChallenge.user_id == user.id))
 
-        # Visible in the account's security history, so an operator can see
-        # why a password or authenticator the account used to have is gone.
+        # On the admin audit trail (entity USER, which the user's own security
+        # screen doesn't list), so an operator can see why a password or
+        # authenticator the account used to have is gone.
         append_audit(
             db,
             entity_type="USER",
