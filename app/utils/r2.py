@@ -72,14 +72,30 @@ def get_bytes(file_key: str, *, max_bytes: int, bucket: str | None = None) -> by
     return data
 
 
-def presign_put(file_key: str, content_type: str) -> str:
-    """Presigned PUT URL; the client must send the same Content-Type header."""
+def presign_put(file_key: str, content_type: str, *, content_length: int) -> str:
+    """Presigned PUT URL bound to one Content-Type AND one exact size.
+
+    Both are signed headers: storage rejects the PUT unless the client sends
+    the same Content-Type and a Content-Length equal to ``content_length``.
+    Signing the length is what enforces a size limit. Without it the URL
+    accepted anything up to R2's 5 GB single-PUT maximum, whatever size the
+    caller declared (and had checked) at presign. A presigned POST with a
+    content-length-range policy would allow a range instead, but R2 does not
+    support POST uploads.
+
+    Callers pass the size they validated against their own limit. A browser
+    sets Content-Length to the file's byte size itself, so declaring
+    ``file.size`` matches automatically.
+    """
+    if content_length <= 0:
+        raise ValueError("content_length must be positive")
     return _client().generate_presigned_url(
         "put_object",
         Params={
             "Bucket": settings.R2_BUCKET,
             "Key": file_key,
             "ContentType": content_type,
+            "ContentLength": content_length,
         },
         ExpiresIn=settings.R2_PRESIGN_EXPIRE_SECONDS,
     )

@@ -28,7 +28,7 @@ def storage(monkeypatch):
         return blank_pdf() if "cic_report" in key else FILINGS
 
     monkeypatch.setattr("app.uploads.parsers.cic._text", lambda raw: report_text())
-    monkeypatch.setattr("app.uploads.service.presign_put", lambda key, ct: f"https://r2.test/{key}")
+    monkeypatch.setattr("app.uploads.service.presign_put", lambda key, ct, **kw: f"https://r2.test/{key}")
     monkeypatch.setattr("app.uploads.service.head_object", lambda key, **kw: {"size": 1024, "content_type": None})
     monkeypatch.setattr("app.uploads.service.get_bytes", get_bytes)
     monkeypatch.setattr("app.uploads.service.delete_object", lambda key: None)

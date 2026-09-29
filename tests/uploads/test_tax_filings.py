@@ -192,7 +192,7 @@ def test_not_a_zip():
 @pytest.fixture
 def storage(monkeypatch):
     state = {"object": folder_zip({**vat_months(), "B02.xml": statements_xml()})}
-    monkeypatch.setattr("app.uploads.service.presign_put", lambda key, ct: f"https://r2.test/{key}")
+    monkeypatch.setattr("app.uploads.service.presign_put", lambda key, ct, **kw: f"https://r2.test/{key}")
     monkeypatch.setattr("app.uploads.service.head_object", lambda key, **kw: {"size": 1024, "content_type": "application/zip"})
     monkeypatch.setattr("app.uploads.service.get_bytes", lambda key, **kw: state["object"])
     monkeypatch.setattr("app.uploads.service.delete_object", lambda key: None)

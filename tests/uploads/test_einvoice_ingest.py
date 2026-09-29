@@ -14,7 +14,7 @@ from tests.uploads.einvoice_fixtures import SELLER, Inv, archive, listing_xlsx, 
 @pytest.fixture
 def storage(monkeypatch):
     state = {"object": archive(year_of_listings())}
-    monkeypatch.setattr("app.uploads.service.presign_put", lambda key, ct: f"https://r2.test/{key}")
+    monkeypatch.setattr("app.uploads.service.presign_put", lambda key, ct, **kw: f"https://r2.test/{key}")
     monkeypatch.setattr(
         "app.uploads.service.head_object",
         lambda key, **kw: {"size": len(state["object"]), "content_type": "application/zip"},

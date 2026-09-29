@@ -106,7 +106,9 @@ async def create_upload_presign(
         )
         db.add(doc)
     await db.flush()
-    upload_url = presign_put(file_key, body.content_type)
+    # Signed to exactly the size just checked against the type's limit, so
+    # the URL cannot carry a bigger file than the one declared.
+    upload_url = presign_put(file_key, body.content_type, content_length=body.size)
     return doc, upload_url, settings.R2_PRESIGN_EXPIRE_SECONDS
 
 
@@ -139,7 +141,11 @@ async def confirm_uploads(
         if head is None:
             raise HTTPException(status_code=400, detail=f"Object not found in storage: {key}")
         max_size = DOCUMENT_TYPE_RULES[doc.document_type]["max_size"]
-        if head["size"] and head["size"] > max_size:
+        if head["size"] is not None and head["size"] > max_size:
+            # Normally unreachable now that the upload URL signs the size, but
+            # an object put another way (or before that fix) must not linger:
+            # refusing it without deleting it left the oversized file in R2.
+            delete_object(key)
             raise HTTPException(status_code=400, detail=f"Uploaded object too large: {key}")
         doc.file_size_bytes = head["size"]
         if head["content_type"]:

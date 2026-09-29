@@ -160,7 +160,8 @@ def create_avatar_presign(body: AvatarPresignRequest, current_user: User) -> tup
             detail=f"Avatar too large (max {AVATAR_MAX_SIZE} bytes)",
         )
     file_key = _avatar_key(current_user.id, ext)
-    upload_url = presign_put(file_key, body.content_type)
+    # Signed to the checked size; see presign_put.
+    upload_url = presign_put(file_key, body.content_type, content_length=body.size)
     return file_key, upload_url, settings.R2_PRESIGN_EXPIRE_SECONDS
 
 
@@ -174,7 +175,9 @@ async def confirm_avatar(db: AsyncSession, body: AvatarConfirmRequest, current_u
     head = head_object(body.file_key)
     if head is None:
         raise HTTPException(status_code=400, detail="Object not found in storage")
-    if head["size"] and head["size"] > AVATAR_MAX_SIZE:
+    if head["size"] is not None and head["size"] > AVATAR_MAX_SIZE:
+        # Delete as well as refuse, so a refused upload doesn't stay stored.
+        delete_object(body.file_key)
         raise HTTPException(status_code=400, detail="Uploaded avatar too large")
 
     old_key = current_user.avatar_key
