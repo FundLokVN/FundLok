@@ -201,9 +201,14 @@ class EInvoicePreviewOut(BaseModel):
     warnings: list[dict[str, str]]
 
 
+class VatMonthOut(BaseModel):
+    period: str  # MM/YYYY
+    revenue_vnd: int
+
+
 class TaxFilingsPreviewOut(BaseModel):
-    """The step-3 prefill from the SME's tax filings, before Send. Advisory:
-    confirm re-parses the stored file."""
+    """The prefill from the SME's tax filings, before Send. Advisory: confirm
+    re-parses the stored file."""
 
     fiscal_year: int
     regime: str
@@ -211,15 +216,27 @@ class TaxFilingsPreviewOut(BaseModel):
     tax_code: str
     cogs_y1: int
     owner_withdrawal_pct: float | None
-    # Hints only: no filing splits costs into fixed and variable, so step 3
-    # asks the SME to type both and shows these beside the fields.
+    # Fixed and variable cost. No filing labels a cost fixed or variable, so
+    # these follow the stated rule in app/uploads/parsers/statements.py:
+    # fixed = management expense + financial expense, variable = selling expense.
+    fixed_cost_y1: int
+    variable_cost_excl_cogs_y1: int
+    # What the two are made of, so the wizard can show its working. The
+    # management expense is line 26 on TT200 and the combined line 24 on TT133,
+    # which has no selling line (selling_expense_vnd is 0 there).
     admin_expense_vnd: int
     selling_expense_vnd: int
+    financial_expense_vnd: int
     revenue_net_vnd: int
     net_profit_vnd: int
     interest_expense_vnd: int
     vat_months: int
     vat_period: str | None
+    # The signed monthly revenue, oldest first ([34] on each 01/GTGT). Empty when
+    # the upload was the statement alone. The wizard uses it to work out the 12
+    # months BEFORE the e-invoice window, which no 12-month export can state and
+    # the SME would otherwise type.
+    vat_monthly_revenue: list[VatMonthOut] = []
     warnings: list[dict[str, str]]
 
 

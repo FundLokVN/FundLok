@@ -53,7 +53,7 @@ OptionalPercent = Field(default=None, ge=0, le=100)
 
 
 class LoanApplicationFiguresIn(BaseModel):
-    """What the SME states on the revenue and costs steps.
+    """What the wizard saves from the SME's files on the revenue and costs step.
 
     `None` on an optional field means "left blank", which is deliberately NOT
     the same as 0: 0 is a real answer the engine scores (a company with no
@@ -65,10 +65,10 @@ class LoanApplicationFiguresIn(BaseModel):
     revenue_prior_12m: int = VndAmount
     cogs_y1: int = VndAmount
     fixed_cost_y1: int = VndAmount
-    # Zero is a real answer, not a blank: a company that books every overhead
-    # as administration (TT133 account 6422) has no selling cost to report,
-    # and the statements say so. The engine sums it into total cost, so 0 is
-    # safe there. The other two cost lines stay strictly positive.
+    # Zero is a real answer, not a blank: a TT133 statement has no selling
+    # line at all, so its variable cost is 0, and the statements say so. The
+    # engine sums it into total cost, so 0 is safe there. The other two cost
+    # lines stay strictly positive.
     variable_cost_excl_cogs_y1: int = Field(ge=0, le=VND_MAX)
 
     # --- Optional: they sharpen the band rather than enable it --------------

@@ -137,23 +137,31 @@ async def assemble(db: AsyncSession, application_id: UUID) -> dict[str, Any]:
 
     # --- costs ---------------------------------------------------------------
     # Cost of goods sold is a statutory line, so the signed statement wins.
-    # No filing splits costs into fixed and variable (input-sources §6.1): the
-    # SME's saved figures are used — prefilled from the statements by a stated
-    # policy, and adjustable — with the policy noted.
+    # No filing splits costs into fixed and variable (input-sources §6.1), so
+    # those two follow a STATED POLICY, applied by the statement parser:
+    # fixed = management expense + financial expense, variable = selling
+    # expense (see app/uploads/parsers/statements.py). The wizard reads both from
+    # the statements and does not let the applicant change them, so the
+    # statements win here as well; the typed figure is only the fallback for an
+    # application with no statements on file.
     if statements:
         f["cogs_y1"] = _filled(statements["cogs_y1"], "statements", f"FY{statements['fiscal_year']} income statement line 11")
     else:
         f["cogs_y1"] = _filled(figures["cogs_y1"], "typed") if figures.get("cogs_y1") is not None else _missing("not typed")
-    # Typed by the SME. The statements' administration and selling expense
-    # are shown to them as hints, and noted here for comparison.
-    hint = {
-        "fixed_cost_y1": ("administration expense", "admin_expense_vnd"),
-        "variable_cost_excl_cogs_y1": ("selling expense", "selling_expense_vnd"),
-    }
     for key in ("fixed_cost_y1", "variable_cost_excl_cogs_y1"):
-        label, source_key = hint[key]
-        note = f"statements show {label} {statements[source_key]:,}" if statements else None
-        f[key] = _filled(figures[key], "typed", note) if figures.get(key) is not None else _missing("not typed")
+        if statements:
+            # `cost_rule` is what the parser applied; rows stored before it was
+            # renamed carry the same idea under `split_method`.
+            rule = (
+                statements.get("cost_rule")
+                or statements.get("split_method")
+                or f"FY{statements['fiscal_year']} income statement"
+            )
+            f[key] = _filled(statements[key], "statements", rule)
+        elif figures.get(key) is not None:
+            f[key] = _filled(figures[key], "typed")
+        else:
+            f[key] = _missing("not typed")
 
     # --- customers: invoice-level data beats a typed guess --------------------
     for key in ("conc_top1_pct", "conc_top3_pct"):

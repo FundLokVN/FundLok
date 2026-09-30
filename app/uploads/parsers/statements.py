@@ -1,4 +1,4 @@
-"""Read the step-3 cost figures out of a signed year-end financial statement.
+"""Read the step-2 cost figures out of a signed year-end financial statement.
 
 WHAT THE FILE IS
 The electronic statement package filed through HTKK (`HSoThueDTu`), e.g.
@@ -7,23 +7,28 @@ holds several parts; the ones read here:
 
     PL_KQHDSXKD  income statement (B02)      NamNay = this year
     PL_LCTTTT    cash-flow statement (B03)   NamNay
-    PL_CDTK      trial balance               SoPhatSinhTrongKy/No = debits
 
 Two regimes, told apart by the lines present:
   * TT133 (small and micro firms): line 24 is ONE "chi phí quản lý kinh
-    doanh" figure; the selling/admin split lives in the trial balance, account
-    6421 (selling) and 6422 (administration).
+    doanh" figure covering selling and administration together. The form has
+    no line 25 or 26.
   * TT200: line 25 selling ("chi phí bán hàng"), line 26 administration
-    ("chi phí quản lý doanh nghiệp").
+    ("chi phí quản lý doanh nghiệp"). Its line 24 is something else (the share
+    of profit or loss from joint ventures and associates), so it is never
+    counted as a cost.
 
 WHAT IT PRODUCES, AND HOW MUCH OF IT IS POLICY
   cogs_y1            income statement line 11. Statutory; no judgement.
-  fixed_cost_y1      administration expense.     } A STATED POLICY, not a
-  variable_cost_...  selling expense.             } statutory line: no filing
-                                                  } splits costs by behaviour
-                     (grading-input-sources §6.1). Interest (line 23) is left
-                     out of both: it is a financing cost, reported alongside
-                     so underwriting sees the existing debt.
+  fixed_cost_y1      management expense (TT133 line 24, TT200 line 26) plus
+                     financial expense (line 22, which includes interest).
+  variable_cost_...  selling expense (line 25). A TT133 statement has no such
+                     line, so its variable cost is 0.
+                     The last two are a STATED POLICY, not statutory lines: no
+                     filing splits costs by behaviour (grading-input-sources
+                     §6.1). The mapping is Loc's (2026-09-30). It replaced an
+                     earlier rule that split TT133's line 24 with the trial
+                     balance (accounts 6421 and 6422) and left financial
+                     expense out. The trial balance is no longer read.
   owner_withdrawal   profit paid to owners as a % of net profit (income
                      statement line 60). The cash-flow line differs by regime:
                      TT133 (B03-DNN) prints it as line 35 — its line 34 folds
@@ -64,8 +69,11 @@ class FinancialStatements:
     signed: bool
     revenue_net_vnd: int
     cogs_vnd: int
+    # Line 25; 0 on a TT133 statement, which has no such line.
     selling_expense_vnd: int
+    # Line 26 on TT200; on TT133 the combined line 24 (selling and administration).
     admin_expense_vnd: int
+    # Line 22, which contains the interest of line 23.
     financial_expense_vnd: int
     interest_expense_vnd: int
     net_profit_vnd: int
@@ -75,7 +83,8 @@ class FinancialStatements:
     fixed_cost_y1: int
     variable_cost_excl_cogs_y1: int
     owner_withdrawal_pct: float | None
-    split_method: str
+    # Which lines the two policy costs were taken from, in words.
+    cost_rule: str
     warnings: list[dict[str, str]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -142,35 +151,24 @@ def parse_statements_xml(xml: str) -> FinancialStatements:
     if "ct11" not in income or "ct10" not in income:
         raise StatementParseError("The income statement has no revenue or cost of goods sold", "UNREADABLE_STATEMENTS")
     cash = _values(_find(root, "PL_LCTTTT", "NamNay"))
-    trial_debits = _values(_find(root, "PL_CDTK", "SoPhatSinhTrongKy", "No"))
 
     warnings: list[dict[str, str]] = []
+    financial = income.get("ct22", 0)
     if "ct25" in income or "ct26" in income:
         regime = "TT200"
         selling, admin = income.get("ct25", 0), income.get("ct26", 0)
-        split_method = "TT200 income statement: selling (line 25) as variable, administration (line 26) as fixed"
+        cost_rule = (
+            "TT200: fixed = administration (line 26) + financial expense (line 22); "
+            "variable = selling (line 25)"
+        )
     else:
         regime = "TT133"
-        combined = income.get("ct24", 0)
-        s, a = trial_debits.get("ct6421"), trial_debits.get("ct6422")
-        if s is not None or a is not None:
-            s, a = s or 0, a or 0
-            # Line 24 is the statutory figure; the trial balance only says how
-            # to split it. The two can differ by closing entries, so the ratio
-            # is applied to line 24 rather than taking the accounts as-is.
-            if s + a > 0:
-                selling = round(combined * s / (s + a))
-            else:
-                selling = 0
-            admin = combined - selling
-            split_method = (
-                "TT133: line 24 split by the trial balance, account 6421 (selling) "
-                "as variable and 6422 (administration) as fixed"
-            )
-        else:
-            selling, admin = 0, combined
-            split_method = "TT133 with no trial balance: all of line 24 treated as fixed"
-            warnings.append({"code": "SPLIT_ASSUMED", "detail": "no 6421/6422 breakdown; line 24 counted as fixed"})
+        # One combined "chi phí quản lý kinh doanh"; the form has no line 25.
+        selling, admin = 0, income.get("ct24", 0)
+        cost_rule = (
+            "TT133: fixed = management expense (line 24) + financial expense (line 22); "
+            "variable = selling (line 25, which this form does not have)"
+        )
 
     net_profit = income.get("ct60", 0)
     owners_line = "ct35" if regime == "TT133" else "ct36"
@@ -191,7 +189,7 @@ def parse_statements_xml(xml: str) -> FinancialStatements:
     if interest > 0:
         warnings.append({
             "code": "INTEREST_EXPENSE",
-            "detail": f"interest expense {interest:,} VND (existing debt), not counted as an operating cost",
+            "detail": f"interest expense {interest:,} VND (existing debt) is inside financial expense, which counts as a fixed cost",
         })
 
     return FinancialStatements(
@@ -204,14 +202,14 @@ def parse_statements_xml(xml: str) -> FinancialStatements:
         cogs_vnd=income["ct11"],
         selling_expense_vnd=selling,
         admin_expense_vnd=admin,
-        financial_expense_vnd=income.get("ct22", 0),
+        financial_expense_vnd=financial,
         interest_expense_vnd=interest,
         net_profit_vnd=net_profit,
         profit_paid_to_owners_vnd=paid_to_owners,
         cogs_y1=income["ct11"],
-        fixed_cost_y1=admin,
+        fixed_cost_y1=admin + financial,
         variable_cost_excl_cogs_y1=selling,
         owner_withdrawal_pct=owner_pct,
-        split_method=split_method,
+        cost_rule=cost_rule,
         warnings=warnings,
     )

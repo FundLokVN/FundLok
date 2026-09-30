@@ -387,7 +387,7 @@ async def parse_and_record_tax_filings(db: AsyncSession, app_row: LoanApplicatio
 
 
 async def preview_tax_filings(db: AsyncSession, application_id: UUID, raw: bytes, current_user: User):
-    """What step 3 shows the moment the SME picks the file. Stores nothing."""
+    """What the wizard shows the moment the SME picks the file. Stores nothing."""
     app_row = await _get_owned_draft_application(db, application_id, current_user)
     return await parse_and_record_tax_filings(db, app_row, raw)
 
@@ -404,16 +404,19 @@ async def _ingest_tax_filings(db: AsyncSession, app_row: LoanApplication, doc: L
         raise _tax_filings_error(str(exc), "ARCHIVE_TOO_LARGE") from exc
     filings = await parse_and_record_tax_filings(db, app_row, raw)
 
-    # The step-3 figures are prefilled from these statements. Cost of goods
-    # sold is a statutory line, so a saved figure that no longer matches it is
-    # worth underwriting's attention.
+    # The wizard fills these three figures from the statements and locks them.
+    # Grading reads the statements either way, but a saved figure that does not
+    # match means the request did not come from the wizard as it stands (or
+    # from an older version of it), which is worth underwriting's attention.
     figures = app_row.self_reported_figures or {}
-    typed_cogs = figures.get("cogs_y1")
-    if typed_cogs is not None and int(typed_cogs) != filings.statements["cogs_y1"]:
-        filings.warnings.append({
-            "code": "FIGURES_DIFFER",
-            "detail": f"typed cogs_y1 {int(typed_cogs):,} vs statements {filings.statements['cogs_y1']:,}",
-        })
+    for key in ("cogs_y1", "fixed_cost_y1", "variable_cost_excl_cogs_y1"):
+        typed = figures.get(key)
+        stated = filings.statements[key]
+        if typed is not None and int(typed) != stated:
+            filings.warnings.append({
+                "code": "FIGURES_DIFFER",
+                "detail": f"typed {key} {int(typed):,} vs statements {stated:,}",
+            })
 
     summary = (
         await db.execute(select(TaxFilingSummary).where(TaxFilingSummary.loan_application_id == app_row.id))

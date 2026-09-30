@@ -10,6 +10,20 @@
 | **Describes** | `build_grading_input()` — how typed user input becomes a `GradingInput` |
 | **Related** | `grading-engine-core.md` (ACCEPTED) defines `GradingInput`. `grading-input-sources.md` §3.1 is the *inventory of possible* sources and is now **stale in three rows** — see §5. |
 
+> **Update 2026-09-30.** The wizard no longer lets the applicant type any of the
+> ten figures. They are read from the two files on the revenue-and-costs step:
+> revenue and customer shares from the e-invoice zip, the year before it from the
+> monthly VAT declarations, and cost of goods sold, owner withdrawal and the two
+> other costs from the year-end statements. **"Typed" below therefore means
+> "saved through `PUT /loans/applications/{id}/figures`".** The two costs no
+> filing labels follow a stated rule (`app/uploads/parsers/statements.py`, Loc,
+> 2026-09-30): `fixed_cost_y1` = management expense (B02 line 24 on TT133, line
+> 26 on TT200) + financial expense (line 22, interest included), and
+> `variable_cost_excl_cogs_y1` = selling expense (line 25; a TT133 statement has
+> none, so 0). `cogs_y1` is line 11. `grading_inputs.assemble` reads all three
+> from the statements, so a saved figure that differs does not change what is
+> graded and is flagged `FIGURES_DIFFER` at confirm.
+
 > **This is the interim mapping.** No uploaded document is parsed anywhere in the
 > codebase, so every engine input either comes from something a person typed, is
 > modelled from one, is assumed, or is absent. This document exists so the faked

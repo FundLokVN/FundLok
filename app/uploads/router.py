@@ -90,8 +90,9 @@ async def tax_filings_preview(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_sme),
 ):
-    """Read the tax filings as soon as the SME picks them, to prefill step 3.
-    Body: the .zip of the filings folder, or the statement .xml, raw."""
+    """Read the tax filings as soon as the SME picks them, to prefill the costs
+    and the prior-year revenue. Body: the .zip of the filings folder, or the
+    statement .xml, raw."""
     raw = await _read_capped_body(
         request, DOCUMENT_TYPE_RULES["tax_filings"]["max_size"], "TAXFILINGS_ARCHIVE_TOO_LARGE"
     )
@@ -104,13 +105,17 @@ async def tax_filings_preview(
         tax_code=s["tax_code"],
         cogs_y1=s["cogs_y1"],
         owner_withdrawal_pct=s["owner_withdrawal_pct"],
+        fixed_cost_y1=s["fixed_cost_y1"],
+        variable_cost_excl_cogs_y1=s["variable_cost_excl_cogs_y1"],
         admin_expense_vnd=s["admin_expense_vnd"],
         selling_expense_vnd=s["selling_expense_vnd"],
+        financial_expense_vnd=s["financial_expense_vnd"],
         revenue_net_vnd=s["revenue_net_vnd"],
         net_profit_vnd=s["net_profit_vnd"],
         interest_expense_vnd=s["interest_expense_vnd"],
         vat_months=v["months_covered"] if v else 0,
         vat_period=f"{v['period_start']}–{v['period_end']}" if v else None,
+        vat_monthly_revenue=v["monthly_revenue"] if v else [],
         warnings=filings.warnings,
     )
 

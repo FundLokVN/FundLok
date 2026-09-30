@@ -1,9 +1,11 @@
-"""Step 3: tax filings — the year-end statements (cost figures) and the monthly
-VAT declarations (the signed 24-month revenue series).
+"""Tax filings: the year-end statements (cost figures) and the monthly VAT
+declarations (the signed 24-month revenue series).
 
 Checked against the reference filings during development: FY2025 TT133
-package, COGS 64,130,972,146, administration 3,160,138,988, selling 0,
-profit paid to owners 0; 24 consecutive signed VAT months.
+package, COGS (line 11) 64,130,972,146, management expense (line 24)
+3,160,138,988, financial expense (line 22) 2,492,864,367, no selling line, so
+fixed cost 5,653,003,355 and variable cost 0; profit paid to owners 0; 24
+consecutive signed VAT months.
 """
 import io
 import zipfile
@@ -68,30 +70,55 @@ def vat_months(n=24, start=(2024, 8), mst=TAX) -> dict[str, bytes]:
 # --- statements --------------------------------------------------------------
 
 
-def test_tt133_splits_line_24_by_the_trial_balance():
+def test_tt133_fixed_cost_is_line_24_plus_financial_expense():
     s = parse_statements_xml(statements_xml())
     assert s.regime == "TT133" and s.fiscal_year == 2025 and s.signed
-    assert s.cogs_y1 == 6_400_000_000
-    assert s.variable_cost_excl_cogs_y1 == 50_000_000  # 300m × 50/300
-    assert s.fixed_cost_y1 == 250_000_000
-    assert s.fixed_cost_y1 + s.variable_cost_excl_cogs_y1 == 300_000_000
+    assert s.cogs_y1 == 6_400_000_000  # line 11
+    # Line 24 (300m) + line 22 (40m): the combined management expense and the
+    # financial expense, interest included.
+    assert s.fixed_cost_y1 == 340_000_000
+    assert (s.admin_expense_vnd, s.financial_expense_vnd) == (300_000_000, 40_000_000)
 
 
-def test_everything_booked_as_administration_gives_zero_variable_cost():
-    s = parse_statements_xml(statements_xml(selling=0, admin=300_000_000))
-    assert s.variable_cost_excl_cogs_y1 == 0 and s.fixed_cost_y1 == 300_000_000
+def test_tt133_has_no_selling_line_so_variable_cost_is_zero():
+    s = parse_statements_xml(statements_xml())
+    assert s.selling_expense_vnd == 0 and s.variable_cost_excl_cogs_y1 == 0
+    assert "TT133" in s.cost_rule
 
 
-def test_tt133_without_a_trial_balance_counts_line_24_as_fixed_and_says_so():
-    s = parse_statements_xml(statements_xml(trial_balance=False))
-    assert s.fixed_cost_y1 == 300_000_000 and s.variable_cost_excl_cogs_y1 == 0
-    assert "SPLIT_ASSUMED" in [w["code"] for w in s.warnings]
+def test_tt133_ignores_the_trial_balance_even_when_it_shows_selling_expense():
+    # The trial balance used to split line 24 into selling (6421) and
+    # administration (6422). The rule now is Loc's: line 24 is all fixed, and
+    # variable cost is line 25, which TT133 does not have.
+    with_selling = parse_statements_xml(statements_xml(selling=50_000_000, admin=250_000_000))
+    without_tb = parse_statements_xml(statements_xml(trial_balance=False))
+    for s in (with_selling, without_tb):
+        assert s.fixed_cost_y1 == 340_000_000 and s.variable_cost_excl_cogs_y1 == 0
+    assert "SPLIT_ASSUMED" not in [w["code"] for w in without_tb.warnings]
 
 
-def test_tt200_reads_selling_and_administration_lines():
+def test_tt200_fixed_cost_is_administration_plus_financial_expense():
     s = parse_statements_xml(statements_xml(regime="TT200", selling=80_000_000, admin=120_000_000))
     assert s.regime == "TT200"
-    assert (s.variable_cost_excl_cogs_y1, s.fixed_cost_y1) == (80_000_000, 120_000_000)
+    assert s.variable_cost_excl_cogs_y1 == 80_000_000  # line 25
+    assert s.fixed_cost_y1 == 160_000_000  # line 26 (120m) + line 22 (40m)
+
+
+def test_tt200_line_24_is_not_a_cost():
+    # On TT200 line 24 is the share of profit or loss from joint ventures and
+    # associates. It must not be added to fixed cost the way TT133's line 24 is.
+    xml = statements_xml(regime="TT200", selling=80_000_000, admin=120_000_000).replace(
+        "<ct25>", "<ct24>7000000</ct24><ct25>"
+    )
+    assert "<ct24>7000000</ct24>" in xml
+    s = parse_statements_xml(xml)
+    assert s.fixed_cost_y1 == 160_000_000 and s.variable_cost_excl_cogs_y1 == 80_000_000
+
+
+def test_a_statement_without_financial_expense_is_all_management_expense():
+    xml = statements_xml().replace("<ct22>40000000</ct22>", "")
+    s = parse_statements_xml(xml)
+    assert s.financial_expense_vnd == 0 and s.fixed_cost_y1 == 300_000_000
 
 
 def test_owner_withdrawal_is_profit_paid_out_over_net_profit():
@@ -126,10 +153,13 @@ def test_a_loss_year_leaves_owner_withdrawal_blank():
     assert "NO_PROFIT" in [w["code"] for w in s.warnings]
 
 
-def test_interest_is_reported_not_counted_as_operating_cost():
+def test_interest_is_reported_and_counted_inside_financial_expense():
     s = parse_statements_xml(statements_xml())
     assert s.interest_expense_vnd == 35_000_000
-    assert "INTEREST_EXPENSE" in [w["code"] for w in s.warnings]
+    detail = next(w["detail"] for w in s.warnings if w["code"] == "INTEREST_EXPENSE")
+    assert "fixed cost" in detail
+    # Line 23 is part of line 22, so it is in fixed cost once, not twice.
+    assert s.fixed_cost_y1 == s.admin_expense_vnd + s.financial_expense_vnd
 
 
 @pytest.mark.parametrize("xml,code", [
@@ -217,10 +247,45 @@ async def test_preview_prefills_step_3(client, draft, storage):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["cogs_y1"] == 6_400_000_000
-    assert body["admin_expense_vnd"] == 250_000_000 and body["selling_expense_vnd"] == 50_000_000
-    assert "fixed_cost_y1" not in body  # typed by the SME; the statements only hint
+    # Fixed = line 24 + line 22; variable = line 25, which TT133 does not have.
+    assert body["fixed_cost_y1"] == 340_000_000 and body["variable_cost_excl_cogs_y1"] == 0
+    # And what they are made of, so the wizard can show its working.
+    assert body["admin_expense_vnd"] == 300_000_000 and body["selling_expense_vnd"] == 0
+    assert body["financial_expense_vnd"] == 40_000_000
     assert body["owner_withdrawal_pct"] == 20.0
     assert body["vat_months"] == 24
+
+
+async def test_preview_returns_the_signed_monthly_vat_revenue(client, draft, storage):
+    """The wizard works the prior year out of this series, so the preview has to
+    carry the months themselves, not just how many there were."""
+    sme, app_id = draft
+    resp = await client.post(
+        f"/uploads/tax-filings-preview?loan_application_id={app_id}",
+        content=storage["object"],
+        headers={**auth_headers(sme), "Content-Type": "application/zip"},
+    )
+    series = resp.json()["vat_monthly_revenue"]
+    assert len(series) == 24
+    assert series[0] == {"period": "08/2024", "revenue_vnd": 1_000_000_000}
+    assert series[-1] == {"period": "07/2026", "revenue_vnd": 1_000_000_023}
+    # Oldest first, one entry per consecutive month.
+    assert [m["period"] for m in series[:6]] == [
+        "08/2024", "09/2024", "10/2024", "11/2024", "12/2024", "01/2025",
+    ]
+
+
+async def test_preview_of_the_statement_alone_has_no_vat_series(client, draft, storage):
+    sme, app_id = draft
+    resp = await client.post(
+        f"/uploads/tax-filings-preview?loan_application_id={app_id}",
+        content=statements_xml().encode(),
+        headers={**auth_headers(sme), "Content-Type": "application/xml"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["vat_months"] == 0 and body["vat_period"] is None
+    assert body["vat_monthly_revenue"] == []
 
 
 async def test_preview_refusal_carries_a_code(client, draft, storage):
@@ -258,9 +323,84 @@ async def test_confirm_stores_the_filings_and_grading_inputs_use_them(client, db
     assert len(body["fields"]["monthly_revenue"]["value"]["m1_m24"]) == 24
     assert body["fields"]["cogs_y1"]["source"] == "statements"
     assert body["fields"]["owner_withdrawal"]["source"] == "statements"
+    # The two costs no filing labels fixed or variable follow the stated rule,
+    # and they come from the statements too: fixed = line 24 + line 22,
+    # variable = line 25 (none on TT133). Nothing was saved by the SME here, and
+    # neither is missing.
+    assert body["fields"]["fixed_cost_y1"]["source"] == "statements"
+    assert body["fields"]["fixed_cost_y1"]["value"] == 340_000_000
+    assert "line 24" in body["fields"]["fixed_cost_y1"]["note"]
+    assert body["fields"]["variable_cost_excl_cogs_y1"]["source"] == "statements"
+    assert body["fields"]["variable_cost_excl_cogs_y1"]["value"] == 0
+    assert "fixed_cost_y1" not in body["blockers"]
+    assert "variable_cost_excl_cogs_y1" not in body["blockers"]
     # 20% withdrawn, delivered as the engine's 0-100 score (higher is better).
     from app.loans.lite_grading import owner_withdrawal_score
 
     assert body["fields"]["owner_withdrawal"]["value"] == round(owner_withdrawal_score(20.0), 2)
     assert "monthly_revenue" not in body["blockers"]
     assert body["tax_filings"]["vat_months"] == 24
+
+
+async def test_saved_cost_figures_do_not_override_the_statements(client, db_session, make_admin, draft, storage):
+    """The wizard reads fixed and variable cost from the statements and locks
+    them. A request that saved other numbers must not be graded on them, and
+    underwriting is told the two disagreed."""
+    sme, app_id = draft
+    saved = await client.put(
+        f"/loans/applications/{app_id}/figures",
+        json={
+            "revenue_last_12m": 7_000_000_000, "revenue_prior_12m": 6_000_000_000,
+            "cogs_y1": 6_400_000_000,  # equal to the statements: not a difference
+            "fixed_cost_y1": 100_000_000, "variable_cost_excl_cogs_y1": 10_000_000,
+        },
+        headers=auth_headers(sme),
+    )
+    assert saved.status_code in (200, 204), saved.text
+    init = await client.post(
+        "/uploads/init-upload",
+        json={"loan_application_id": app_id, "document_type": "tax_filings", "filename": "24 months running VAT.zip",
+              "content_type": "application/zip", "size": 1024},
+        headers=auth_headers(sme),
+    )
+    assert init.status_code == 201, init.text
+    confirm = await client.post(
+        "/uploads/confirm", json={"loan_application_id": app_id, "file_keys": [init.json()["file_key"]]},
+        headers=auth_headers(sme),
+    )
+    assert confirm.status_code == 200, confirm.text
+
+    summary = (await db_session.execute(select(TaxFilingSummary))).scalar_one()
+    differ = [w["detail"] for w in summary.warnings if w["code"] == "FIGURES_DIFFER"]
+    assert differ == [
+        "typed fixed_cost_y1 100,000,000 vs statements 340,000,000",
+        "typed variable_cost_excl_cogs_y1 10,000,000 vs statements 0",
+    ]
+
+    admin = await make_admin()
+    body = (await client.get(f"/admin/applications/{app_id}/grading-inputs", headers=auth_headers(admin))).json()
+    assert body["fields"]["fixed_cost_y1"]["value"] == 340_000_000
+    assert body["fields"]["fixed_cost_y1"]["source"] == "statements"
+    assert body["fields"]["variable_cost_excl_cogs_y1"]["value"] == 0
+    assert body["fields"]["variable_cost_excl_cogs_y1"]["source"] == "statements"
+
+
+async def test_without_statements_the_saved_cost_figures_are_still_the_fallback(
+    client, make_admin, draft
+):
+    """An application with no tax filings on file has nothing to read the two
+    costs from, so what the applicant saved is used, as before."""
+    sme, app_id = draft
+    saved = await client.put(
+        f"/loans/applications/{app_id}/figures",
+        json={
+            "revenue_last_12m": 7_000_000_000, "revenue_prior_12m": 6_000_000_000,
+            "cogs_y1": 6_400_000_000, "fixed_cost_y1": 100_000_000, "variable_cost_excl_cogs_y1": 10_000_000,
+        },
+        headers=auth_headers(sme),
+    )
+    assert saved.status_code in (200, 204), saved.text
+    admin = await make_admin()
+    body = (await client.get(f"/admin/applications/{app_id}/grading-inputs", headers=auth_headers(admin))).json()
+    assert (body["fields"]["fixed_cost_y1"]["value"], body["fields"]["fixed_cost_y1"]["source"]) == (100_000_000, "typed")
+    assert body["fields"]["variable_cost_excl_cogs_y1"]["source"] == "typed"

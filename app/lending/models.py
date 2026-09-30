@@ -109,12 +109,16 @@ class LoanApplication(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
-    # --- Lite grading: figures the applicant types instead of uploading ------
+    # --- Lite grading: the ten figures the wizard saves ----------------------
     # The VAT and annual-report steps used to demand 48+ files to supply inputs
     # the parser never actually read (grading-input-sources.md §3.1 still marks
-    # monthly_revenue and cogs_y1 "Unparsed"), and two engine inputs
-    # (fixed_cost_y1, variable_cost_excl_cogs_y1) appear in no statutory
-    # document at all. So the applicant states them directly.
+    # monthly_revenue and cogs_y1 "Unparsed"), so the applicant used to type the
+    # figures. The wizard now reads all ten out of the e-invoice zip and the tax
+    # filings and saves what it read; nothing on that step is typed. Two engine
+    # inputs (fixed_cost_y1, variable_cost_excl_cogs_y1) appear in no statutory
+    # document as such: they follow the statements' stated policy (fixed =
+    # management expense + financial expense, variable = selling expense; see
+    # uploads/parsers/statements.py).
     #
     # JSONB rather than one column per figure, for the same reason
     # ScoreRun.factor_results is JSONB: the field list is still provisional

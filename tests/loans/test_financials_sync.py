@@ -122,8 +122,13 @@ async def test_a_completed_application_is_graded_from_its_own_evidence(
     assert (row.company_size, row.duration_months) == ("small", 3)  # 25 employees
     assert len(row.monthly_revenue_vnd) == 24  # the signed VAT series
     assert int(row.cogs_y1_vnd) == 6_400_000_000  # the statements, not the typed 2.4bn
-    assert row.cic_score == 629 and row.kyc_aml_passed is True
+    # Fixed and variable cost are the statements' as well, not the 600m and 0
+    # the applicant saved: the wizard reads both from the statements and locks
+    # them, so grading does the same. Fixed = line 24 (300m) + line 22 (40m);
+    # a TT133 statement has no selling line, so variable is 0.
+    assert int(row.fixed_cost_y1_vnd) == 340_000_000
     assert int(row.variable_cost_excl_cogs_y1_vnd) == 0
+    assert row.cic_score == 629 and row.kyc_aml_passed is True
 
 
 async def test_an_operator_entered_row_is_not_overwritten(client, db_session, make_user, make_admin, storage):

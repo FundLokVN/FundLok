@@ -31,7 +31,7 @@ from app.uploads.parsers.statements import (
 )
 from app.uploads.parsers.vat import VatParseError, build_series, parse_declaration_zip
 
-PARSER_VERSION = "tax-filings-1.0"
+PARSER_VERSION = "tax-filings-1.1"
 MAX_ENTRIES = 60
 MAX_ENTRY_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_BYTES = 100 * 1024 * 1024
