@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin import service
@@ -155,6 +155,7 @@ async def decide_application(
     application_id: UUID,
     body: AdminDecisionRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -170,6 +171,7 @@ async def decide_application(
         note=body.note,
         actor=current_user,
         ip_address=request.client.host if request.client else None,
+        background_tasks=background_tasks,
     )
 
 

@@ -525,3 +525,43 @@ def send_new_device_signin_alert(
         subject="New sign-in to your FundLok account",
         html_content=html_content,
     )
+
+
+def send_application_updated_email(to_email: str) -> None:
+    """Tell an applicant their loan application has an update, with a button to
+    read it on the site.
+
+    Deliberately says only that it was UPDATED, not what the decision was: the
+    verdict, the reason and the next steps belong behind the sign-in, where the
+    page can show them with the disclosures that must accompany them. An email
+    that announced "approved" would read as a promise of funds, and an
+    investor-funded facility is not one until it is signed. Vietnamese first,
+    English beneath, because the account has no stored language.
+    """
+    link = f"{settings.FRONTEND_URL}/dashboard"
+    subject = "Hồ sơ vay của bạn đã được cập nhật | Your loan application has been updated"
+
+    html_content = email_shell(
+        f"""
+          <h1 style="margin:0 0 16px;font-size:22px;font-weight:700;color:#111827;">Hồ sơ vay của bạn đã được cập nhật</h1>
+          <p>Hồ sơ đề nghị vay của bạn trên <strong>FundLok</strong> vừa có cập nhật mới. Vui lòng đăng nhập để xem chi tiết.</p>
+          <h2 style="margin:28px 0 12px;font-size:18px;font-weight:700;color:#111827;">Your loan application has been updated</h2>
+          <p>Your loan application on <strong>FundLok</strong> has a new update. Please sign in to see the details.</p>
+          {cta_button(link, "Xem trên FundLok / View on FundLok")}
+          <p style="word-break:break-all;color:#6b7280;font-size:13px;"><a href="{link}" style="color:#16a34a;">{link}</a></p>
+        """
+    )
+
+    text_content = (
+        "Hồ sơ vay của bạn trên FundLok đã được cập nhật. Đăng nhập để xem chi tiết: "
+        f"{link}\n\n"
+        "Your loan application on FundLok has been updated. Sign in to see the "
+        f"details: {link}"
+    )
+
+    send_email(
+        to_email=to_email,
+        subject=subject,
+        html_content=html_content,
+        text_content=text_content,
+    )

@@ -235,3 +235,7 @@ pgdata/
 docs/specs/banking/vpbank-proposal/**/*.pdf
 docs/specs/banking/vpbank-proposal/05-generators/*-print.html
 docs/specs/banking/vpbank-proposal/_superseded/*.zip
+
+# vbsec security scan reports (list vulnerabilities by file/line): never commit
+# vbsec-reports/
+# .vbsec-tmp/

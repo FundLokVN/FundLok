@@ -10,7 +10,7 @@ from sqlalchemy.sql import Select
 # Only HTTPException: `status` is already a filter-parameter name all through
 # this module, so importing fastapi.status would shadow it inside every list
 # function. The one status code used below is written out instead.
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 
 from app.admin.schemas import (
     ActorOut,
@@ -54,6 +54,8 @@ from app.notifications.models import (
     EVENT_APPLICATION_APPROVED,
     EVENT_APPLICATION_REJECTED,
 )
+from app.notifications import realtime
+from app.utils.email import send_application_updated_email
 from app.notifications.service import create_notification
 from app.projects.service import activate_project_if_approved
 from app.users.models import Role, User
@@ -368,6 +370,7 @@ async def decide_application(
     note: str | None,
     actor: User,
     ip_address: str | None = None,
+    background_tasks: BackgroundTasks | None = None,
 ) -> AdminLoanApplicationRow:
     """Record the operator half of the two-approval gate.
 
@@ -491,6 +494,18 @@ async def decide_application(
         ip_address=ip_address,
     )
     await db.commit()
+    # Only after the commit: a rolled-back decision must never ping anyone.
+    await realtime.publish(owner_ids)
+    if background_tasks is not None and owner_ids:
+        # An email per owner, off the request: SMTP is blocking and slow, and a
+        # mail failure must not turn a recorded decision into an error.
+        addresses = (
+            (await db.execute(select(User.email).where(User.id.in_(owner_ids))))
+            .scalars()
+            .all()
+        )
+        for address in addresses:
+            background_tasks.add_task(send_application_updated_email, address)
     await db.refresh(row, ["admin_approval", "status", "decided_at", "decision_note"])
     return AdminLoanApplicationRow.model_validate(row)
 

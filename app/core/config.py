@@ -83,6 +83,16 @@ class Settings(BaseSettings):
     # password-equivalent secrets in plaintext.
     TOTP_ENCRYPTION_KEY: str | None = None
 
+    # PartyKit realtime push for the notification bell (app/notifications/
+    # realtime.py). All three unset = feature off and polling is the only path.
+    # PARTYKIT_HOST is e.g. "fundlok-notifications.<user>.partykit.dev" (no
+    # scheme). The two secrets are DIFFERENT on purpose: one signs the short
+    # browser tokens, the other authorises us to publish; leaking one must not
+    # grant the other. Both must match `partykit env` on the PartyKit project.
+    PARTYKIT_HOST: str | None = None
+    PARTYKIT_JWT_SECRET: str | None = None
+    PARTYKIT_PUBLISH_SECRET: str | None = None
+
     # Cloudflare R2 (S3-compatible). Locally, point at the minio container.
     R2_ENDPOINT_URL: str | None = None
     R2_ACCESS_KEY_ID: str | None = None

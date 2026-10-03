@@ -7,11 +7,11 @@ that is meant to be inspected.
 """
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.notifications import service
+from app.notifications import realtime, service
 from app.notifications.schemas import NotificationListOut, NotificationOut
 from app.users.models import User
 from app.utils.jwt import get_current_user
@@ -52,3 +52,14 @@ async def mark_all_notifications_read(
 ):
     updated = await service.mark_all_read(db, user_id=current_user.id)
     return {"updated": updated}
+
+
+@router.post("/realtime-token")
+async def realtime_token(current_user: User = Depends(get_current_user)):
+    """A short-lived token for the PartyKit socket (the browser cannot send our
+    httpOnly cookie to another origin). 404 when realtime is not configured, so
+    the client simply stays on polling."""
+    token = realtime.mint_token(current_user.id) if realtime.is_enabled() else None
+    if token is None:
+        raise HTTPException(status_code=404, detail="Realtime is not enabled")
+    return {"token": token, "expires_in": realtime.TOKEN_TTL_SECONDS}

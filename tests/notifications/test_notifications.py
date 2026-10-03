@@ -158,3 +158,39 @@ async def test_mark_all_read_clears_the_badge(
 async def test_an_anonymous_caller_gets_nothing(client):
     resp = await client.get("/notifications")
     assert resp.status_code == 401
+
+
+async def test_a_decision_emails_the_applicant_with_a_link(
+    client, make_admin, make_submitted_application, monkeypatch
+):
+    sent = []
+    monkeypatch.setattr(
+        "app.admin.service.send_application_updated_email",
+        lambda address: sent.append(address),
+    )
+    sme, _, application = await make_submitted_application()
+    admin = await make_admin()
+
+    resp = await client.post(
+        f"/admin/applications/{application['id']}/decision",
+        json={"decision": "APPROVED", "note": None},
+        headers=admin["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+    assert sent == [sme["email"]]
+
+
+def test_the_update_email_has_a_button_and_does_not_state_the_outcome(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "app.utils.email.send_email", lambda **kw: captured.update(kw)
+    )
+    from app.core.config import settings
+    from app.utils.email import send_application_updated_email
+
+    send_application_updated_email("sme@example.com")
+
+    assert f"{settings.FRONTEND_URL}/dashboard" in captured["html_content"]
+    lowered = captured["html_content"].lower()
+    for word in ("approved", "rejected", "được duyệt", "từ chối", "guarantee"):
+        assert word not in lowered

@@ -73,6 +73,12 @@ def _base_url() -> str:
 def _unwrap(resp: httpx.Response, path: str) -> dict[str, Any]:
     """Unwrap the {success, error, data} envelope shared by every endpoint."""
     if resp.status_code != 200:
+        # The status alone ("400") says nothing about WHY; the provider's body
+        # does. Log-only and truncated: it is kept out of the exception, which
+        # ends up in rejection_reason and API responses.
+        logger.warning(
+            "GVerify %s failed (%s): %s", path, resp.status_code, resp.text[:500]
+        )
         raise GVerifyError(
             f"GVerify {path} failed ({resp.status_code})",
             status_code=resp.status_code,
