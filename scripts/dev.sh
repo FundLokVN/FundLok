@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # `bun run dev`: the local sidecars are already up (docker compose); this
-# starts the PartyKit dev server beside the API, then runs uvicorn in the
+# starts the live-notification relay (wrangler dev) beside the API, then runs uvicorn in the
 # foreground. PartyKit is stopped when uvicorn exits (Ctrl+C).
 #
 # PartyKit lives in the frontend repo (party/). It is skipped, with a note,
@@ -24,7 +24,7 @@ HOST="$(env_val PARTYKIT_HOST)"
 DIR="${PARTYKIT_DIR:-../Frontendfundlok/party}"
 case "$HOST" in
   localhost:1999|127.0.0.1:1999)
-    if [ ! -f "$DIR/partykit.json" ]; then
+    if [ ! -f "$DIR/wrangler.jsonc" ]; then
       echo "[partykit] skipped: $DIR not found (set PARTYKIT_DIR)"
     elif lsof -ti :1999 >/dev/null 2>&1; then
       echo "[partykit] skipped: something already listens on :1999"
@@ -33,8 +33,8 @@ case "$HOST" in
       JWT="$(env_val PARTYKIT_JWT_SECRET)"
       PUB="$(env_val PARTYKIT_PUBLISH_SECRET)"
       echo "[partykit] starting on :1999 (log: /tmp/partykit-dev.log)"
-      (cd "$DIR" && exec npx partykit dev --port 1999 --no-hotkeys \
-        --var "PARTYKIT_JWT_SECRET=$JWT" "PARTYKIT_PUBLISH_SECRET=$PUB") \
+      (cd "$DIR" && exec npx wrangler dev --port 1999 \
+        --var "PARTYKIT_JWT_SECRET:$JWT" "PARTYKIT_PUBLISH_SECRET:$PUB") \
         >/tmp/partykit-dev.log 2>&1 &
       PARTY_PID=$!
     fi
