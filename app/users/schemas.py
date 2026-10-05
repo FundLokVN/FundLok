@@ -1,27 +1,22 @@
 import re
 
-from pydantic import EmailStr, BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
-from uuid import UUID
 from app.auth.schemas import PHONE_NUMBER_PATTERN
 from app.users.models import Role
 
-class UserCreate(BaseModel):
-    """Schema for user registration (FE to BE)"""
-    email: EmailStr
-    password: str = Field(..., min_length=8)
-    phone: Optional[str] = None
-    role: Role
-
-class UserResponse(BaseModel):
-    """Schema for public user profile (BE to FE)"""
-    id: UUID
-    email: EmailStr
-    role: Role
-    status: str
-
-    class Config:
-        from_attributes = True
+# NOTE: there is deliberately no UserCreate / registration schema here.
+#
+# Registration binds app.auth.schemas.UserCreate, which has NO `role` field —
+# new accounts are created without one and pick SME or INVESTOR later through
+# PATCH /users/me/role, where RoleSelectRequest below restricts the choice.
+#
+# An unused `UserCreate` with a `role: Role` field used to sit at this spot. It
+# was reachable from nothing, but any future endpoint bound to it would have let
+# a registrant name their own role — including ADMIN and SYSTEM_ADMIN — so it
+# was removed rather than left as a trap. A `UserResponse` that exposed `role`
+# and `status` went with it; /users/me answers from
+# app.users.service.user_me_payload instead.
 
 
 # Roles a user may assign to themselves after registration. Privileged roles
@@ -68,6 +63,28 @@ class AvatarConfirmRequest(BaseModel):
     file_key: str
 
 
+class SetPasswordRequest(BaseModel):
+    """Set a FIRST password from the profile page.
+
+    Deliberately has no `current_password`: this endpoint only ever serves an
+    account that has no password yet, so there is nothing to prove. *Changing*
+    an existing password goes through forgot-password / reset-password instead,
+    where the emailed token is the proof — which is why a session alone can
+    never overwrite a password that already exists.
+    """
+
+    new_password: str = Field(..., min_length=8)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password_length(cls, v: str) -> str:
+        # Same 72-byte ceiling as ResetPasswordRequest — passlib silently
+        # truncates beyond it, which would make two different passwords match.
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("Password too long")
+        return v
+
+
 class UserUpdateRequest(BaseModel):
     """Self-service profile update. Only fields included in the request body are
     changed (PATCH semantics). email / role / status / password are intentionally
@@ -108,3 +125,31 @@ class UserUpdateRequest(BaseModel):
                 "phone must match +84/84/0 Vietnamese format or an international E.164 number"
             )
         return normalized
+
+class ChangePasswordRequest(BaseModel):
+    """Change an existing password from an authenticated session.
+
+    `current_password` is what makes this safe to serve off a session alone.
+    /me/password (set-password) deliberately refuses accounts that already have
+    one, because overwriting a password from a borrowed session would be
+    account takeover; proving knowledge of the current password is the standard
+    answer to exactly that, so it is required here and not optional.
+    """
+
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _strong_enough(cls, value: str) -> str:
+        if len(value) < 8:
+            raise ValueError("New password must be at least 8 characters")
+        return value
+
+
+class SecurityPreferencesOut(BaseModel):
+    signin_alerts_enabled: bool
+
+
+class SecurityPreferencesUpdate(BaseModel):
+    signin_alerts_enabled: bool

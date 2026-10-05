@@ -11,6 +11,7 @@ from app.projects.schemas import (
     ProjectWithApplicationOut,
 )
 from app.projects.service import (
+    approval_for,
     create_project,
     get_my_projects,
     display_projects,
@@ -45,16 +46,28 @@ async def list_my_projects(
     for project in projects:
         out = ProjectWithApplicationOut.model_validate(project)
         if project.loan_applications:
+            application = project.loan_applications[0]
+            out.loan_application = ProjectLoanApplicationOut.model_validate(application)
+            out.loan_application.approval = await approval_for(db, application)
+        results.append(out)
+    return results
+
+
+@router.get("/public", response_model=List[ProjectWithApplicationOut])
+async def list_projects(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Marketplace listing. Carries the DRAFT loan application alongside the
+    company so an investor can see the deal terms on the card itself, rather
+    than opening every project to find the asking amount."""
+    projects = await display_projects(db, current_user)
+    results = []
+    for project in projects:
+        out = ProjectWithApplicationOut.model_validate(project)
+        if project.loan_applications:
             out.loan_application = ProjectLoanApplicationOut.model_validate(
                 project.loan_applications[0]
             )
         results.append(out)
     return results
-
-
-@router.get("/public", response_model=List[ProjectOut])
-async def list_projects(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    return await display_projects(db, current_user)

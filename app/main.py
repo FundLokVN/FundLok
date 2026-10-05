@@ -1,9 +1,11 @@
 # main.py
 import app.models  # noqa: F401 — register ORM mappers before routes
+import logging
 import os
 import uvicorn
 
 from fastapi import FastAPI, Depends, BackgroundTasks, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware # Added for CORS support
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -14,7 +16,10 @@ from app.system.service import is_maintenance_active
 from app.system.router import router as system_router
 from app.auth.router import router as auth_router
 from app.contracts.router import router as contracts_router
+from app.core.config import settings
+from app.utils.client_ip import TrustedProxyMiddleware
 from app.core.database import get_db
+from app.lending.router import router as lending_router
 from app.loans.router import router as loans_router
 from app.market.router import router as market_router
 from app.oauth.router import router as oauth_router
@@ -27,12 +32,67 @@ from app.users.router import router as users_router
 from app.verification.router import kyb_router, kyc_router
 from app.gverify.router import kyb_router as gverify_kyb_router, router as gverify_router
 from app.contact.router import router as contact_router
+from app.notifications.router import router as notifications_router
+from app.rates.router import admin_rates_router, router as rates_router
+
+# /docs, /redoc and /openapi.json are development tools. Served publicly they
+# hand any visitor the full route inventory and request/response schemas of the
+# admin, verification and banking APIs — a map of everything worth attacking.
+# Gated on DEBUG, which defaults to False, so production is closed unless
+# someone deliberately opens it.
+_DOCS_ENABLED = settings.DEBUG
 
 app = FastAPI(
     title="FundLok API",
     description="MVP backend for FundLok fintech platform",
     version="0.1.0",
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
+
+
+# The captcha verifier no-ops when its secret is unset -- right for local dev and
+# CI, silently wrong anywhere public, where login, contact and the rate
+# calculator then accept any request. Not made fatal: if production is already
+# running without the secret, refusing to boot would take login down with it.
+# But it must not be silent.
+if not settings.CLOUDFLARE_TURNSTILE_SECRET_KEY and not settings.DEBUG:
+    logging.getLogger("app.captcha").warning(
+        "CLOUDFLARE_TURNSTILE_SECRET_KEY is not set: captcha verification is "
+        "DISABLED on every protected endpoint."
+    )
+
+
+# ================= VALIDATION ERRORS =================
+# FastAPI's default 422 body echoes each rejected value back as `input` (and
+# sometimes `ctx`). Two problems with that, both reachable on every endpoint:
+#
+#   * Python's json.loads accepts the non-standard literals NaN and Infinity, so
+#     a body like {"amount": NaN} is parsed, correctly rejected -- and then the
+#     422 cannot be SERIALISED, because JSONResponse refuses non-finite floats.
+#     The error handler itself raised, and every POST route, /auth/login
+#     included, answered NaN with a 500.
+#   * Echoing input reflects whatever the caller sent, a rejected password
+#     included, into responses and anything that logs them.
+#
+# The frontend reads only `loc` and `msg` (lib/api-client.ts extractMessage),
+# so those are all that is kept. Shape is unchanged: {"detail": [...]}.
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "type": err.get("type"),
+                    "loc": list(err.get("loc", ())),
+                    "msg": err.get("msg"),
+                }
+                for err in exc.errors()
+            ]
+        },
+    )
 
 
 # ================= MAINTENANCE MODE =================
@@ -67,13 +127,21 @@ async def maintenance_gate(request: Request, call_next):
 # =====================================================
 
 
+# ================= SECURITY HEADERS =================
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+# ====================================================
+
+
 # ================= CORS CONFIGURATION =================
-# Define the URLs allowed to access this API[cite: 5]
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://fundlok-front-end.vercel.app"
-]
+# URLs allowed to access this API, configurable via ALLOWED_ORIGINS in .env
+origins = settings.cors_origins
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,8 +149,18 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],  # Permits OPTIONS, POST, etc.
     allow_headers=["*"],
+    # A browser hides every response header from JS unless it is listed here,
+    # and `allow_headers=["*"]` does NOT cover it — that governs the REQUEST.
+    # X-Error-Code is how an endpoint names a failure the UI has to translate
+    # (see ApiError.code on the frontend); without this the header is sent,
+    # silently stripped by the browser, and the visitor reads English.
+    expose_headers=["X-Error-Code"],
 )
 # =====================================================
+
+# Added LAST so it is the OUTERMOST layer: the client address is settled before
+# CORS, the maintenance gate, or any route reads it. See app/utils/client_ip.py.
+app.add_middleware(TrustedProxyMiddleware)
 
 @app.get("/health")
 def health_check():
@@ -106,6 +184,7 @@ app.include_router(kyb_router)
 app.include_router(gverify_router)
 app.include_router(gverify_kyb_router)
 app.include_router(loans_router)
+app.include_router(lending_router)
 app.include_router(underwriting_router)
 app.include_router(uploads_router)
 app.include_router(contracts_router)
@@ -115,6 +194,9 @@ app.include_router(banking_router)
 app.include_router(admin_router)
 app.include_router(system_router)
 app.include_router(contact_router)
+app.include_router(notifications_router)
+app.include_router(rates_router)
+app.include_router(admin_rates_router)
 
 if __name__ == "__main__":
     # Get the port from Cloud Run environment (default to 8080 if not set)

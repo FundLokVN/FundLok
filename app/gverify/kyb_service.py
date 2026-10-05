@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 import unicodedata
 
 from sqlalchemy import select
@@ -27,6 +28,7 @@ from app.gverify import client, storage
 from app.gverify.models import (
     STATUS_APPROVED,
     STATUS_FAILED,
+    STATUS_MANUAL_REVIEW,
     STATUS_PENDING,
     STATUS_REJECTED,
     GVerifyKybVerification,
@@ -41,11 +43,31 @@ _JPEG_MAGIC = b"\xff\xd8\xff"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _PDF_MAGIC = b"%PDF"
 
-DOCUMENT_TYPES = ("COMPANY", "COMPANY_BRANCH", "HOUSEHOLD")
+# Per the provider integration guide, OCR X business verification covers
+# company and branch certificates. (HOUSEHOLD dropped 2026-07-15 — resolves
+# spec Open Question 3.)
+DOCUMENT_TYPES = ("COMPANY", "COMPANY_BRANCH")
 
 # Registry statuses that count as an operating business (Open Question 1 —
 # matched case-insensitively until Datatrust confirms the enumeration).
 _ACTIVE_STATUSES = ("đang hoạt động", "active")
+
+# Vietnamese MST: 10 digits, optionally a -NNN branch suffix.
+_TAX_CODE_RE = re.compile(r"^\d{10}(-\d{3})?$")
+
+
+def _clean_declared_tax_code(value: str | None) -> str | None:
+    """Validate an SME-declared MST; None when absent, 400 when malformed."""
+    if value is None:
+        return None
+    cleaned = value.strip().replace(" ", "")
+    if not cleaned:
+        return None
+    if not _TAX_CODE_RE.match(cleaned):
+        raise ImageValidationError(
+            "tax_code must be a 10-digit Vietnamese MST (optionally -NNN for a branch)"
+        )
+    return cleaned
 
 
 def _validate_document(b64: str) -> tuple[bytes, str, str]:
@@ -80,12 +102,17 @@ def _normalize_name(value: str | None) -> str:
 
 
 def _ocr_rejection_reason(data: dict) -> str | None:
-    """OCR X pass rules (spec §6.3); returns a reason or None if OK."""
+    """Hard OCR failures (unreadable document) — REJECTED. The tax code is
+    checked separately in the flow: a declared MST can stand in for a missed
+    extraction."""
     if not (data.get("name") or "").strip():
         return "Could not extract the business name from the certificate"
-    if not (data.get("tax_code") or "").strip():
-        return "Could not extract the tax code from the certificate"
+    return None
 
+
+def _ocr_review_reason(data: dict) -> str | None:
+    """Soft OCR signals — MANUAL_REVIEW per the provider integration guide
+    (low confidence is a review case, not a rejection)."""
     minimum = settings.GVERIFY_MIN_KYB_OCR_CONFIDENCE
     for field in ("name_confidence", "tax_code_confidence"):
         score = _as_float(data.get(field))
@@ -94,31 +121,75 @@ def _ocr_rejection_reason(data: dict) -> str | None:
     return None
 
 
-def _registry_rejection_reason(data: dict, ocr: dict) -> str | None:
-    """Tax Code Verify pass rules (spec §6.4–6.5); returns a reason or None."""
+def _registry_rejection_reason(data: dict) -> str | None:
+    """Hard registry failures — REJECTED."""
     if not data.get("is_valid"):
         return "Tax code is not valid in the state registry"
-
     company = data.get("company") or {}
     status = company.get("business_status_en") or company.get("business_status") or ""
     if status and status.strip().lower() not in _ACTIVE_STATUSES:
         return f"Business is not active in the state registry ({status})"
-
-    ocr_name = _normalize_name(ocr.get("name"))
-    registry_name = _normalize_name(company.get("name"))
-    if registry_name and ocr_name != registry_name:
-        return "Certificate does not match the tax registry (business name differs)"
     return None
 
 
-async def _rep_match_rejection_reason(
-    db: AsyncSession, user_id, ocr: dict
-) -> str | None:
-    """Rule 7 (flag-gated): the SME's KYC-verified person_number must appear
-    among the certificate's legal representatives."""
-    if not settings.GVERIFY_KYB_REQUIRE_REP_MATCH:
-        return None
+# Provider error codes (KYB plan §10.1) that mean "this business isn't in the
+# registry" — a REJECTED verdict, not a transport failure (502).
+_INVALID_TAX_CODES = {"ERROR_23"}
 
+
+def _cross_check_review_reason(ocr: dict, tax: dict, queried_tax_code: str) -> str | None:
+    """Certificate ↔ registry cross-checks (integration guide §5).
+
+    Mismatches and incomplete data here are MANUAL_REVIEW, not REJECTED:
+    Vietnamese names/codes survive OCR with minor differences, and a human
+    can adjudicate what strict string comparison cannot.
+    """
+    company = tax.get("company") or {}
+
+    registry_tax_code = (company.get("tax_code") or "").strip()
+    if registry_tax_code and registry_tax_code != queried_tax_code:
+        return "Tax code differs between the certificate and the registry"
+
+    registry_name = _normalize_name(company.get("name"))
+    if registry_name and _normalize_name(ocr.get("name")) != registry_name:
+        return "Business name differs between the certificate and the registry"
+
+    registry_rep = _normalize_name(company.get("representative"))
+    ocr_reps = [
+        _normalize_name(rep.get("name"))
+        for rep in (ocr.get("representatives") or [])
+        if rep.get("name")
+    ]
+    if not registry_rep or not ocr_reps:
+        return "Legal representative details are incomplete"
+    if registry_rep not in ocr_reps:
+        return "Legal representative differs between the certificate and the registry"
+    return None
+
+
+# Rule 7 reasons. Constants because the router maps them to machine-readable
+# codes (rejection_code) so the frontend can explain them in the user's
+# language instead of showing this English text.
+KYC_REQUIRED_REASON = "Complete personal identity verification (KYC) first"
+NOT_A_REPRESENTATIVE_REASON = (
+    "Your verified identity is not listed as a legal representative of this business"
+)
+REJECTION_CODES = {NOT_A_REPRESENTATIVE_REASON: "NOT_A_REPRESENTATIVE"}
+
+
+def rejection_code(attempt: GVerifyKybVerification) -> str | None:
+    """Machine-readable cause of a REJECTED attempt, where one is defined."""
+    if attempt.status != STATUS_REJECTED:
+        return None
+    return REJECTION_CODES.get(attempt.rejection_reason or "")
+
+
+async def approved_kyc_person_number(db: AsyncSession, user_id) -> str | None:
+    """The CCCD number from the user's newest APPROVED KYC, or None.
+
+    SMEs complete the same GVerify KYC as investors (ID card + selfie) as a
+    step of the KYB flow; this is what Rule 7 compares with the certificate.
+    """
     result = await db.execute(
         select(GVerifyVerification.person_number)
         .where(
@@ -127,16 +198,33 @@ async def _rep_match_rejection_reason(
         )
         .order_by(GVerifyVerification.created_at.desc())
     )
-    person_number = result.scalars().first()
-    if not person_number:
-        return "Complete personal identity verification (KYC) first"
+    return result.scalars().first()
 
+
+async def _rep_match_rejection_reason(
+    db: AsyncSession, user_id, ocr: dict
+) -> str | None:
+    """Rule 7 (flag-gated): the SME's KYC-verified person_number must appear
+    among the certificate's legal representatives.
+
+    The router refuses a KYB submission with no approved KYC before any
+    provider call; the KYC_REQUIRED_REASON branch here is the backstop.
+    """
+    if not settings.GVERIFY_KYB_REQUIRE_REP_MATCH:
+        return None
+
+    person_number = await approved_kyc_person_number(db, user_id)
+    if not person_number:
+        return KYC_REQUIRED_REASON
+
+    # Live payloads use identity_number; the API doc said id_number — accept both.
+    # Whitespace is dropped on both sides, as OCR output can vary in spacing.
     rep_ids = {
-        (rep.get("id_number") or "").strip()
+        "".join((rep.get("identity_number") or rep.get("id_number") or "").split())
         for rep in (ocr.get("representatives") or [])
     }
-    if person_number.strip() not in rep_ids:
-        return "Your verified identity is not listed as a legal representative of this business"
+    if "".join(person_number.split()) not in rep_ids:
+        return NOT_A_REPRESENTATIVE_REASON
     return None
 
 
@@ -155,6 +243,8 @@ async def run_kyb_verification(
     *,
     document_b64: str,
     document_type: str,
+    declared_tax_code: str | None = None,
+    declared_license_code: str | None = None,
 ) -> GVerifyKybVerification:
     """Run the full one-shot KYB flow and return the terminal attempt row.
 
@@ -166,6 +256,8 @@ async def run_kyb_verification(
         raise ImageValidationError(
             f"document_type must be one of {', '.join(DOCUMENT_TYPES)}"
         )
+    declared = _clean_declared_tax_code(declared_tax_code)
+    declared_license = (declared_license_code or "").strip() or None
     raw, filename, content_type = _validate_document(document_b64)
 
     attempt = GVerifyKybVerification(
@@ -193,7 +285,19 @@ async def run_kyb_verification(
 
     attempt.ocr_transaction_code = ocr.get("transaction_code")
     attempt.ocr_data = ocr
-    attempt.tax_code = ocr.get("tax_code")
+    # OCR extraction wins; the SME-declared MST is the fallback for the live
+    # extraction gap (legible "Mã số doanh nghiệp" returned as tax_code:"").
+    effective_tax_code = str(ocr.get("tax_code") or "").strip() or declared
+    attempt.tax_code = effective_tax_code
+    # license_code: OCR value → declared → fall back to the tax code. The
+    # working tax-verify contract wants it (KYB plan §7.3); for modern VN
+    # companies mã số doanh nghiệp doubles as the licence code, so the tax-code
+    # fallback keeps the call working when no distinct code is supplied.
+    # (Provider Q1/Q2: is license_code mandatory and how does it differ.)
+    effective_license_code = (
+        str(ocr.get("license_code") or "").strip() or declared_license or effective_tax_code
+    )
+    attempt.license_code = effective_license_code
     attempt.business_name = ocr.get("name")
     attempt.business_type = ocr.get("business_type")
     attempt.company_address = ocr.get("company_address")
@@ -202,19 +306,42 @@ async def run_kyb_verification(
     attempt.charter_capital = ocr.get("charter_capital") or ocr.get("business_capital")
     attempt.representatives = ocr.get("representatives")
 
+    # Decision flow per the provider integration guide: hard OCR failures
+    # reject; soft signals (low confidence) park for MANUAL_REVIEW — both
+    # before the (billable) registry call.
     reason = _ocr_rejection_reason(ocr)
+    if reason is None and not effective_tax_code:
+        reason = (
+            "Could not extract the tax code from the certificate — provide "
+            "your MST (Mã số doanh nghiệp) and try again"
+        )
     if reason is None:
         reason = await _rep_match_rejection_reason(db, user.id, ocr)
     if reason is not None:
-        # Fail fast: skip the (billable) registry call on an unusable OCR.
         attempt.status = STATUS_REJECTED
         attempt.rejection_reason = reason
         await db.flush()
         return attempt
 
+    review = _ocr_review_reason(ocr)
+    if review is not None:
+        attempt.status = STATUS_MANUAL_REVIEW
+        attempt.rejection_reason = review
+        await db.flush()
+        return attempt
+
     try:
-        tax = await client.taxcode_verify(tax_code=str(ocr.get("tax_code")).strip())
+        tax = await client.taxcode_verify(
+            tax_code=effective_tax_code, license_code=effective_license_code
+        )
     except client.GVerifyError as exc:
+        # An "invalid tax code" provider error is a business rejection, not a
+        # transport failure — don't surface it as a 502 (KYB plan §10.1).
+        if exc.code in _INVALID_TAX_CODES:
+            attempt.status = STATUS_REJECTED
+            attempt.rejection_reason = "Tax code is not valid in the state registry"
+            await db.flush()
+            return attempt
         attempt.status = STATUS_FAILED
         attempt.rejection_reason = str(exc)
         await db.flush()
@@ -223,14 +350,31 @@ async def run_kyb_verification(
     attempt.tax_transaction_code = tax.get("transaction_code")
     attempt.tax_data = tax
 
-    reason = _registry_rejection_reason(tax, ocr)
+    reason = _registry_rejection_reason(tax)
     if reason is not None:
         attempt.status = STATUS_REJECTED
         attempt.rejection_reason = reason
     else:
-        attempt.status = STATUS_APPROVED
+        review = _cross_check_review_reason(ocr, tax, effective_tax_code)
+        if review is None:
+            review = _license_cross_check_review_reason(effective_license_code, tax)
+        if review is not None:
+            attempt.status = STATUS_MANUAL_REVIEW
+            attempt.rejection_reason = review
+        else:
+            attempt.status = STATUS_APPROVED
     await db.flush()
     return attempt
+
+
+def _license_cross_check_review_reason(attempt_license: str, tax: dict) -> str | None:
+    """Compare the declared/OCR licence code against the registry's, when the
+    registry returns one. Mismatch → MANUAL_REVIEW (KYB plan §9 / Stage F)."""
+    company = tax.get("company") or {}
+    registry_license = (company.get("license_code") or "").strip()
+    if registry_license and registry_license != attempt_license:
+        return "Licence code differs between the certificate and the registry"
+    return None
 
 
 def business_status(attempt: GVerifyKybVerification) -> str | None:

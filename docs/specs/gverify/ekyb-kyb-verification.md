@@ -66,8 +66,8 @@ gverify_kyb_verifications
 ├── id                      UUID          PK, default gen_random_uuid()
 ├── user_id                 UUID          NOT NULL → users(id) ON DELETE CASCADE, indexed
 ├── status                  TEXT          NOT NULL, server default 'PENDING'
-│                                         (app-enforced: PENDING | APPROVED | REJECTED | FAILED)
-├── document_type           TEXT          NOT NULL  -- COMPANY | COMPANY_BRANCH | HOUSEHOLD (as sent to OCR X)
+│                                         (app-enforced: PENDING | APPROVED | REJECTED | MANUAL_REVIEW | FAILED)
+├── document_type           TEXT          NOT NULL  -- COMPANY | COMPANY_BRANCH (as sent to OCR X; HOUSEHOLD dropped in v1.2)
 ├── ocr_transaction_code    TEXT          nullable
 ├── tax_transaction_code    TEXT          nullable
 ├── tax_code                TEXT          nullable, indexed  -- from OCR, confirmed by registry
@@ -112,7 +112,7 @@ cross-check, return the verdict synchronously.
 ```json
 {
   "document_b64": "string",       // required — JPEG | PNG | PDF, decoded ≤ 10MB
-  "document_type": "COMPANY"      // required — COMPANY | COMPANY_BRANCH | HOUSEHOLD
+  "document_type": "COMPANY"      // required — COMPANY | COMPANY_BRANCH
 }
 ```
 
@@ -155,7 +155,7 @@ attempted). Same shape as the KYC status plus `tax_code`, `business_name`.
   eKYC endpoints where it is a JSON field). No base64 variant is documented —
   the backend client must send multipart (httpx `files=`; sending multipart
   does not require `python-multipart`, which is only for *receiving* it).
-- `POST {base}/ekyb/api/taxcode/verify` — JSON `{ID, tax_type: "COMPANY", code}`.
+- `POST {base}/ekyb/api/taxcode/verify` — JSON `{code, id, license_code, tax_type: "COMPANY"}`. Contract is the VERIFIED working sample, not the v2.5.1 doc (KYB plan §7.3): field is lowercase `id` (uppercase `ID` → ERROR_01) and `license_code` is included. `ERROR_23` (invalid tax code) is a REJECTED verdict, not a 502.
 - Both return the `{success, error, data}` envelope; same error handling as KYC.
 
 ---
@@ -165,10 +165,17 @@ attempted). Same shape as the KYC status plus `tax_code`, `business_name`.
 Per-attempt, terminal within the creating request (same as KYC):
 
 ```
-PENDING ──[OCR + registry + cross-checks pass]──► APPROVED
-PENDING ──[any business rule fails]─────────────► REJECTED
-PENDING ──[provider HTTP error / success=false]─► FAILED
+PENDING ──[OCR + registry + cross-checks pass]───────────► APPROVED
+PENDING ──[hard failure: unreadable doc, invalid tax
+           code, inactive business, rep-flag violation]──► REJECTED
+PENDING ──[borderline: low OCR confidence, registry
+           cross-check mismatch or incomplete data]──────► MANUAL_REVIEW
+PENDING ──[provider HTTP error / success=false]──────────► FAILED
 ```
+
+`MANUAL_REVIEW` (added v1.2 per the provider integration guide) is terminal
+for the attempt: an ops decision resolves it out-of-band. The FE shows the
+"under review" screen; retries are not blocked (only APPROVED 409s).
 
 Retry = new row; latest APPROVED ⇒ 409 on further attempts.
 
@@ -196,6 +203,16 @@ Retry = new row; latest APPROVED ⇒ 409 on further attempts.
    must appear among the certificate's `representatives[].id_number`. This
    binds "verified person" ⇔ "legal representative of the verified business".
    Default off until Edward decides (Open Question 2).
+   (v1.4) The SME completes that KYC **inside the KYB flow**: the KYB screen is
+   certificate → identity (same GVerify KYC as investors: ID front/back +
+   selfie, or the phone QR handoff) → review & submit. The `/gverify/kyc/*`
+   endpoints accept SME as well as INVESTOR for this. With the flag on, a KYB
+   submission without an APPROVED KYC is refused with **409
+   `X-Error-Code: KYC_REQUIRED` before any provider call** (it used to spend
+   the OCR call and then reject). A CCCD that is not among the
+   representatives ends REJECTED with `rejection_code: "NOT_A_REPRESENTATIVE"`
+   on the verify and status responses, so the UI can explain it in the user's
+   language. CCCD numbers are compared with whitespace removed.
 8. Both provider payloads persisted verbatim (JSONB). The certificate is
    retained in R2 under `verification/KYB/{verification_id}/certificate.*`
    (bucket `R2_VERIFICATION_BUCKET`, falling back to `R2_BUCKET`) — v1.1
@@ -251,7 +268,7 @@ Retry = new row; latest APPROVED ⇒ 409 on further attempts.
 |---|---|---|---|
 | 1 | Which `business_status` values count as "active"? Need the enumeration from Datatrust (likely "Đang hoạt động" / "Active"); until then match case-insensitively on those two. | Phat → Datatrust | — |
 | 2 | Enable the representative-match rule (Rule 7) at launch, or run it in shadow mode (log, don't reject) first? Binds KYC↔KYB but may reject legitimate cases (rep ≠ account owner). | Edward | — |
-| 3 | `HOUSEHOLD` (hộ kinh doanh cá thể) — do FundLok SMEs include household businesses in the sandbox scope? The OCR X payload differs slightly (business_capital vs charter_capital; industries list). | Edward | — |
+| 3 | ~~`HOUSEHOLD` in scope?~~ Resolved v1.2: dropped per the provider integration guide (OCR X business verification covers COMPANY / COMPANY_BRANCH). | Edward | Dropped 2026-07-15 |
 | 4 | The loan flow gates on uploaded `KYC_BUSINESS_REG` documents (`app/lending/kyc.py`). Should a GVerify-approved KYB satisfy/auto-approve that document requirement? (The "should we store the cert" half is resolved: v1.1 retains it at `verification/KYB/<id>/`.) | Edward | — |
 | 5 | Fuzzy name matching (Rule 5): exact-normalised may reject legitimate OCR noise. Threshold-based similarity instead? Start exact, collect rejections, revisit. | Phat | — |
 | 6 | Cross-check against the FundLok project's declared `legal_name`/`tax_id` (projects table) — verify-at-KYB or verify-at-project-creation? | Edward | — |
@@ -284,3 +301,6 @@ Retry = new row; latest APPROVED ⇒ 409 on further attempts.
 |---|---|---|---|
 | 1.0 | 2026-07-14 | Phat | Initial draft |
 | 1.1 | 2026-07-14 | Phat | Retain the certificate in R2 (`verification/KYB/<id>/`) |
+| 1.2 | 2026-07-15 | Phat | Aligned to the provider integration guide: dropped HOUSEHOLD; added MANUAL_REVIEW outcome (low OCR confidence, registry cross-check mismatches/incomplete data); added tax-code echo and legal-representative cross-checks |
+| 1.3 | 2026-07-20 | Phat | Tax-verify uses the VERIFIED working contract (lowercase `id` + required `license_code`, KYB plan §7.3), fixing ERROR_01; added `license_code` column, declared-fallback, cross-check, and a request contract test; ERROR_23 → REJECTED not 502 |
+| 1.4 | 2026-09-29 | Phat | Identity (KYC) step inside the KYB flow; KYC endpoints open to SME; flag-on submission without approved KYC → 409 KYC_REQUIRED before any provider call; `rejection_code` NOT_A_REPRESENTATIVE |

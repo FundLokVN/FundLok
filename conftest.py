@@ -43,9 +43,24 @@ os.environ.setdefault(
     "postgresql+asyncpg://test_user:test_password@localhost:5432/test_db",
 )
 os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production")
+# A real Fernet key, so the TOTP tests exercise the encrypted path rather than a
+# bypass. Deliberately NOT derived from SECRET_KEY — see app/auth/totp_crypto.py
+# for why the two secrets are separate.
+os.environ.setdefault("TOTP_ENCRYPTION_KEY", "n5W7jlQOzlCKwRHfeCH4cpb6vUvai3kOX0GnEgEh9i4=")
 os.environ.setdefault("ALGORITHM", "HS256")
 os.environ.setdefault("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
 os.environ.setdefault("REFRESH_TOKEN_EXPIRE_DAYS", "14")
+# The test client talks to the ASGI app over plain http://testserver (see the
+# `client` fixture below), never TLS. config.py defaults COOKIE_SECURE to True
+# (correct for prod), but httpx's cookie jar honours the Secure attribute for
+# real -- it stores a Secure-flagged cookie after a response but silently
+# omits it from every later request on this non-https base_url. Without this
+# override, any test that sets a cookie in one call and expects it back in a
+# later call (auth/session/remember-me flows) fails with the cookie simply
+# missing, which looks like an auth bug rather than a transport mismatch.
+# .env.example documents the same COOKIE_SECURE=False for local dev, for the
+# same underlying reason (plain-http uvicorn).
+os.environ.setdefault("COOKIE_SECURE", "False")
 # Explicitly blank (not just "unset") so a developer's local .env can't leak a
 # real Turnstile secret into the test run and make verify_turnstile_token try
 # a real network call.
@@ -71,6 +86,7 @@ TEST_DATABASE_URL = os.environ["DATABASE_URL"]
 # rather than requiring a second env var. A no-op .replace() if DATABASE_URL
 # is already a sync URL.
 ALEMBIC_DATABASE_URL = TEST_DATABASE_URL.replace("+asyncpg", "+psycopg2")
+ALEMBIC_COMMAND = [sys.executable, "-m", "alembic"]
 
 
 def iter_endpoint_routes(routes):
@@ -112,7 +128,7 @@ def _migrate_schema():
 
     env = {**os.environ, "DATABASE_URL": ALEMBIC_DATABASE_URL}
     result = subprocess.run(
-        ["alembic", "upgrade", "head"],
+        [*ALEMBIC_COMMAND, "upgrade", "head"],
         cwd=str(ROOT),
         env=env,
         capture_output=True,
@@ -164,10 +180,20 @@ async def db_session():
         # break every subsequent resolve_custodial_account() call. Tables
         # that reference it (ledger_accounts, ledger_entries, ...) are still
         # truncated normally.
+        #
+        # `bank_rate_config` is excluded for the identical reason (T0b): the
+        # score-run-persistence migration seeds exactly one board rate
+        # (12.0%, effective 2026-09-17) as fixed reference data. Found by
+        # actually running this suite against real Postgres (T4, HANDOFF-03)
+        # -- every score-run test after the first failed with "no
+        # bank_rate_config row is in force" once the seed row was truncated
+        # away, because `bank_rate_config.created_by_actor_id` is a FK into
+        # `users`, and CASCADE follows that FK the same way it follows
+        # `custodial_accounts.contract_id` into `contracts` below.
         tables = [
             t.name
             for t in Base.metadata.sorted_tables
-            if t.name not in ("alembic_version", "custodial_accounts")
+            if t.name not in ("alembic_version", "custodial_accounts", "bank_rate_config")
         ]
         if tables:
             await session.execute(text(f'TRUNCATE TABLE {", ".join(tables)} RESTART IDENTITY CASCADE'))
@@ -187,8 +213,37 @@ async def db_session():
                     "WHERE NOT EXISTS (SELECT 1 FROM custodial_accounts WHERE scope = 'PLATFORM')"
                 )
             )
+            # `bank_rate_config` gets the same CASCADE-from-`users` treatment
+            # as `custodial_accounts`, but unlike that idempotent
+            # insert-if-missing, this resets to exactly the migration's one
+            # baseline row every test: a test that calls set_bank_rate()
+            # (T0b's rate-history-is-append-only design means those rows
+            # would otherwise accumulate across tests and leak into
+            # `get_current_bank_rate()` in a later, unrelated test).
+            await session.execute(text("TRUNCATE TABLE bank_rate_config RESTART IDENTITY CASCADE"))
+            await session.execute(
+                text(
+                    "INSERT INTO bank_rate_config (id, rate_pct, effective_from) "
+                    "VALUES (gen_random_uuid(), 12.0, '2026-09-17')"
+                )
+            )
             await session.commit()
         await session.close()
+
+
+@pytest.fixture(autouse=True)
+def _pin_feature_flags(monkeypatch):
+    """Behaviour flags start at their code defaults in every test.
+
+    Settings load the developer's local .env, so a flag switched on there
+    (GVERIFY_KYB_REQUIRE_REP_MATCH was, on 2026-09-29) silently changed what
+    unrelated tests saw: every KYB happy path became a rejection locally while
+    CI, which has no .env, stayed green. A test that needs a flag on sets it
+    itself; this autouse fixture runs first, so the test's monkeypatch wins.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "GVERIFY_KYB_REQUIRE_REP_MATCH", False)
 
 
 @pytest.fixture(autouse=True)
@@ -198,6 +253,20 @@ def _mock_external_io(monkeypatch):
     monkeypatch.setattr("app.auth.service.send_verification_email", lambda *a, **kw: None)
     monkeypatch.setattr("app.auth.service.send_password_reset_email", lambda *a, **kw: None)
     monkeypatch.setattr("app.auth.service.send_existing_account_notice", lambda *a, **kw: None)
+    # Imported into two modules, so it needs stubbing at both call sites. A
+    # test that asserts on the notice re-patches the same target itself; this
+    # autouse fixture runs first, so the test's own monkeypatch still wins.
+    monkeypatch.setattr("app.auth.service.send_password_changed_notice", lambda *a, **kw: None)
+    monkeypatch.setattr("app.users.service.send_password_changed_notice", lambda *a, **kw: None)
+
+    # Backstop under all of the above. Patching senders one call site at a
+    # time is a list that silently goes stale -- send_password_changed_notice
+    # was added to two modules and to neither list, and the gap only surfaced
+    # in CI, because a developer machine has mailpit on :1025 (ADR-005) and
+    # quietly accepts the mail. Every sender in app/utils/email.py bottoms out
+    # here, so a new one can no longer reach the network just by being
+    # forgotten.
+    monkeypatch.setattr("app.utils.email.send_email", lambda *a, **kw: None)
 
     # GVerify verification-document retention writes to R2 — never in tests.
     async def _no_store(*a, **kw):
@@ -353,8 +422,65 @@ def run_and_lock_score(client):
 
 
 @pytest.fixture
-def make_contract(client):
+def attach_required_documents(db_session):
+    """Put every document the wizard requires on an application, as uploaded.
+
+    An operator approval is refused until they are all on file
+    (app/admin/service.py REQUIRED_DOCUMENT_TYPES), and most suites want an
+    approved application rather than a rehearsal of the upload flow — which is
+    covered in tests/uploads. Rows only: nothing is written to storage.
+    """
+    from app.admin.service import REQUIRED_DOCUMENT_TYPES
+    from app.lending.models import LoanApplicationDocument
+
+    from sqlalchemy import select
+
+    async def _attach(application_id: str, types=REQUIRED_DOCUMENT_TYPES):
+        app_id = uuid.UUID(str(application_id))
+        # Idempotent: a test that already attached some keeps them.
+        held = set((
+            await db_session.execute(
+                select(LoanApplicationDocument.document_type).where(
+                    LoanApplicationDocument.loan_application_id == app_id
+                )
+            )
+        ).scalars())
+        for document_type in types:
+            if document_type in held:
+                continue
+            db_session.add(LoanApplicationDocument(
+                loan_application_id=app_id,
+                document_type=document_type,
+                file_key=f"test/{app_id}/{document_type}",
+                original_filename=f"{document_type}.pdf",
+                status="UPLOADED",
+            ))
+        await db_session.commit()
+
+    return _attach
+
+
+@pytest.fixture
+def make_contract(client, attach_required_documents):
+    """Take an application all the way to a contract.
+
+    A contract needs BOTH approvals (migration 9f2c4a7d1e30): the engine's,
+    via a LOCKED score run, and an operator's. The caller has already produced
+    the score run, so this fixture supplies the operator decision — every
+    downstream suite (market, payments, repayment schedule, ledger) wants a
+    contract that exists, not a rehearsal of the approval gate. The gate
+    itself is asserted directly in tests/admin/test_admin_approval.py.
+    """
+
     async def _make(admin: dict, application_id: str, score_run_id: str):
+        await attach_required_documents(application_id)
+        decision = await client.post(
+            f"/admin/applications/{application_id}/decision",
+            json={"decision": "APPROVED"},
+            headers=auth_headers(admin),
+        )
+        assert decision.status_code in (200, 409), decision.text
+
         resp = await client.post(
             "/contracts/",
             json={"application_id": application_id, "score_run_id": score_run_id},

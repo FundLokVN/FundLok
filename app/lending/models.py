@@ -2,18 +2,21 @@ import uuid
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.core.base import Base
@@ -28,6 +31,10 @@ class Project(Base):
     industry = Column(Text)
     address = Column(JSONB)
     incorporation_date = Column(Date)
+    # Headcount as the SME entered it on the company form. Only the count is
+    # stored: `company_size` is derived from it at grading time, because the
+    # bands live in the params file and may change (input-sources spec §6.3).
+    employee_count = Column(Integer)
     status = Column(
         Text,
         nullable=False,
@@ -79,13 +86,53 @@ class LoanApplication(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    requested_amount = Column(Numeric(15, 2), nullable=False)
+    requested_amount = Column(Numeric(20, 0), nullable=False)
+    # Loan term in months, as requested on the company form. Validated against
+    # the engine's allowed durations on the way in.
+    duration_months = Column(Integer)
     purpose = Column(Text)
     repayment_preference = Column(Text)
     status = Column(Text, nullable=False, server_default="DRAFT")
     submitted_at = Column(DateTime(timezone=True))
     decided_at = Column(DateTime(timezone=True))
     decision_note = Column(Text)
+
+    # The operator half of the two-approval gate (see migration 9f2c4a7d1e30).
+    # The verification engine says the business is who it claims to be; this
+    # says a human agreed the request should proceed. create_contract() refuses
+    # anything that is not APPROVED here, and PENDING is the default so an
+    # unreviewed application can never slip through.
+    # PENDING | APPROVED | REJECTED — enforced by a CHECK constraint in the
+    # migration, like every other check on this schema.
+    admin_approval = Column(Text, nullable=False, server_default="PENDING")
+    admin_approved_by = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # --- Lite grading: the ten figures the wizard saves ----------------------
+    # The VAT and annual-report steps used to demand 48+ files to supply inputs
+    # the parser never actually read (grading-input-sources.md §3.1 still marks
+    # monthly_revenue and cogs_y1 "Unparsed"), so the applicant used to type the
+    # figures. The wizard now reads all ten out of the e-invoice zip and the tax
+    # filings and saves what it read; nothing on that step is typed. Two engine
+    # inputs (fixed_cost_y1, variable_cost_excl_cogs_y1) appear in no statutory
+    # document as such: they follow the statements' stated policy (fixed =
+    # management expense + financial expense, variable = selling expense; see
+    # uploads/parsers/statements.py).
+    #
+    # JSONB rather than one column per figure, for the same reason
+    # ScoreRun.factor_results is JSONB: the field list is still provisional
+    # pending the Lite spec (6 required + 5 optional; this implements the 5+5
+    # the engine contract implies), and Alembic history here is append-only —
+    # typed columns would mean a migration per spec revision. The contract is
+    # enforced in Pydantic at the API boundary (app/loans/schemas.py), which is
+    # where it has to hold anyway, since a JSONB column cannot validate itself.
+    #
+    # Self-reported and unverified by construction: these are checked against
+    # tax records during review, so nothing downstream may treat them as
+    # confirmed fact.
+    self_reported_figures = Column(JSONB)
+    figures_updated_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -97,6 +144,89 @@ class LoanApplication(Base):
     documents = relationship(
         "LoanApplicationDocument", back_populates="application", cascade="all, delete-orphan"
     )
+
+
+class LoanApplicationFinancials(Base):
+    """The current financial picture for one loan application -- the raw
+    material a `GradingInput` (app/underwriting/grading/types.py) is
+    assembled from (T3). Mutable/upsert (unlike `score_run_inputs`, the
+    immutable snapshot taken AT SCORING TIME): an SME's revenue history,
+    AI scores, CIC result and KYC/AML outcome are collected progressively
+    as document ingest/AI grading complete (out of this handoff's scope,
+    per grading's own types.py docstring), and this row reflects the
+    latest state.
+
+    No endpoint here belongs to a self-service SME intake flow (that is
+    `app/loans/`, Phat's) -- this handoff exposes only an admin-facing
+    upsert (`PUT /underwriting/applications/{id}/financials`) so
+    start_score_run() has something real to grade, since none existed
+    anywhere in the codebase before T3.
+
+    `industry`/`company_size`/`duration_months` are NOT NULL: they are
+    config/input parameters `grade()`'s `_validate_inputs` checks
+    regardless of data sufficiency (allowed duration set, industry
+    recognised), not missing-data states (R8). Financial history fields
+    are nullable -- absence there is exactly what produces
+    INSUFFICIENT_DATA, not an error.
+    """
+
+    __tablename__ = "loan_application_financials"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    application_id = Column(
+        UUID(as_uuid=True), ForeignKey("loan_applications.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+
+    industry = Column(Text, nullable=False)
+    company_size = Column(Text, nullable=False)
+    duration_months = Column(Integer, nullable=False)
+    operating_months = Column(Integer, nullable=False)
+
+    # 24 months, m1..m24, in order. NULL elements are how a missing month
+    # is represented (R8) -- the whole column is nullable so an
+    # application with no revenue history submitted yet stores no array
+    # at all, rather than an array of 24 NULLs.
+    monthly_revenue_vnd = Column(ARRAY(Numeric(20, 0)))
+
+    cogs_y1_vnd = Column(Numeric(20, 0))
+    fixed_cost_y1_vnd = Column(Numeric(20, 0))
+    variable_cost_excl_cogs_y1_vnd = Column(Numeric(20, 0))
+
+    conc_top1_pct = Column(Float)
+    conc_top3_pct = Column(Float)
+    crr = Column(Float)
+    rri = Column(Float)
+    tcp = Column(Float)
+
+    # Overrides only (R6, sector-reference-table.md) -- normally left
+    # NULL and resolved from the sector reference table (T3) at scoring
+    # time using `industry` above.
+    sector_cagr_pct_override = Column(Float)
+    ai_score_regulatory_override = Column(Float)
+    ai_score_input_cost_vol_override = Column(Float)
+    ai_score_cyclicality_override = Column(Float)
+    ai_score_competitor_override = Column(Float)
+    ai_score_macro_override = Column(Float)
+    ai_score_uncontrollable_override = Column(Float)
+    ai_score_founder_override = Column(Float)
+
+    owner_withdrawal = Column(Float)
+    cic_score = Column(Integer)
+    kyc_aml_passed = Column(Boolean)
+    fraud_flags = Column(ARRAY(Text), nullable=False, server_default="{}")
+
+    # Who wrote this row. "evidence": filled at score time from what the
+    # application holds (app/loans/grading_inputs.py sync_financials), and
+    # refilled on every run so it tracks the latest evidence. "admin": typed
+    # through PUT /underwriting/applications/{id}/financials, and never
+    # overwritten by the evidence fill. Existing rows predate the fill, so
+    # they are all admin-entered.
+    source = Column(Text, nullable=False, server_default="admin")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    application = relationship("LoanApplication", backref="financials", uselist=False)
 
 
 class ApplicationDocument(Base):
@@ -151,14 +281,32 @@ class ScoreRun(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     application_id = Column(UUID(as_uuid=True), ForeignKey("loan_applications.id", ondelete="CASCADE"), nullable=False)
-    status = Column(Text, nullable=False, server_default="RUNNING")
-    overall_score = Column(Numeric(5, 2))
-    risk_grade = Column(Text)
+    status = Column(Text, nullable=False, server_default="RUNNING")  # RUNNING | READY | LOCKED | FAILED -- run lifecycle, unchanged by T4
+    overall_score = Column(Numeric(5, 2))  # legacy 2dp display value (D24) -- kept for back-compat; see final_grade_precise for the real value
+    risk_grade = Column(Text)  # D23: requirements are "0-100 nominal, no letter grades" -- never written by this handoff; kept untouched (empty) per D23
     recommended_terms = Column(JSONB)
     factor_results = Column(JSONB)
     locked_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # --- T4: score-run persistence and replay ---
+    # `decision` is the grading OUTCOME (APPROVED|REVIEW|REJECT|INSUFFICIENT_DATA|AI_PENDING,
+    # spec §5.1) -- distinct from `status` above, which is the run's own
+    # lifecycle. HANDOFF-03's T4 text says "extend ScoreRun.status with
+    # INSUFFICIENT_DATA and AI_PENDING", but §5.1's resolved ScoreRunOut
+    # shape lists `status` and `decision` as two separate top-level fields;
+    # this follows §5.1 (the more specific, later-resolved contract) rather
+    # than overloading the lifecycle column -- see grading-engine spec 2
+    # for the reconciliation note.
+    decision = Column(Text)
+    engine_version = Column(Text)
+    params_version = Column(Text)
+    sector_reference_version = Column(Text)
+    final_grade_precise = Column(Float)  # D24: full precision, never truncated to 2dp
+    interest_rate_pct = Column(Float)
+    bank_rate_pct = Column(Numeric(6, 4))
+    bank_rate_effective_from = Column(Date)
 
     application = relationship("LoanApplication", back_populates="score_runs")
     contracts = relationship("Contract", back_populates="score_run")
@@ -174,8 +322,8 @@ class Contract(Base):
     final_terms = Column(JSONB, nullable=False)
     signed_at = Column(DateTime(timezone=True))
     activated_at = Column(DateTime(timezone=True))
-    target_amount = Column(Numeric(15, 2), nullable=False)
-    funded_amount = Column(Numeric(15, 2), nullable=False, server_default="0")
+    target_amount = Column(Numeric(20, 0), nullable=False)
+    funded_amount = Column(Numeric(20, 0), nullable=False, server_default="0")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -191,10 +339,10 @@ class Listing(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     contract_id = Column(UUID(as_uuid=True), ForeignKey("contracts.id", ondelete="CASCADE"), unique=True, nullable=False)
-    target_amount = Column(Numeric(15, 2), nullable=False)
-    min_ticket = Column(Numeric(12, 2))
+    target_amount = Column(Numeric(20, 0), nullable=False)
+    min_ticket = Column(Numeric(20, 0))
     status = Column(Text, nullable=False, server_default="DRAFT")
-    funded_amount = Column(Numeric(15, 2), nullable=False, server_default="0")
+    funded_amount = Column(Numeric(20, 0), nullable=False, server_default="0")
     open_at = Column(DateTime(timezone=True))
     close_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -210,7 +358,7 @@ class Order(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     listing_id = Column(UUID(as_uuid=True), ForeignKey("listings.id", ondelete="CASCADE"), nullable=False)
     investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    amount = Column(Numeric(15, 2), nullable=False)
+    amount = Column(Numeric(20, 0), nullable=False)
     status = Column(Text, nullable=False, server_default="PENDING_PAYMENT")
     payment_confirmed_at = Column(DateTime(timezone=True))
     idempotency_key = Column(Text, unique=True, nullable=True)
@@ -228,7 +376,7 @@ class Holding(Base):
     contract_id = Column(UUID(as_uuid=True), ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
     investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id", ondelete="SET NULL"))
-    principal = Column(Numeric(15, 2), nullable=False)
+    principal = Column(Numeric(20, 0), nullable=False)
     share_ratio = Column(Numeric(10, 8))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

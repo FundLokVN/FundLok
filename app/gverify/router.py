@@ -13,18 +13,24 @@ Two ways to submit:
 """
 from uuid import UUID
 
+import logging
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.gverify import kyb_service, service
+from app.gverify import storage
 from app.gverify.client import GVerifyError
+from app.gverify.models import STATUS_MANUAL_REVIEW
 from app.gverify.schemas import (
     HandoffResponse,
     KybRepresentative,
     KybStatusResponse,
     KybVerifyRequest,
+    KybCertificateResponse,
     KybVerifyResponse,
     KycStatusResponse,
     KycVerifyRequest,
@@ -32,13 +38,21 @@ from app.gverify.schemas import (
 )
 from app.gverify.service import ImageValidationError
 from app.gverify.tokens import HANDOFF_TTL, create_handoff_token, verify_handoff_token
-from app.users.models import Role, User
+from app.users.models import USER_STATUS_SUSPENDED, Role, User
 from app.utils.audit import append_audit
 from app.utils.rbac import require_roles
 
+logger = logging.getLogger(__name__)
+
+# Returned with every 502. Deliberately generic: the underlying message can
+# carry provider error bodies or resolver details ("[Errno 8] ...").
+PROVIDER_FAILED_DETAIL = "The verification provider could not process the request. Please try again."
+
 router = APIRouter(prefix="/gverify/kyc", tags=["gverify-kyc"])
 
-_authorized = require_roles(Role.INVESTOR)
+# Investors verify themselves here; SMEs do the same KYC as a step of KYB
+# (their CCCD is matched against the certificate's legal representatives).
+_authorized = require_roles(Role.INVESTOR, Role.SME)
 
 # KYB — business verification for SMEs (spec: ekyb-kyb-verification.md).
 kyb_router = APIRouter(prefix="/gverify/kyb", tags=["gverify-kyb"])
@@ -56,6 +70,10 @@ async def _run_verification(
     latest = await service.latest_for_user(db, user.id)
     if latest is not None and latest.is_approved:
         raise HTTPException(status_code=409, detail="KYC is already approved")
+    # A parked attempt waits for a person. Resubmitting would only park again,
+    # and every attempt is two billable provider calls.
+    if latest is not None and latest.status == STATUS_MANUAL_REVIEW:
+        raise HTTPException(status_code=409, detail="KYC is under manual review")
 
     try:
         attempt = await service.run_kyc_verification(
@@ -70,7 +88,10 @@ async def _run_verification(
     except GVerifyError as exc:
         # The FAILED attempt row is already flushed — commit so it's recorded.
         await db.commit()
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+        # The provider's own error text (and httpx/DNS details) goes to the
+        # log and the attempt row, never to the client.
+        logger.warning("GVerify call failed for user %s: %s", user.id, exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=PROVIDER_FAILED_DETAIL)
 
     append_audit(
         db,
@@ -78,7 +99,17 @@ async def _run_verification(
         entity_id=attempt.id,
         action="VERIFY",
         actor_id=user.id,
-        after_state={"status": attempt.status, "person_number": attempt.person_number},
+        after_state={
+            "status": attempt.status,
+            "person_number": attempt.person_number,
+            # Internal only (never shown to the user): tells a reviewer why
+            # the attempt was parked. The only automatic cause today.
+            **(
+                {"review_cause": "PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT"}
+                if attempt.status == STATUS_MANUAL_REVIEW
+                else {}
+            ),
+        },
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -144,8 +175,14 @@ async def verify_via_handoff(
 
     result = await db.execute(select(User).where(User.id == UUID(user_id)))
     user = result.scalar_one_or_none()
-    if user is None or user.role != Role.INVESTOR.value:
+    if user is None or user.role not in (Role.INVESTOR.value, Role.SME.value):
         raise HTTPException(status_code=401, detail="Invalid or expired handoff token")
+    # This route authenticates by handoff token, so it never passes through
+    # get_current_user and does NOT inherit the suspension check from there.
+    # Without this, a suspended investor's phone could still submit a
+    # verification using a token minted before the suspension.
+    if user.status == USER_STATUS_SUSPENDED:
+        raise HTTPException(status_code=403, detail="This account has been suspended")
 
     return await _run_verification(request, body, db, user)
 
@@ -192,6 +229,16 @@ async def kyb_verify(
     latest = await kyb_service.latest_for_user(db, current_user.id)
     if latest is not None and latest.is_approved:
         raise HTTPException(status_code=409, detail="KYB is already approved")
+    # Rule 7 needs the SME's own verified identity. Refuse up front rather than
+    # after the (billable) certificate OCR, which could only end in rejection.
+    if settings.GVERIFY_KYB_REQUIRE_REP_MATCH and not await kyb_service.approved_kyc_person_number(
+        db, current_user.id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=kyb_service.KYC_REQUIRED_REASON,
+            headers={"X-Error-Code": "KYC_REQUIRED"},
+        )
 
     try:
         attempt = await kyb_service.run_kyb_verification(
@@ -199,13 +246,18 @@ async def kyb_verify(
             current_user,
             document_b64=body.document_b64,
             document_type=body.document_type,
+            declared_tax_code=body.tax_code,
+            declared_license_code=body.license_code,
         )
     except ImageValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except GVerifyError as exc:
         # The FAILED attempt row is already flushed — commit so it's recorded.
         await db.commit()
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+        # The provider's own error text (and httpx/DNS details) goes to the
+        # log and the attempt row, never to the client.
+        logger.warning("GVerify call failed for user %s: %s", current_user.id, exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=PROVIDER_FAILED_DETAIL)
 
     append_audit(
         db,
@@ -224,19 +276,56 @@ async def kyb_verify(
         status=attempt.status,
         is_approved=attempt.is_approved,
         rejection_reason=attempt.rejection_reason,
+        rejection_code=kyb_service.rejection_code(attempt),
         tax_code=attempt.tax_code,
+        license_code=attempt.license_code,
         business_name=attempt.business_name,
         business_type=attempt.business_type,
         business_status=kyb_service.business_status(attempt),
         representatives=[
             KybRepresentative(
                 name=rep.get("name"),
-                id_number=rep.get("id_number"),
-                title=rep.get("title"),
+                # Live payloads use identity_number/position; the API doc said
+                # id_number/title — accept both.
+                id_number=rep.get("identity_number") or rep.get("id_number"),
+                title=rep.get("position") or rep.get("title"),
             )
             for rep in (attempt.representatives or [])
         ],
         created_at=attempt.created_at,
+    )
+
+
+@kyb_router.get("/certificate", response_model=KybCertificateResponse)
+async def kyb_certificate(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_sme_authorized),
+):
+    """A 10-minute read URL for the caller's OWN business registration
+    certificate, as submitted for KYB.
+
+    Scoped to the caller by construction: the attempt is looked up by
+    current_user.id, never by an id from the request, so there is no key to
+    tamper with. The object stays private — a presigned URL is the only way to
+    reach it, and it expires.
+    """
+    attempt = await kyb_service.latest_for_user(db, current_user.id)
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="No KYB verification found")
+
+    located = storage.find_kyb_certificate(attempt.id)
+    if located is None:
+        # Retention is best-effort, so an attempt can legitimately have no
+        # stored file. 404 lets the client fall back to asking for an upload
+        # instead of rendering a broken preview.
+        raise HTTPException(status_code=404, detail="No stored certificate for this verification")
+
+    key, content_type = located
+    return KybCertificateResponse(
+        url=storage.presign_kyb_certificate(key),
+        expires_in=storage.CERTIFICATE_URL_TTL_SECONDS,
+        content_type=content_type,
+        verification_id=attempt.id,
     )
 
 
@@ -255,7 +344,10 @@ async def kyb_status(
         is_terminal=attempt.is_terminal,
         is_approved=attempt.is_approved,
         rejection_reason=attempt.rejection_reason,
+        rejection_code=kyb_service.rejection_code(attempt),
         tax_code=attempt.tax_code,
         business_name=attempt.business_name,
+        company_address=attempt.company_address,
+        date_of_establishment=attempt.date_of_establishment,
         updated_at=attempt.updated_at,
     )

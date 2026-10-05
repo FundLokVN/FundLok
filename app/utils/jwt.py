@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.auth.schemas import TokenData
-from app.users.models import User
+from app.users.models import USER_STATUS_SUSPENDED, User
 
 # HTTPBearer parses Authorization: Bearer <token> reliably for API clients (curl, Postman).
 http_bearer = HTTPBearer(auto_error=False)
@@ -67,6 +67,35 @@ async def get_current_user(
             algorithms=[settings.ALGORITHM],
             options={"verify_aud": False},
         )
+        # A session may only be established by an ACCESS token.
+        #
+        # Every purpose-scoped token in this codebase is minted by
+        # create_access_token with the same secret and algorithm, differing only
+        # by a claim: `purpose` for email verification (24h, arrives in an email
+        # URL), password reset (1h, likewise), and the TOTP login challenge; and
+        # `typ: "refresh"` for refresh tokens (14 days, rotated and revocable in
+        # `refresh_tokens`).
+        #
+        # Each consumer checks its own claim, but this function is what every
+        # authenticated endpoint depends on, and without the two checks below it
+        # accepted all of them as a full session. Concretely that meant:
+        #
+        #   * a revoked refresh token kept working for up to 14 days when sent
+        #     as a bearer token, because nothing here consults refresh_tokens —
+        #     silently defeating "sign out everywhere else" and the revocation
+        #     that a password change performs;
+        #   * a password-reset link, a credential deliberately delivered over
+        #     email, doubled as an API session for an hour;
+        #   * and the TOTP challenge token below would have been a complete
+        #     session on its own, making two-factor auth decorative.
+        #
+        # Access tokens set neither claim, so rejecting their presence is
+        # backward compatible with tokens already in flight.
+        if payload.get("purpose") is not None:
+            raise credentials_exception
+        if payload.get("typ") not in (None, "access"):
+            raise credentials_exception
+
         user_id: str = payload.get("sub")
         if user_id is None:
             raise credentials_exception
@@ -81,6 +110,19 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if user is None:
         raise credentials_exception
+
+    # A suspension has to end the sessions that already exist, not just block
+    # the next login — otherwise an operator suspends an account and the holder
+    # keeps working for as long as their access token lives. Checked here
+    # because this is what every authenticated endpoint depends on.
+    #
+    # Deny-list, not allow-list: PENDING_KYC is a normal onboarding state and
+    # must keep working. Only SUSPENDED is a decision to shut someone out.
+    if user.status == USER_STATUS_SUSPENDED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has been suspended",
+        )
     return user
 
 
@@ -109,14 +151,19 @@ def verify_email_token(token: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid or expired verification token")
 
 
-def create_password_reset_token(user_id: str) -> str:
-    return create_access_token(
-        data={"sub": str(user_id), "purpose": "password_reset"},
-        expires_delta=timedelta(hours=1)
-    )
+def create_password_reset_token(user_id: str, *, password_fingerprint: str | None = None) -> str:
+    """A one-hour reset token. ``password_fingerprint`` (``pwv``) ties it to the
+    password the account has right now; see app/auth/service.reset_password,
+    which refuses a token whose fingerprint no longer matches. Without one the
+    token cannot reset anything there."""
+    data = {"sub": str(user_id), "purpose": "password_reset"}
+    if password_fingerprint is not None:
+        data["pwv"] = password_fingerprint
+    return create_access_token(data=data, expires_delta=timedelta(hours=1))
 
 
-def verify_password_reset_token(token: str) -> str:
+def decode_password_reset_token(token: str) -> tuple[str, str | None]:
+    """(user id, password fingerprint or None) from a valid reset token."""
     try:
         payload = jwt.decode(
             token,
@@ -124,11 +171,15 @@ def verify_password_reset_token(token: str) -> str:
             algorithms=[settings.ALGORITHM],
             options={"verify_aud": False},
         )
-        if payload.get("purpose") != "password_reset":
-            raise HTTPException(status_code=400, detail="Invalid token purpose")
-        user_id = payload.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=400, detail="Invalid token claim")
-        return user_id
     except JWTError:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    if payload.get("purpose") != "password_reset":
+        raise HTTPException(status_code=400, detail="Invalid token purpose")
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid token claim")
+    return user_id, payload.get("pwv")
+
+
+def verify_password_reset_token(token: str) -> str:
+    return decode_password_reset_token(token)[0]

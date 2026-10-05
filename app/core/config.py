@@ -9,6 +9,25 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # Local development switch. Declared here because `extra="ignore"` above
+    # means an undeclared DEBUG in .env is silently dropped — it was, until
+    # now. Defaults to FALSE so a deployment that forgets to set it is the
+    # closed one: it gates the interactive API docs, and failing open there
+    # publishes every route and schema in the service.
+    DEBUG: bool = False
+
+    # Sets the Secure attribute on the auth cookies, so the browser only ever
+    # sends them over HTTPS. Defaults to TRUE: a deployment that forgets this
+    # variable must get the safe behaviour, because the failure mode is a
+    # 14-day refresh token travelling in clear text on any downgraded or
+    # mixed-content request.
+    #
+    # Local development sets it False in .env. Chrome and Firefox do accept
+    # Secure cookies on localhost/127.0.0.1, but Safari historically does not,
+    # and "works in my browser" is a poor reason for a dev to lose their
+    # session.
+    COOKIE_SECURE: bool = True
+
     DATABASE_URL: str
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
@@ -19,7 +38,60 @@ class Settings(BaseSettings):
     MICROSOFT_TENANT_ID: str = "common"
     MOCK_UPLOAD_BASE_URL: str = "https://mock-storage.fundlok.local/upload"
     FRONTEND_URL: str = "http://localhost:3000"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,https://fundlok-front-end.vercel.app"
     CLOUDFLARE_TURNSTILE_SECRET_KEY: str | None = None
+
+    # How many reverse proxies sit in front of the app. X-Forwarded-For is
+    # APPENDED to by each hop, so any entry a proxy did not write itself was
+    # supplied by the client and is a free-text field. Reading the leftmost
+    # entry — the obvious implementation — reads exactly the part the caller
+    # controls, which turns a stored client IP into a value the caller chooses.
+    #
+    # 0 (the default) means trust nothing and use the socket peer. Set it to
+    # the real number of hops in each deployment: 1 behind Cloud Run, 2 behind
+    # Cloudflare in front of Cloud Run. The Nth entry from the RIGHT is then
+    # the address the innermost trusted proxy observed, and is the first one
+    # the client could not have forged.
+    #
+    # This is only the single control point because uvicorn is started with
+    # --no-proxy-headers (docker/entrypoint.sh, package.json). Uvicorn's
+    # ProxyHeadersMiddleware is ON by default and rewrites request.client from
+    # X-Forwarded-For itself, which silently overrode a 0 here — verified: with
+    # it enabled, a request carrying a forged XFF stored the forged address
+    # despite this setting being 0. If that flag is ever dropped, this setting
+    # stops meaning anything.
+    TRUSTED_PROXY_HOPS: int = 0
+
+
+    # --- Passkeys / WebAuthn ---
+    # The Relying Party ID is the domain a credential is bound to, and a
+    # passkey registered against one RP ID cannot be used against another —
+    # get it wrong and every existing passkey silently stops working. It must
+    # be the site's registrable domain (no scheme, no port): "localhost" in
+    # development, "fundlok.com" in production. Derived from FRONTEND_URL when
+    # unset so local development needs no configuration at all.
+    WEBAUTHN_RP_ID: str | None = None
+    WEBAUTHN_RP_NAME: str = "FundLok"
+    # Exact origin(s) the browser will report, scheme and port included.
+    # Comma-separated: a staging domain and production can share a build.
+    WEBAUTHN_ORIGINS: str | None = None
+
+    # Encrypts users.totp_secret at rest (app/auth/totp_crypto.py). A SEPARATE
+    # secret from SECRET_KEY on purpose: sharing them would mean rotating the
+    # JWT key locks every 2FA user out of their authenticator. Unset means
+    # enrolment is refused — the feature fails closed rather than storing
+    # password-equivalent secrets in plaintext.
+    TOTP_ENCRYPTION_KEY: str | None = None
+
+    # PartyKit realtime push for the notification bell (app/notifications/
+    # realtime.py). All three unset = feature off and polling is the only path.
+    # PARTYKIT_HOST is e.g. "fundlok-notifications.<user>.partykit.dev" (no
+    # scheme). The two secrets are DIFFERENT on purpose: one signs the short
+    # browser tokens, the other authorises us to publish; leaking one must not
+    # grant the other. Both must match `partykit env` on the PartyKit project.
+    PARTYKIT_HOST: str | None = None
+    PARTYKIT_JWT_SECRET: str | None = None
+    PARTYKIT_PUBLISH_SECRET: str | None = None
 
     # Cloudflare R2 (S3-compatible). Locally, point at the minio container.
     R2_ENDPOINT_URL: str | None = None
@@ -40,6 +112,9 @@ class Settings(BaseSettings):
     SMTP_SECURE: bool = False
     EMAILS_FROM_EMAIL: str = "noreply@fundlok.com"
     EMAILS_FROM_NAME: str = "FundLok"
+    # Where /contact submissions are forwarded. The submitter's address goes on
+    # Reply-To, so replying from this inbox answers them directly.
+    CONTACT_INBOX_EMAIL: str = "support@fundlok.com"
 
     # Didit KYC / identity verification (https://docs.didit.me)
     # The verification API authenticates with a static secret on x-api-key.
@@ -60,13 +135,41 @@ class Settings(BaseSettings):
     GVERIFY_API_KEY: str | None = None  # x-api-key header value
     GVERIFY_PARTNER_CODE: str | None = None  # partner/subpartner "code" sent per request
     GVERIFY_OS_TYPE: str = "fundlok-backend"  # os-type header
-    GVERIFY_FACE_MATCH_THRESHOLD: float = 0.80  # min {data}.match to approve
     GVERIFY_MIN_OCR_CONFIDENCE: float = 0.85  # min person_number/full_name confidence
     # KYB (business verification) — docs/specs/gverify/ekyb-kyb-verification.md
     GVERIFY_MIN_KYB_OCR_CONFIDENCE: float = 0.85  # min name/tax_code confidence
     # Require the SME's KYC-verified person_number to appear among the
     # certificate's legal representatives (spec Rule 7, default off pending review).
     GVERIFY_KYB_REQUIRE_REP_MATCH: bool = False
+
+    # ARQ worker (T2 -- HANDOFF-03). The daily repayment batch and ML scoring
+    # run through ARQ, never BackgroundTasks (CLAUDE.md). Points at the
+    # docker-compose `redis` service locally; a managed Redis URL in prod.
+    REDIS_URL: str = "redis://localhost:6379/0"
+    @property
+    def webauthn_rp_id(self) -> str:
+        """Registrable domain for passkeys, derived from FRONTEND_URL if unset."""
+        if self.WEBAUTHN_RP_ID:
+            return self.WEBAUTHN_RP_ID.strip()
+        from urllib.parse import urlparse
+
+        host = urlparse(self.FRONTEND_URL).hostname or "localhost"
+        return host
+
+    @property
+    def webauthn_origins(self) -> list[str]:
+        """Origins an assertion may legitimately come from."""
+        if self.WEBAUTHN_ORIGINS:
+            return [o.strip().rstrip("/") for o in self.WEBAUTHN_ORIGINS.split(",") if o.strip()]
+        return [self.FRONTEND_URL.strip().rstrip("/")]
+
+    @property
+    def cors_origins(self) -> list[str]:
+        origins = [o.strip().rstrip("/") for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+        frontend = self.FRONTEND_URL.strip().rstrip("/") if self.FRONTEND_URL else None
+        if frontend and frontend not in origins:
+            origins.append(frontend)
+        return origins
 
 
 

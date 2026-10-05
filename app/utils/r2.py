@@ -53,28 +53,74 @@ def put_bytes(file_key: str, data: bytes, content_type: str, *, bucket: str | No
     )
 
 
-def presign_put(file_key: str, content_type: str) -> str:
-    """Presigned PUT URL; the client must send the same Content-Type header."""
+def get_bytes(file_key: str, *, max_bytes: int, bucket: str | None = None) -> bytes:
+    """Read an object into memory, refusing anything over ``max_bytes``.
+
+    The cap is read-side, not trusted from the object's metadata alone: the
+    body stream is cut at ``max_bytes + 1`` so an object larger than it claims
+    still cannot exhaust memory. Used where the backend must parse an upload
+    (e-invoice listings); the caller decides the ceiling.
+    """
+    resp = _client().get_object(Bucket=bucket or settings.R2_BUCKET, Key=file_key)
+    body = resp["Body"]
+    try:
+        data = body.read(max_bytes + 1)
+    finally:
+        body.close()
+    if len(data) > max_bytes:
+        raise ValueError(f"Object {file_key} exceeds {max_bytes} bytes")
+    return data
+
+
+def presign_put(file_key: str, content_type: str, *, content_length: int) -> str:
+    """Presigned PUT URL bound to one Content-Type AND one exact size.
+
+    Both are signed headers: storage rejects the PUT unless the client sends
+    the same Content-Type and a Content-Length equal to ``content_length``.
+    Signing the length is what enforces a size limit. Without it the URL
+    accepted anything up to R2's 5 GB single-PUT maximum, whatever size the
+    caller declared (and had checked) at presign. A presigned POST with a
+    content-length-range policy would allow a range instead, but R2 does not
+    support POST uploads.
+
+    Callers pass the size they validated against their own limit. A browser
+    sets Content-Length to the file's byte size itself, so declaring
+    ``file.size`` matches automatically.
+    """
+    if content_length <= 0:
+        raise ValueError("content_length must be positive")
     return _client().generate_presigned_url(
         "put_object",
         Params={
             "Bucket": settings.R2_BUCKET,
             "Key": file_key,
             "ContentType": content_type,
+            "ContentLength": content_length,
         },
         ExpiresIn=settings.R2_PRESIGN_EXPIRE_SECONDS,
     )
 
 
-def presign_get(file_key: str) -> str:
-    """Presigned GET URL for reading a private object (e.g. rendering an avatar)."""
+def presign_get(
+    file_key: str,
+    *,
+    bucket: str | None = None,
+    expires_in: int | None = None,
+) -> str:
+    """Presigned GET URL for reading a private object (e.g. rendering an avatar).
+
+    `bucket` mirrors put_bytes: verification documents live in
+    R2_VERIFICATION_BUCKET, not the default one. `expires_in` lets a caller
+    choose a tighter window than the global default — a link to someone's
+    business registration certificate should not live as long as an avatar.
+    """
     return _client().generate_presigned_url(
         "get_object",
         Params={
-            "Bucket": settings.R2_BUCKET,
+            "Bucket": bucket or settings.R2_BUCKET,
             "Key": file_key,
         },
-        ExpiresIn=settings.R2_PRESIGN_EXPIRE_SECONDS,
+        ExpiresIn=expires_in or settings.R2_PRESIGN_EXPIRE_SECONDS,
     )
 
 
@@ -83,10 +129,10 @@ def delete_object(file_key: str) -> None:
     _client().delete_object(Bucket=settings.R2_BUCKET, Key=file_key)
 
 
-def head_object(file_key: str) -> dict | None:
+def head_object(file_key: str, *, bucket: str | None = None) -> dict | None:
     """Object metadata ({size, content_type}) or None if the key does not exist."""
     try:
-        resp = _client().head_object(Bucket=settings.R2_BUCKET, Key=file_key)
+        resp = _client().head_object(Bucket=bucket or settings.R2_BUCKET, Key=file_key)
     except ClientError as exc:
         if exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404:
             return None
