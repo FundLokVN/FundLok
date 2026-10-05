@@ -52,7 +52,7 @@ def application(**overrides):
         "industry": "Food & Beverage",
         "employee_count": 23,
         "incorporation_date_months": 270,
-        "loan_size_vnd": Decimal("555555555"),
+        "loan_size_vnd": Decimal("80000000"),
         "duration_months": 6,
         # The seeded bank_rate_config row; callers pass the row in force.
         "bank_rate_pct": 12.0,

@@ -50,7 +50,7 @@ async def scored_setup(client, make_user, make_admin, make_project, make_loan_ap
     sme = await make_user(role="SME")
     admin = await make_admin()
     project = await make_project(sme)
-    application = await make_loan_application(sme, project["id"], requested_amount="300000000.00")
+    application = await make_loan_application(sme, project["id"], requested_amount="80000000.00")
     resp = await submit_loan_application(sme, application["id"])
     assert resp.status_code == 200
     return {"sme": sme, "admin": admin, "project": project, "application": application}

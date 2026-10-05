@@ -145,7 +145,7 @@ def make_valid_input(**overrides) -> GradingInput:
         company_code="SME-TEST-0001",
         industry="IT Services",
         company_size="micro",
-        loan_size_vnd=Decimal("500000000"),
+        loan_size_vnd=Decimal("80000000"),
         duration_months=3,
         operating_months=36,
         monthly_revenue=tuple(Decimal("100000000") for _ in range(24)),

@@ -29,7 +29,7 @@ def _payload(**overrides):
             "country": "Vietnam",
         },
         "loan_application": {
-            "requested_amount": 800000000,
+            "requested_amount": 80000000,
             "purpose": "Working capital to fulfil new orders",
             "repayment_preference": "MONTHLY",
         },
@@ -131,7 +131,7 @@ async def test_public_listing_carries_the_loan_terms(client, make_user, db_sessi
     # since a Decimal-typed field here could round-trip through Postgres
     # NUMERIC and come back as e.g. Decimal('8E+8') for a round amount like
     # this one, which `int` sidesteps entirely (see app/projects/schemas.py).
-    assert match["loan_application"]["requested_amount"] == 800000000
+    assert match["loan_application"]["requested_amount"] == 80000000
     assert match["loan_application"]["documents"] == []
 
 

@@ -15,7 +15,7 @@ async def _scored_and_approved(client, make_user, make_admin, make_project, make
                                submit_loan_application, attach_required_documents, *, score=True):
     sme, admin = await make_user(role="SME"), await make_admin()
     project = await make_project(sme)
-    application = await make_loan_application(sme, project["id"], requested_amount="300000000")
+    application = await make_loan_application(sme, project["id"], requested_amount="80000000")
     assert (await submit_loan_application(sme, application["id"])).status_code == 200
     run = None
     if score:
@@ -63,8 +63,8 @@ async def test_an_approved_request_shows_its_score_rate_and_repayment(
     # INV-2: flat interest on the principal, charged once.
     months = approval["duration_months"]
     rate = Decimal(str(approval["reference_rate_pct"])) / 100
-    expected = Decimal(300_000_000) * (1 + rate * months / 12)
-    assert abs(approval["total_repayment_vnd"] - int(expected)) <= 300_000_000 * 0.0001 * months
+    expected = Decimal(80_000_000) * (1 + rate * months / 12)
+    assert abs(approval["total_repayment_vnd"] - int(expected)) <= 80_000_000 * 0.0001 * months
     assert approval["estimated_daily_repayment_vnd"] == round(approval["total_repayment_vnd"] / (months * 22))
 
     # The applicant-facing status still says "under review": approval is one

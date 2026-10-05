@@ -27,7 +27,7 @@ def test_no_gate_produces_approved():
     # Sized so daily_repayment_rate stays comfortably under the 0.30 gate,
     # with a long operating history relative to the term.
     inputs = make_valid_input(
-        loan_size_vnd=Decimal("500000000"),
+        loan_size_vnd=Decimal("80000000"),
         duration_months=6,
         operating_months=48,
         monthly_revenue=tuple(Decimal("300000000") for _ in range(24)),

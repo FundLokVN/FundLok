@@ -43,7 +43,7 @@ def sample_inquiry_payload(**overrides) -> dict:
         "cogs_l12m": 2400000000,
         "fixed_costs_l12m": 600000000,
         "variable_costs_l12m": 300000000,
-        "requested_amount": 800000000,
+        "requested_amount": 80000000,
         "tenor_months": 6,
         "seasonality": {
             "peak_month_revenue": 480000000,
@@ -187,7 +187,7 @@ async def test_self_reported_metrics_and_db_persistence(client, db_session):
     risk_profile = data["data"]["risk_profile"]
     assert risk_profile["growth_rate_pct"] == 25.0
     assert risk_profile["ebitda_margin_pct"] == 17.5
-    assert risk_profile["debt_to_revenue_pct"] == 20.0
+    assert risk_profile["debt_to_revenue_pct"] == 2.0
     assert risk_profile["is_operating_loss"] is False
 
     row = (
@@ -198,7 +198,7 @@ async def test_self_reported_metrics_and_db_persistence(client, db_session):
     assert row.operating_months == 36
     assert row.employee_count == 25
     assert row.revenue_l12m == 4000000000
-    assert row.requested_amount == 800000000
+    assert row.requested_amount == 80000000
     assert row.tenor_months == 6
     assert row.peak_month_revenue == 480000000
     assert row.lowest_month_revenue == 210000000
@@ -220,7 +220,7 @@ async def test_input_sanitization_formatted_delimiters(client):
         cogs_l12m="2,400,000,000 ₫",
         fixed_costs_l12m="600,000,000 VND",
         variable_costs_l12m="300.000.000",
-        requested_amount="800,000,000",
+        requested_amount="80,000,000",
         seasonality={
             "peak_month_revenue": "480,000,000",
             "lowest_month_revenue": "210,000,000",
@@ -235,7 +235,7 @@ async def test_input_sanitization_formatted_delimiters(client):
 
     assert data["risk_profile"]["growth_rate_pct"] == 25.0
     assert data["risk_profile"]["ebitda_margin_pct"] == 17.5
-    assert data["risk_profile"]["debt_to_revenue_pct"] == 20.0
+    assert data["risk_profile"]["debt_to_revenue_pct"] == 2.0
 
 
 async def test_costs_above_revenue_is_a_422_not_a_quote(client):
@@ -533,7 +533,7 @@ async def test_admin_get_endpoint_success_with_formatted_table_fields(client, ma
     assert item["tenure_staff_display"] == "36 mos / 25 staff"
     assert item["revenue_l12m_formatted"] == "4.000.000.000 ₫"
     assert item["yoy_growth_display"] == "+25.0%"
-    assert item["loan_ask_display"] == "800M ₫ / 6 mos"
+    assert item["loan_ask_display"] == "80M ₫ / 6 mos"
     assert item["created_at_formatted"] != ""
     # The operator sees exactly what the visitor was quoted.
     assert item["estimated_rate_min"] == quoted["rate_range"]["min_rate_monthly"]

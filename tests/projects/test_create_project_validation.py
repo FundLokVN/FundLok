@@ -30,7 +30,7 @@ def _payload(**overrides):
         "employee_count": 25,
         "incorporation_date": "2023-05-10",
         "loan_application": {
-            "requested_amount": 800000000,
+            "requested_amount": 80000000,
             "duration_months": 6,
             "purpose": "Working capital",
             "repayment_preference": "MONTHLY",
@@ -206,7 +206,7 @@ async def test_headcount_and_term_are_stored(client, db_session, make_user):
     resp = await client.post(
         "/projects",
         json=_payload(employee_count=33, loan_application={
-            "requested_amount": 500000000, "duration_months": 3, "purpose": "Working capital",
+            "requested_amount": 80000000, "duration_months": 3, "purpose": "Working capital",
         }),
         headers=auth_headers(sme),
     )
@@ -227,7 +227,7 @@ async def test_grading_inputs_use_the_form_headcount_and_term(client, make_user,
     sme = await make_user(role="SME")
     resp = await client.post(
         "/projects",
-        json=_payload(employee_count=33, loan_application={"requested_amount": 500000000, "duration_months": 3}),
+        json=_payload(employee_count=33, loan_application={"requested_amount": 80000000, "duration_months": 3}),
         headers=auth_headers(sme),
     )
     assert resp.status_code == 201, resp.text

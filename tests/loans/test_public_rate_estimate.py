@@ -27,7 +27,7 @@ def payload(**overrides) -> dict:
         "cogs_y1": 2_400_000_000,
         "fixed_cost_y1": 600_000_000,
         "variable_cost_excl_cogs_y1": 300_000_000,
-        "loan_amount": 800_000_000,
+        "loan_amount": 80_000_000,
         "duration_months": 6,
         "revenue_best_month": 480_000_000,
         "revenue_worst_month": 210_000_000,

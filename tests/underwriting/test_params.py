@@ -34,5 +34,24 @@ def test_params_version_pinned(params):
     # rows / 270,000 assertions, test_golden_set.py) was re-verified against
     # this version and passes at 0 failures -- this pin was left stale by
     # that change and is corrected here, not re-litigated.
-    assert params.params_version == "wb-v1-20260917"
+    #
+    # wb-v1-20260917 -> wb-v2-20261005: loan_constraints.max_vnd 1,000,000,000
+    # -> 100,000,000. No factor, curve or rollup changed. The golden set is
+    # unaffected because tests/underwriting/conftest.py widens max_vnd to 5bn
+    # for golden-set reconciliation (its loans are 200M-5bn).
+    assert params.params_version == "wb-v2-20261005"
     assert params.engine_version == "1.0.0"
+
+
+from app.underwriting.grading import load_params
+
+
+def test_loan_constraints_range():
+    # The requested-amount range offered to SMEs: 20,000,000 - 100,000,000 VND.
+    # Every API bound (app/rates/schemas.py, app/projects/engine_constraints.py)
+    # and the engine's own input validation read from here, so this pin is the
+    # single guard against the range drifting.
+    # We call load_params() directly rather than the golden-set-widened `params` fixture.
+    p = load_params()
+    assert int(p.loan_constraints["min_vnd"]) == 20_000_000
+    assert int(p.loan_constraints["max_vnd"]) == 100_000_000
