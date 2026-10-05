@@ -110,12 +110,17 @@ class LedgerAccount(Base):
     custodial_account = relationship("CustodialAccount", back_populates="ledger_accounts")
 
     __table_args__ = (
+        # NULLS NOT DISTINCT (PostgreSQL 15+, migration c5e1a9d4b7f2): without
+        # it the platform-level accounts (OMNIBUS_CASH, FL_REVENUE, SUSPENSE),
+        # whose owner_user_id and contract_id are both NULL, were never
+        # protected -- two concurrent first uses created two OMNIBUS_CASH rows.
         UniqueConstraint(
             "account_type",
             "custodial_account_id",
             "owner_user_id",
             "contract_id",
             name="uq_ledger_accounts_role_party_contract",
+            postgresql_nulls_not_distinct=True,
         ),
     )
 

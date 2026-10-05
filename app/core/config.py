@@ -146,6 +146,28 @@ class Settings(BaseSettings):
     # run through ARQ, never BackgroundTasks (CLAUDE.md). Points at the
     # docker-compose `redis` service locally; a managed Redis URL in prod.
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    # Payouts (docs/specs/payments/payout-idempotency.md). PAYOUT_GATEWAY
+    # selects the bank adapter; empty means payouts are recorded and approved
+    # but never sent (the dispatcher jobs do nothing).
+    PAYOUT_GATEWAY: str = ""
+    # How long a dispatcher owns a SUBMITTING instruction. Must exceed the
+    # adapter's own HTTP timeout; when it lapses the sweeper marks the
+    # instruction UNKNOWN (never back to APPROVED).
+    PAYOUT_SUBMIT_LEASE_SECONDS: int = 120
+    PAYOUT_INQUIRY_INTERVAL_SECONDS: int = 60
+    # An UNKNOWN instruction still unresolved after this long goes to
+    # MANUAL_REVIEW.
+    PAYOUT_UNKNOWN_ESCALATE_AFTER_SECONDS: int = 1800
+    # Resend an UNKNOWN instruction (same client_request_id) when the bank
+    # says it has no record of it. Leave off until the bank confirms in
+    # writing that it rejects duplicate request ids and that "not found"
+    # after PAYOUT_NOT_FOUND_RESEND_AFTER_SECONDS is authoritative.
+    PAYOUT_RESEND_ON_NOT_FOUND: bool = False
+    PAYOUT_NOT_FOUND_RESEND_AFTER_SECONDS: int = 900
+    # How long a money endpoint holds a row lock before giving up with 409.
+    MONEY_LOCK_TIMEOUT_MS: int = 5000
+
     @property
     def webauthn_rp_id(self) -> str:
         """Registrable domain for passkeys, derived from FRONTEND_URL if unset."""

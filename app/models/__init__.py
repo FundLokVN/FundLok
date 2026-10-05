@@ -26,6 +26,12 @@ from app.lending.models import (  # noqa: F401
 from app.system.models import SystemSetting  # noqa: F401
 from app.verification.models import Verification, VerificationWebhookEvent  # noqa: F401
 from app.banking.models import LinkedAccount  # noqa: F401
+from app.payments.models import (  # noqa: F401
+    IdempotencyRecord,
+    PayoutBeneficiary,
+    PayoutEvent,
+    PayoutInstruction,
+)
 from app.gverify.models import GVerifyKybVerification, GVerifyVerification  # noqa: F401
 from app.repayment_schedule.models import (  # noqa: F401
     Facility,

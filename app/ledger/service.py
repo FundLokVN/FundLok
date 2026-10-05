@@ -31,11 +31,13 @@ Implementation note on "balanced legs" (spec section 3/6):
 from __future__ import annotations
 
 import dataclasses
+import uuid
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ledger.models import CustodialAccount, LedgerAccount, LedgerEntry, LedgerTransaction
@@ -128,28 +130,33 @@ async def get_or_create_account(
     """Fetch the (account_type, custodial_account_id, owner_user_id,
     contract_id) account, creating it on first use. This is the only
     construction path for LedgerAccount rows -- callers never build one
-    directly, so the uniqueness key stays enforced in one place."""
-    result = await db.execute(
-        select(LedgerAccount).where(
-            LedgerAccount.account_type == account_type,
-            LedgerAccount.custodial_account_id == custodial_account_id,
-            LedgerAccount.owner_user_id == owner_user_id,
-            LedgerAccount.contract_id == contract_id,
-        )
+    directly, so the uniqueness key stays enforced in one place.
+
+    Race-safe: the insert is ON CONFLICT DO NOTHING against the NULLS NOT
+    DISTINCT unique constraint, so two concurrent first uses converge on one
+    row (the loser waits for the winner's commit, then reads its row)."""
+    lookup = select(LedgerAccount).where(
+        LedgerAccount.account_type == account_type,
+        LedgerAccount.custodial_account_id == custodial_account_id,
+        LedgerAccount.owner_user_id == owner_user_id,
+        LedgerAccount.contract_id == contract_id,
     )
-    account = result.scalar_one_or_none()
+    account = (await db.execute(lookup)).scalar_one_or_none()
     if account is not None:
         return account
 
-    account = LedgerAccount(
-        account_type=account_type,
-        custodial_account_id=custodial_account_id,
-        owner_user_id=owner_user_id,
-        contract_id=contract_id,
+    await db.execute(
+        pg_insert(LedgerAccount)
+        .values(
+            id=uuid.uuid4(),
+            account_type=account_type,
+            custodial_account_id=custodial_account_id,
+            owner_user_id=owner_user_id,
+            contract_id=contract_id,
+        )
+        .on_conflict_do_nothing(constraint="uq_ledger_accounts_role_party_contract")
     )
-    db.add(account)
-    await db.flush()
-    return account
+    return (await db.execute(lookup.execution_options(populate_existing=True))).scalar_one()
 
 
 async def get_account_balance(db: AsyncSession, account_id: UUID) -> Decimal:
@@ -253,21 +260,39 @@ async def post_transaction(
                 f"but does not net to zero (net={net[account_id]})"
             )
 
-    transaction = LedgerTransaction(
-        event_type=event_type,
-        contract_id=transaction_contract_id,
-        idempotency_key=idempotency_key,
-        reference=reference,
-        created_by=created_by,
-    )
-    db.add(transaction)
-    await db.flush()
+    # ON CONFLICT DO NOTHING instead of a plain INSERT: a concurrent caller
+    # holding the same idempotency_key used to slip past the SELECT above
+    # and die on the unique index with a 500. Now the second caller waits for
+    # the first to commit and gets the original transaction back.
+    transaction_id = (
+        await db.execute(
+            pg_insert(LedgerTransaction)
+            .values(
+                id=uuid.uuid4(),
+                event_type=event_type,
+                contract_id=transaction_contract_id,
+                idempotency_key=idempotency_key,
+                reference=reference,
+                created_by=created_by,
+            )
+            .on_conflict_do_nothing(index_elements=[LedgerTransaction.idempotency_key])
+            .returning(LedgerTransaction.id)
+        )
+    ).scalar_one_or_none()
+    if transaction_id is None:
+        return (
+            await db.execute(
+                select(LedgerTransaction)
+                .where(LedgerTransaction.idempotency_key == idempotency_key)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
 
     for leg in legs:
         db.add(
             LedgerEntry(
                 contract_id=leg.contract_id,
-                ledger_transaction_id=transaction.id,
+                ledger_transaction_id=transaction_id,
                 debit_account_id=leg.debit_account_id,
                 credit_account_id=leg.credit_account_id,
                 type=leg.type,
@@ -277,5 +302,10 @@ async def post_transaction(
             )
         )
     await db.flush()
-    await db.refresh(transaction)
-    return transaction
+    return (
+        await db.execute(
+            select(LedgerTransaction)
+            .where(LedgerTransaction.id == transaction_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()

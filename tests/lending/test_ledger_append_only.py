@@ -28,21 +28,14 @@ def test_payments_routes_are_create_only():
         assert route.methods <= {"POST", "HEAD", "OPTIONS"}
 
 
-async def test_disbursement_creates_a_ledger_entry_and_leaves_prior_entries_untouched(funded_contract, client):
-    setup = await funded_contract(target_amount="10000.00", min_ticket="1000.00")
-    first = await client.post(
-        "/payments/disbursements",
-        json={"contract_id": setup["contract"]["id"], "bank_account": "VN-TEST-0001", "amount": "10000.00"},
-        headers={**setup["admin"]["headers"], "Idempotency-Key": "append-only-check-1"},
-    )
-    assert first.status_code == 201
+async def test_disbursement_cannot_be_recorded_twice_for_one_contract(payout_ready, create_disbursement):
+    """Used to assert the opposite: a second disbursement with a new key was
+    accepted and posted a second DISBURSEMENT for the same contract. A
+    contract now holds at most one live payout instruction, and nothing
+    reaches the ledger until the bank confirms the transfer."""
+    setup = await payout_ready()
+    first = await create_disbursement(setup, "append-only-check-1")
+    assert first.status_code == 202
 
-    # A second, distinct disbursement call (different key) appends a new
-    # entry; it does not update the first one in place.
-    second = await client.post(
-        "/payments/disbursements",
-        json={"contract_id": setup["contract"]["id"], "bank_account": "VN-TEST-0002", "amount": "10000.00"},
-        headers={**setup["admin"]["headers"], "Idempotency-Key": "append-only-check-2"},
-    )
-    assert second.status_code == 201
-    assert second.json()["disbursement_id"] != first.json()["disbursement_id"]
+    second = await create_disbursement(setup, "append-only-check-2")
+    assert second.status_code == 409

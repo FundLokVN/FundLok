@@ -38,7 +38,7 @@ async def test_repayment_splits_across_uneven_holdings_without_imbalance(
     resp = await client.post(
         "/payments/repayments",
         json=repayment_body,
-        headers=setup["admin"]["headers"],
+        headers={**setup["admin"]["headers"], "Idempotency-Key": "rounding-uneven-holdings"},
     )
     assert resp.status_code == 201, resp.text
 
@@ -76,7 +76,7 @@ async def test_repayment_of_one_vnd_across_three_holdings_sums_to_exactly_one(
     resp = await client.post(
         "/payments/repayments",
         json=repayment_body,
-        headers=setup["admin"]["headers"],
+        headers={**setup["admin"]["headers"], "Idempotency-Key": "rounding-one-vnd-three-ways"},
     )
     assert resp.status_code == 201, resp.text
 

@@ -605,6 +605,76 @@ def funded_contract(open_listing, place_order, make_user):
 
 
 @pytest.fixture
+def make_beneficiary(db_session):
+    """A payout beneficiary row. There is no beneficiary-verification
+    endpoint yet (bank account-name inquiry is a later spec), so this is a
+    direct ORM insert used purely as test setup, like approve_kyc_documents."""
+    from datetime import datetime, timezone
+
+    from app.payments.models import PayoutBeneficiary
+
+    async def _make(owner_user_id: str, verified_by: str, *, status: str = "VERIFIED", account_number: str | None = None):
+        beneficiary = PayoutBeneficiary(
+            owner_user_id=uuid.UUID(str(owner_user_id)),
+            bank_bin="970000",
+            account_number=account_number or f"{uuid.uuid4().int % 10**12:012d}",
+            account_name="CONG TY TNHH THU NGHIEM",
+            status=status,
+            verified_at=datetime.now(timezone.utc) if status == "VERIFIED" else None,
+            verified_by=uuid.UUID(str(verified_by)) if status == "VERIFIED" else None,
+        )
+        db_session.add(beneficiary)
+        await db_session.commit()
+        return beneficiary
+
+    return _make
+
+
+@pytest.fixture
+def payout_ready(funded_contract, make_admin, make_beneficiary):
+    """A funded contract plus everything a disbursement needs: a verified
+    beneficiary owned by the borrower (the SME) and a second admin to act as
+    checker. Returns the funded_contract() dict plus "checker" and
+    "beneficiary_id"."""
+
+    async def _setup(target_amount: str = "10000.00"):
+        setup = await funded_contract(target_amount=target_amount, min_ticket="1000.00")
+        setup["checker"] = await make_admin()
+        beneficiary = await make_beneficiary(setup["sme"]["id"], setup["admin"]["id"])
+        setup["beneficiary_id"] = str(beneficiary.id)
+        return setup
+
+    return _setup
+
+
+@pytest.fixture
+def create_disbursement(client):
+    async def _create(setup: dict, key: str | None, *, actor: dict | None = None, body: dict | None = None):
+        actor = actor or setup["admin"]
+        headers = dict(auth_headers(actor))
+        if key is not None:
+            headers["Idempotency-Key"] = key
+        body = body if body is not None else {
+            "contract_id": setup["contract"]["id"],
+            "beneficiary_id": setup["beneficiary_id"],
+        }
+        return await client.post("/payments/disbursements", json=body, headers=headers)
+
+    return _create
+
+
+@pytest.fixture
+def approve_disbursement(client):
+    async def _approve(instruction_id: str, actor: dict, key: str):
+        return await client.post(
+            f"/payments/disbursements/{instruction_id}/approve",
+            headers={**auth_headers(actor), "Idempotency-Key": key},
+        )
+
+    return _approve
+
+
+@pytest.fixture
 def get_refresh_token_row(db_session):
     """HANDOFF-02 Fix B test helper: look up a user's RefreshToken row(s)
     directly, to assert on hashing/revocation state that isn't visible via

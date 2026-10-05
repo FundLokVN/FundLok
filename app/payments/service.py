@@ -17,6 +17,14 @@ endpoints, same request/response contracts, same idempotency and
 cross-contract-409 semantics as before -- rewired onto `app.ledger.service`
 so the schema change doesn't silently break `/payments/*` (see the PR
 description for the full rationale and the rounding caveat noted below).
+
+Disbursements no longer live here. The old `record_disbursement` posted a
+DISBURSEMENT straight to the ledger from an admin request (amount and bank
+account from the body, no "already disbursed" guard), which let one contract
+be disbursed any number of times. Disbursements are now payout instructions
+with maker-checker approval, posted to the ledger only once the bank confirms
+the transfer: see app/payments/payouts.py and
+docs/specs/payments/payout-idempotency.md.
 """
 from datetime import datetime
 from decimal import Decimal
@@ -35,96 +43,26 @@ from app.ledger.service import (
 from app.ledger.models import LedgerTransaction
 
 
-async def _resolve_borrower_user_id(db: AsyncSession, contract: Contract) -> UUID:
+async def resolve_borrower_user_id(db: AsyncSession, contract: Contract) -> UUID:
     """Contract -> LoanApplication -> Project -> the project's owning user.
     One-borrower-to-many-lenders per contract (spec Open Q#5), so the first
-    ownership row is the borrower."""
+    ownership row is the borrower. Ordered, so a project with co-owners
+    always resolves to the same user: the disbursement beneficiary check and
+    the BORROWER ledger account both depend on that."""
     result = await db.execute(select(LoanApplication).where(LoanApplication.id == contract.application_id))
     application = result.scalar_one_or_none()
     if application is None:
         raise HTTPException(status_code=400, detail="Contract has no associated loan application")
 
     result = await db.execute(
-        select(ProjectOwnership).where(ProjectOwnership.project_id == application.project_id)
+        select(ProjectOwnership)
+        .where(ProjectOwnership.project_id == application.project_id)
+        .order_by(ProjectOwnership.created_at, ProjectOwnership.id)
     )
     ownership = result.scalars().first()
     if ownership is None:
         raise HTTPException(status_code=400, detail="Project has no registered owner")
     return ownership.user_id
-
-
-async def record_disbursement(
-    db: AsyncSession,
-    *,
-    contract_id: UUID,
-    bank_account: str,
-    amount: Decimal,
-    idempotency_key: str | None,
-    created_by: UUID,
-) -> tuple[LedgerEntry, bool]:
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Amount must be positive")
-
-    if idempotency_key:
-        result = await db.execute(
-            select(LedgerTransaction).where(LedgerTransaction.idempotency_key == idempotency_key)
-        )
-        existing_txn = result.scalar_one_or_none()
-        if existing_txn is not None:
-            if existing_txn.contract_id != contract_id:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Idempotency-Key already used for a different contract",
-                )
-            entry = await _first_entry_of_type(db, existing_txn.id, "DISBURSEMENT")
-            return entry, False
-
-    result = await db.execute(select(Contract).where(Contract.id == contract_id))
-    contract = result.scalar_one_or_none()
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
-    result = await db.execute(select(Listing).where(Listing.contract_id == contract_id))
-    lst = result.scalar_one_or_none()
-    if not lst or lst.status != "FUNDED":
-        raise HTTPException(
-            status_code=400,
-            detail="Listing must be FUNDED before disbursement",
-        )
-    if lst.funded_amount < lst.target_amount:
-        raise HTTPException(status_code=400, detail="Listing funding threshold not met")
-
-    custodial_account = await resolve_custodial_account(db, contract_id=contract_id)
-    omnibus_cash = await get_or_create_account(
-        db, account_type="OMNIBUS_CASH", custodial_account_id=custodial_account.id
-    )
-    borrower_user_id = await _resolve_borrower_user_id(db, contract)
-    borrower_account = await get_or_create_account(
-        db,
-        account_type="BORROWER",
-        custodial_account_id=custodial_account.id,
-        owner_user_id=borrower_user_id,
-        contract_id=contract_id,
-    )
-
-    transaction = await _post_transaction_with_service(
-        db,
-        event_type="DISBURSEMENT",
-        legs=[
-            LedgerLeg(
-                debit_account_id=omnibus_cash.id,
-                credit_account_id=borrower_account.id,
-                amount=amount,
-                type="DISBURSEMENT",
-                contract_id=contract_id,
-                reference=bank_account,
-            )
-        ],
-        idempotency_key=idempotency_key,
-        reference=bank_account,
-        created_by=created_by,
-    )
-    entry = await _first_entry_of_type(db, transaction.id, "DISBURSEMENT")
-    return entry, True
 
 
 async def record_repayment(
@@ -173,7 +111,7 @@ async def record_repayment(
     omnibus_cash = await get_or_create_account(
         db, account_type="OMNIBUS_CASH", custodial_account_id=custodial_account.id
     )
-    borrower_user_id = await _resolve_borrower_user_id(db, contract)
+    borrower_user_id = await resolve_borrower_user_id(db, contract)
     borrower_account = await get_or_create_account(
         db,
         account_type="BORROWER",
