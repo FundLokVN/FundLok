@@ -32,11 +32,14 @@
 BEGIN;
 
 -- Guard: wrong database, wrong server, wrong terminal tab -> stop here.
+-- psql does not substitute :'variables' inside a $$ ... $$ body, so the value is
+-- handed to the DO block through a session setting instead.
+SELECT set_config('reset.confirm_db', :'confirm_db', true);
 DO $$
 BEGIN
-  IF current_database() <> :'confirm_db' THEN
+  IF current_database() <> current_setting('reset.confirm_db') THEN
     RAISE EXCEPTION 'Refusing to run: connected to "%" but confirm_db is "%"',
-      current_database(), :'confirm_db';
+      current_database(), current_setting('reset.confirm_db');
   END IF;
 END $$;
 

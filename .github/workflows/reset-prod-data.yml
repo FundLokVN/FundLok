@@ -132,6 +132,9 @@ jobs:
           KEEP_ADMINS: ${{ inputs.keep_admins && '1' || '0' }}
           COMMIT: ${{ inputs.apply && '1' || '0' }}
         run: |
+          # Without pipefail, `psql | tee` reports tee's success even when psql
+          # fails, and a broken run looks green.
+          set -o pipefail
           psql "$DB_URL" -v ON_ERROR_STOP=1 \
             -v confirm_db="$CONFIRM_DB" -v keep_admins="$KEEP_ADMINS" -v commit="$COMMIT" \
             -f scripts/reset_prod_data.sql | tee reset-output.txt
