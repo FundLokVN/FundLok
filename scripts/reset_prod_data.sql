@@ -3,7 +3,7 @@
 -- Empties every table of user and business data and keeps the schema, so the app
 -- starts clean without re-running migrations. What it does NOT touch:
 --   * the schema and alembic_version  (the app keeps working, no migration needed)
---   * reference / config tables: see `keep` below
+--   * reference / config tables: see `keep` below, plus the PLATFORM custodial account
 --   * ADMIN and SYSTEM_ADMIN accounts (when :keep_admins = 1; the accounts you sign in with)
 --
 -- It does NOT clear anything outside Postgres: uploaded documents in the R2
@@ -54,8 +54,15 @@ INSERT INTO keep VALUES
   ('alembic_version'),      -- migration state
   ('bank_rate_config'),     -- reference rate, seeded by a migration
   ('system_settings'),      -- maintenance mode etc.
-  ('custodial_accounts'),   -- platform custodial account, seeded by a migration
   ('users');                -- handled below, so admin accounts can stay
+-- custodial_accounts is NOT kept as a table: it points at contracts, and
+-- Postgres will not truncate contracts while a table outside the same TRUNCATE
+-- still references it. Its PLATFORM row (seeded by a migration) is saved and put
+-- back, unchanged, right after.
+
+-- The platform custodial account (id and all), restored below.
+CREATE TEMP TABLE saved_custodial ON COMMIT DROP AS
+  SELECT * FROM custodial_accounts WHERE scope = 'PLATFORM';
 
 -- Empty everything else in one statement (one statement, so tables that
 -- reference each other are cleared together and no CASCADE is needed).
@@ -70,6 +77,8 @@ BEGIN
   EXECUTE 'TRUNCATE TABLE ' || tbls || ' RESTART IDENTITY';
 END $$;
 
+INSERT INTO custodial_accounts SELECT * FROM saved_custodial;
+
 -- Users: drop everyone, or everyone except the admin accounts.
 DELETE FROM users
  WHERE :keep_admins = 0
@@ -81,7 +90,8 @@ DELETE FROM users
 SELECT (SELECT count(*) FROM users) AS users_after,
        (SELECT count(*) FROM loan_applications) AS applications_after,
        (SELECT count(*) FROM projects) AS projects_after,
-       (SELECT count(*) FROM alembic_version) AS alembic_rows_kept;
+       (SELECT count(*) FROM alembic_version) AS alembic_rows_kept,
+       (SELECT count(*) FROM custodial_accounts) AS platform_custodial_rows;
 
 \if :commit
   \echo '>>> COMMITTING'
