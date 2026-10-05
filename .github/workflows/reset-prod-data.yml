@@ -1,0 +1,143 @@
+# Reset PRODUCTION data -- DESTRUCTIVE. MANUAL ONLY.
+#
+# This workflow has no push, pull_request or schedule trigger and can never run
+# on its own. Someone has to open Actions -> "Reset production data" -> Run
+# workflow and fill in the form. It runs scripts/reset_prod_data.sql (read that
+# file first: what it empties, what it keeps).
+#
+# Safety layers, outermost first:
+#   1. Manual trigger only (workflow_dispatch).
+#   2. Only from `main`: the job is skipped on any other branch.
+#   3. The `production-reset` GitHub Environment. In repo Settings ->
+#      Environments, create it and add "Required reviewers" so a second person
+#      must approve every run (reviewers on private repos need a paid plan).
+#   4. Dry run is the default. `apply` must be ticked to change anything.
+#   5. To apply, you must also tick `backup_confirmed` and type the phrase.
+#   6. The SQL refuses unless `confirm_db` equals the database it connected to.
+#
+# The database URL comes from the ENVIRONMENT secret PROD_DATABASE_URL, created
+# under Settings -> Environments -> production-reset -> Environment secrets (NOT
+# under repository secrets, which every workflow can read). Only a job that
+# declares `environment: production-reset` can see it, and this is the only one.
+# If that secret is absent, it falls back to reading the URL from the prod-api
+# Cloud Run service, signing in to Google keylessly like the deploy job in ci.yml.
+#
+# Does NOT clear R2 uploads or Redis; see the header of the SQL file.
+
+name: Reset production data
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_db:
+        description: "Name of the production database you mean to wipe (the SQL refuses if it differs)"
+        required: true
+        type: string
+      keep_admins:
+        description: "Keep ADMIN and SYSTEM_ADMIN accounts"
+        required: true
+        type: boolean
+        default: true
+      apply:
+        description: "APPLY the reset. Leave unticked for a dry run that changes nothing."
+        required: true
+        type: boolean
+        default: false
+      backup_confirmed:
+        description: "Only needed to apply: I took a backup and checked that it restores"
+        required: false
+        type: boolean
+        default: false
+      confirm_phrase:
+        description: "Only needed to apply: type RESET PRODUCTION DATA"
+        required: false
+        type: string
+
+# Never two at once, never cancel one that is running.
+concurrency:
+  group: reset-prod-data
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  reset:
+    name: ${{ inputs.apply && 'APPLY reset' || 'Dry run' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.ref == 'refs/heads/main'
+    environment: production-reset
+    env:
+      PROJECT_ID: fundlok
+      REGION: asia-southeast1
+      SERVICE: prod-api
+      # Empty unless the environment secret exists.
+      DB_SECRET: ${{ secrets.PROD_DATABASE_URL }}
+
+    steps:
+      - name: Check the form before touching anything
+        env:
+          APPLY: ${{ inputs.apply }}
+          BACKUP: ${{ inputs.backup_confirmed }}
+          PHRASE: ${{ inputs.confirm_phrase }}
+        run: |
+          if [ "$APPLY" = "true" ]; then
+            [ "$BACKUP" = "true" ] || { echo "::error::To apply, tick backup_confirmed"; exit 1; }
+            [ "$PHRASE" = "RESET PRODUCTION DATA" ] || { echo "::error::To apply, type RESET PRODUCTION DATA exactly"; exit 1; }
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        if: env.DB_SECRET == ''
+        uses: google-github-actions/auth@f112390a2df9932162083945e46d439060d66ec2 # google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/1086381007504/locations/global/workloadIdentityPools/fundlok/providers/github
+          service_account: github-deploy@fundlok.iam.gserviceaccount.com
+
+      - name: Get the production database URL
+        id: db
+        run: |
+          if [ -n "$DB_SECRET" ]; then
+            raw="$DB_SECRET"
+          else
+            raw=$(gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format=json \
+              | jq -r '.spec.template.spec.containers[0].env[]? | select(.name=="DATABASE_URL") | .value // empty')
+          fi
+          if [ -z "$raw" ]; then
+            echo "::error::No database URL: set the PROD_DATABASE_URL environment secret (or make DATABASE_URL a plain env var on $SERVICE)."
+            exit 1
+          fi
+          # Mask before anything can print it: the whole URL and its password.
+          echo "::add-mask::$raw"
+          pw=$(printf '%s' "$raw" | sed -E 's#^[a-z+0-9]+://[^:]+:([^@]*)@.*#\1#')
+          [ -n "$pw" ] && echo "::add-mask::$pw"
+          # The app uses driver-qualified URLs; psql wants a plain one.
+          url="${raw/+asyncpg/}"; url="${url/+psycopg2/}"; url="${url%%\?*}"
+          case "$url" in
+            *"/cloudsql/"*|*"host=/"*)
+              echo "::error::The database is reached over a Cloud SQL unix socket, which a GitHub runner cannot use. Add a Cloud SQL Auth Proxy step first."
+              exit 1 ;;
+          esac
+          echo "::add-mask::$url"
+          echo "url=${url}?sslmode=require" >> "$GITHUB_OUTPUT"
+
+      - name: Run reset_prod_data.sql
+        env:
+          DB_URL: ${{ steps.db.outputs.url }}
+          CONFIRM_DB: ${{ inputs.confirm_db }}
+          KEEP_ADMINS: ${{ inputs.keep_admins && '1' || '0' }}
+          COMMIT: ${{ inputs.apply && '1' || '0' }}
+        run: |
+          psql "$DB_URL" -v ON_ERROR_STOP=1 \
+            -v confirm_db="$CONFIRM_DB" -v keep_admins="$KEEP_ADMINS" -v commit="$COMMIT" \
+            -f scripts/reset_prod_data.sql | tee reset-output.txt
+          {
+            echo "### Reset production data: ${{ inputs.apply && 'APPLIED' || 'dry run (nothing changed)' }}"
+            echo '```'
+            cat reset-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
