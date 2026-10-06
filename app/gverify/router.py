@@ -23,6 +23,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.gverify import kyb_service, service
 from app.gverify import storage
+from app.system import service as system_service
 from app.gverify.client import GVerifyError
 from app.gverify.models import STATUS_MANUAL_REVIEW
 from app.gverify.schemas import (
@@ -47,6 +48,9 @@ logger = logging.getLogger(__name__)
 # Returned with every 502. Deliberately generic: the underlying message can
 # carry provider error bodies or resolver details ("[Errno 8] ...").
 PROVIDER_FAILED_DETAIL = "The verification provider could not process the request. Please try again."
+# Manual verification mode, when the documents could not be stored: nothing
+# would be left for an admin to review, so the submission is not accepted.
+STORAGE_UNAVAILABLE_DETAIL = "Verification is temporarily unavailable. Please try again later."
 
 router = APIRouter(prefix="/gverify/kyc", tags=["gverify-kyc"])
 
@@ -75,6 +79,9 @@ async def _run_verification(
     if latest is not None and latest.status == STATUS_MANUAL_REVIEW:
         raise HTTPException(status_code=409, detail="KYC is under manual review")
 
+    # Read per submission, uncached: a switch to MANUAL must stop provider
+    # calls from the very next request.
+    manual = await system_service.is_manual_verification(db)
     try:
         attempt = await service.run_kyc_verification(
             db,
@@ -82,9 +89,15 @@ async def _run_verification(
             id_front_b64=body.id_front_b64,
             id_back_b64=body.id_back_b64,
             portrait_b64=body.portrait_b64,
+            manual=manual,
         )
     except ImageValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except storage.StorageUnavailable as exc:
+        user_id = user.id  # read before the rollback expires the instance
+        await db.rollback()
+        logger.error("KYC documents for user %s could not be stored in manual mode: %s", user_id, exc)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=STORAGE_UNAVAILABLE_DETAIL)
     except GVerifyError as exc:
         # The FAILED attempt row is already flushed — commit so it's recorded.
         await db.commit()
@@ -103,9 +116,13 @@ async def _run_verification(
             "status": attempt.status,
             "person_number": attempt.person_number,
             # Internal only (never shown to the user): tells a reviewer why
-            # the attempt was parked. The only automatic cause today.
+            # the attempt was parked.
             **(
-                {"review_cause": "PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT"}
+                {
+                    "review_cause": "MANUAL_VERIFICATION_MODE"
+                    if manual
+                    else "PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT"
+                }
                 if attempt.status == STATUS_MANUAL_REVIEW
                 else {}
             ),
@@ -229,6 +246,10 @@ async def kyb_verify(
     latest = await kyb_service.latest_for_user(db, current_user.id)
     if latest is not None and latest.is_approved:
         raise HTTPException(status_code=409, detail="KYB is already approved")
+    # As for KYC: a parked attempt waits for a person, and in manual mode every
+    # resubmission would add another row to the admin queue.
+    if latest is not None and latest.status == STATUS_MANUAL_REVIEW:
+        raise HTTPException(status_code=409, detail="KYB is under manual review")
     # Rule 7 needs the SME's own verified identity. Refuse up front rather than
     # after the (billable) certificate OCR, which could only end in rejection.
     if settings.GVERIFY_KYB_REQUIRE_REP_MATCH and not await kyb_service.approved_kyc_person_number(
@@ -240,6 +261,7 @@ async def kyb_verify(
             headers={"X-Error-Code": "KYC_REQUIRED"},
         )
 
+    manual = await system_service.is_manual_verification(db)
     try:
         attempt = await kyb_service.run_kyb_verification(
             db,
@@ -248,9 +270,15 @@ async def kyb_verify(
             document_type=body.document_type,
             declared_tax_code=body.tax_code,
             declared_license_code=body.license_code,
+            manual=manual,
         )
     except ImageValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except storage.StorageUnavailable as exc:
+        user_id = current_user.id  # read before the rollback expires the instance
+        await db.rollback()
+        logger.error("KYB certificate for user %s could not be stored in manual mode: %s", user_id, exc)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=STORAGE_UNAVAILABLE_DETAIL)
     except GVerifyError as exc:
         # The FAILED attempt row is already flushed — commit so it's recorded.
         await db.commit()
@@ -265,7 +293,11 @@ async def kyb_verify(
         entity_id=attempt.id,
         action="VERIFY",
         actor_id=current_user.id,
-        after_state={"status": attempt.status, "tax_code": attempt.tax_code},
+        after_state={
+            "status": attempt.status,
+            "tax_code": attempt.tax_code,
+            **({"review_cause": "MANUAL_VERIFICATION_MODE"} if manual else {}),
+        },
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()

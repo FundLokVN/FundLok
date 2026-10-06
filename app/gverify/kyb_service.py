@@ -177,6 +177,17 @@ NOT_A_REPRESENTATIVE_REASON = (
 REJECTION_CODES = {NOT_A_REPRESENTATIVE_REASON: "NOT_A_REPRESENTATIVE"}
 
 
+# Shown to the SME while a manual-mode attempt waits for an admin.
+MANUAL_REVIEW_REASON = "Your business verification needs a manual review"
+
+
+def provider_checked(attempt: GVerifyKybVerification) -> bool:
+    """False for an attempt submitted in manual verification mode (no OCR,
+    no registry check; the business details are the SME's declaration plus
+    whatever the reviewing admin confirmed)."""
+    return attempt.ocr_data is not None
+
+
 def rejection_code(attempt: GVerifyKybVerification) -> str | None:
     """Machine-readable cause of a REJECTED attempt, where one is defined."""
     if attempt.status != STATUS_REJECTED:
@@ -245,12 +256,19 @@ async def run_kyb_verification(
     document_type: str,
     declared_tax_code: str | None = None,
     declared_license_code: str | None = None,
+    manual: bool = False,
 ) -> GVerifyKybVerification:
     """Run the full one-shot KYB flow and return the terminal attempt row.
 
-    Raises ImageValidationError (caller error, no row created) or
+    With manual=True (system verification mode MANUAL) the provider is not
+    called: the certificate is stored and the attempt parks in MANUAL_REVIEW
+    for an admin. The SME's declared tax/licence codes are recorded as given;
+    the admin confirms them against the certificate when approving.
+
+    Raises ImageValidationError (caller error, no row created),
     client.GVerifyError (provider failure — the FAILED attempt row is flushed;
-    the caller must commit so the failure is recorded).
+    the caller must commit so the failure is recorded), or, in manual mode
+    only, storage.StorageUnavailable (the caller must roll back).
     """
     if document_type not in DOCUMENT_TYPES:
         raise ImageValidationError(
@@ -265,6 +283,16 @@ async def run_kyb_verification(
     )
     db.add(attempt)
     await db.flush()
+
+    if manual:
+        # Strict: the stored certificate is the only evidence an admin will see.
+        await storage.store_kyb_document(attempt.id, certificate=raw, strict=True)
+        attempt.tax_code = declared
+        attempt.license_code = declared_license or declared
+        attempt.status = STATUS_MANUAL_REVIEW
+        attempt.rejection_reason = MANUAL_REVIEW_REASON
+        await db.flush()
+        return attempt
 
     # Retain the certificate under verification/KYB/<attempt-id>/ —
     # best-effort; the attempt proceeds even if storage is down.

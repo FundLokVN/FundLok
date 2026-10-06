@@ -10,8 +10,12 @@ from app.admin.schemas import (
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
     AdminInviteRequest,
+    AdminKybCertificateUrlResponse,
+    AdminKybResolveRequest,
+    AdminKybReviewOut,
     AdminKybVerificationOut,
     AdminKycImageUrlResponse,
+    AdminKycResolveRequest,
     AdminKycVerificationOut,
     AdminLoanApplicationRow,
     AdminMode,
@@ -76,12 +80,14 @@ async def get_project_detail(
 )
 async def resolve_kyb_verification(
     verification_id: UUID,
-    body: AdminDecisionRequest,
+    body: AdminKybResolveRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Settle a KYB attempt the engine parked in MANUAL_REVIEW. Admin-only."""
+    """Settle a KYB attempt parked in MANUAL_REVIEW. Admin-only. Approving a
+    manual-mode attempt needs the business name and tax code from the
+    certificate."""
     return await service.resolve_kyb_verification(
         db,
         verification_id,
@@ -89,7 +95,43 @@ async def resolve_kyb_verification(
         note=body.note,
         actor=current_user,
         ip_address=request.client.host if request.client else None,
+        business_name=body.business_name,
+        tax_code=body.tax_code,
     )
+
+
+@router.get("/kyb-verifications", response_model=list[AdminKybReviewOut])
+async def list_kyb_verifications(
+    status: Literal["MANUAL_REVIEW", "APPROVED", "REJECTED", "FAILED"] = "MANUAL_REVIEW",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """KYB attempts in one status, oldest first. Defaults to the review queue.
+    Admin-only."""
+    return await service.list_kyb_verifications(db, status=status)
+
+
+@router.get("/kyb-verifications/{verification_id}", response_model=AdminKybReviewOut)
+async def get_kyb_verification(
+    verification_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """One KYB attempt with the SME's own identity check beside it. Admin-only."""
+    return await service.get_kyb_verification(db, verification_id)
+
+
+@router.get(
+    "/kyb-verifications/{verification_id}/certificate",
+    response_model=AdminKybCertificateUrlResponse,
+)
+async def get_kyb_certificate_url(
+    verification_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A 10-minute read URL for the submitted certificate. Admin-only."""
+    return await service.get_kyb_certificate_url(db, verification_id)
 
 
 @router.get("/kyc-verifications", response_model=list[AdminKycVerificationOut])
@@ -133,13 +175,14 @@ async def get_kyc_image_url(
 )
 async def resolve_kyc_verification(
     verification_id: UUID,
-    body: AdminDecisionRequest,
+    body: AdminKycResolveRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Settle a KYC attempt parked in MANUAL_REVIEW. Admin-only; approving
-    requires a note."""
+    """Settle a KYC attempt parked in MANUAL_REVIEW. Admin-only. Approving a
+    flagged attempt requires a note; approving a manual-mode attempt requires
+    the ID number and name from the card."""
     return await service.resolve_kyc_verification(
         db,
         verification_id,
@@ -147,6 +190,9 @@ async def resolve_kyc_verification(
         note=body.note,
         actor=current_user,
         ip_address=request.client.host if request.client else None,
+        person_number=body.person_number,
+        full_name=body.full_name,
+        date_of_birth=body.date_of_birth,
     )
 
 

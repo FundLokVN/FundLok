@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Generic, Literal, TypeVar
@@ -85,6 +86,70 @@ class AdminDecision(str, Enum):
 class AdminDecisionRequest(BaseModel):
     decision: AdminDecision
     note: str | None = None
+
+
+_PERSON_NUMBER_RE = re.compile(r"^\d{9}(\d{3})?$")  # CMND (9) or CCCD (12)
+_TAX_CODE_RE = re.compile(r"^\d{10}(-\d{3})?$")  # MST, optionally a branch suffix
+
+
+def _clean_optional(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+class AdminKycResolveRequest(AdminDecisionRequest):
+    """Settle a KYC attempt. The ID fields are for attempts submitted in
+    manual verification mode, which have no OCR: approving one needs the ID
+    number and name typed from the card, so the one-ID-one-account check and
+    later KYB matching have something to compare. They are refused on an
+    attempt the provider read, whose details must stay the provider's."""
+
+    person_number: str | None = None
+    full_name: str | None = Field(default=None, max_length=120)
+    date_of_birth: str | None = Field(default=None, max_length=20)
+
+    @field_validator("person_number")
+    @classmethod
+    def _check_person_number(cls, value: str | None) -> str | None:
+        value = _clean_optional(value)
+        if value is None:
+            return None
+        value = "".join(value.split())
+        if not _PERSON_NUMBER_RE.match(value):
+            raise ValueError("person_number must be a 9-digit CMND or 12-digit CCCD number")
+        return value
+
+    @field_validator("full_name", "date_of_birth")
+    @classmethod
+    def _strip(cls, value: str | None) -> str | None:
+        return _clean_optional(value)
+
+
+class AdminKybResolveRequest(AdminDecisionRequest):
+    """Settle a KYB attempt. For a manual-mode attempt (no OCR, no registry
+    check) approving needs the business name and tax code as printed on the
+    certificate; the SME's own declaration is only a starting point."""
+
+    business_name: str | None = Field(default=None, max_length=300)
+    tax_code: str | None = None
+
+    @field_validator("tax_code")
+    @classmethod
+    def _check_tax_code(cls, value: str | None) -> str | None:
+        value = _clean_optional(value)
+        if value is None:
+            return None
+        value = value.replace(" ", "")
+        if not _TAX_CODE_RE.match(value):
+            raise ValueError("tax_code must be a 10-digit MST, optionally -NNN for a branch")
+        return value
+
+    @field_validator("business_name")
+    @classmethod
+    def _strip(cls, value: str | None) -> str | None:
+        return _clean_optional(value)
 
 
 class AdminUserStatusRequest(BaseModel):
@@ -192,6 +257,45 @@ class AdminKycVerificationOut(BaseModel):
     created_at: datetime | None
     user: AdminKycAccountRef
     conflicts: list[AdminKycConflict]
+    # False when the attempt was submitted in manual verification mode: no
+    # OCR or face match ran, and the reviewer must read the card themselves.
+    provider_checked: bool = True
+
+
+class AdminKybReviewOut(BaseModel):
+    """One KYB attempt with what a reviewer needs beside the certificate.
+
+    `kyc_full_name` / `kyc_person_number` come from the SME's own approved
+    identity check (if any), so the reviewer can confirm that person appears
+    on the certificate as a legal representative. `projects` names the
+    companies this account has registered on FundLok.
+    """
+
+    id: UUID
+    status: str
+    is_approved: bool
+    rejection_reason: str | None
+    document_type: str
+    tax_code: str | None
+    license_code: str | None
+    business_name: str | None
+    business_type: str | None
+    company_address: str | None
+    provider_checked: bool
+    created_at: datetime | None
+    updated_at: datetime | None
+    user: AdminKycAccountRef
+    kyc_full_name: str | None
+    kyc_person_number: str | None
+    projects: list[str]
+
+
+class AdminKybCertificateUrlResponse(BaseModel):
+    """A short-lived read URL for a submitted business registration certificate."""
+
+    url: str
+    expires_in: int
+    content_type: str
 
 
 class AdminKycImageUrlResponse(BaseModel):

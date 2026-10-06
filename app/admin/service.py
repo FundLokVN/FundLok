@@ -17,6 +17,8 @@ from app.admin.schemas import (
     ActorOut,
     AdminDecision,
     AdminDocumentUrlResponse,
+    AdminKybCertificateUrlResponse,
+    AdminKybReviewOut,
     AdminKybVerificationOut,
     AdminKycAccountRef,
     AdminKycConflict,
@@ -35,6 +37,7 @@ from app.admin.schemas import (
     UNASSIGNED_ROLE,
     UserRow,
 )
+from app.gverify import kyb_service
 from app.gverify import service as gverify_service
 from app.gverify import storage as gverify_storage
 from app.gverify.models import (
@@ -328,15 +331,30 @@ async def resolve_kyb_verification(
     note: str | None,
     actor: User,
     ip_address: str | None = None,
+    business_name: str | None = None,
+    tax_code: str | None = None,
 ) -> AdminKybVerificationOut:
-    """Settle a KYB attempt the engine parked for a human.
+    """Settle a KYB attempt parked for a human.
 
     Only MANUAL_REVIEW is resolvable. An APPROVED or REJECTED attempt is the
     provider's own verdict and an operator must not quietly overwrite it — a
     retry creates a new attempt, which is the supported way to change the
-    answer.
+    answer. The row is locked so two operators can't settle it at once, and
+    nobody may settle their own attempt.
+
+    An attempt submitted in manual verification mode had no OCR and no
+    registry check: approving it needs the business name and tax code as
+    printed on the certificate (the SME's declared code pre-fills the latter).
+    On an attempt the provider read, those fields are the provider's and are
+    not editable here.
     """
-    row = await db.get(GVerifyKybVerification, verification_id)
+    row = (
+        await db.execute(
+            select(GVerifyKybVerification)
+            .where(GVerifyKybVerification.id == verification_id)
+            .with_for_update()
+        )
+    ).scalars().first()
     if row is None:
         raise HTTPException(status_code=404, detail="KYB verification not found")
     if row.status != STATUS_MANUAL_REVIEW:
@@ -344,11 +362,35 @@ async def resolve_kyb_verification(
             status_code=409,
             detail=f"Only a MANUAL_REVIEW attempt can be resolved (this one is {row.status})",
         )
+    if row.user_id == actor.id:
+        raise HTTPException(status_code=403, detail="You cannot review your own verification")
 
+    provider_checked = kyb_service.provider_checked(row)
+    if provider_checked and (business_name or tax_code):
+        raise HTTPException(
+            status_code=400,
+            detail="This attempt's business details were read by the provider and cannot be edited",
+        )
+    if not provider_checked:
+        effective_name = business_name or row.business_name
+        effective_tax_code = tax_code or row.tax_code
+        if decision is AdminDecision.approved and not (effective_name and effective_tax_code):
+            raise HTTPException(
+                status_code=400,
+                detail="Enter the business name and tax code from the certificate to approve this verification",
+            )
+        row.business_name = effective_name
+        row.tax_code = effective_tax_code
+        if tax_code and not row.license_code:
+            row.license_code = tax_code
+
+    note = (note or "").strip() or None
     before = {"status": row.status}
     row.status = decision.value
     if decision is AdminDecision.rejected:
         row.rejection_reason = note or row.rejection_reason
+    else:
+        row.rejection_reason = None
     db.add(row)
     append_audit(
         db,
@@ -357,12 +399,104 @@ async def resolve_kyb_verification(
         action="KYB_MANUAL_REVIEW_RESOLVED",
         actor_id=actor.id,
         before_state=before,
-        after_state={"status": row.status, "note": note},
+        after_state={
+            "status": row.status,
+            "note": note,
+            **(
+                {
+                    "provider_checked": False,
+                    "business_name": row.business_name,
+                    "tax_code": row.tax_code,
+                }
+                if not provider_checked
+                else {}
+            ),
+        },
         ip_address=ip_address,
     )
     await db.commit()
     await db.refresh(row)
     return AdminKybVerificationOut.model_validate(row)
+
+
+# Same cap as the KYC queue: one row per waiting SME (resubmission is refused
+# while an attempt is in review).
+KYB_REVIEW_LIST_LIMIT = 100
+
+
+async def _kyb_review_out(db: AsyncSession, row: GVerifyKybVerification) -> AdminKybReviewOut:
+    owner = await db.get(User, row.user_id)
+    kyc = await gverify_service.latest_for_user(db, row.user_id)
+    approved_kyc = kyc if kyc is not None and kyc.is_approved else None
+    projects = (
+        await db.execute(
+            select(Project.legal_name)
+            .join(ProjectOwnership, ProjectOwnership.project_id == Project.id)
+            .where(ProjectOwnership.user_id == row.user_id)
+            .order_by(Project.created_at)
+        )
+    ).scalars().all()
+    return AdminKybReviewOut(
+        id=row.id,
+        status=row.status,
+        is_approved=row.is_approved,
+        rejection_reason=row.rejection_reason,
+        document_type=row.document_type,
+        tax_code=row.tax_code,
+        license_code=row.license_code,
+        business_name=row.business_name,
+        business_type=row.business_type,
+        company_address=row.company_address,
+        provider_checked=kyb_service.provider_checked(row),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        user=_kyc_account_ref(owner),
+        kyc_full_name=approved_kyc.full_name if approved_kyc else None,
+        kyc_person_number=approved_kyc.person_number if approved_kyc else None,
+        projects=[name for name in projects if name],
+    )
+
+
+async def _get_kyb_verification(db: AsyncSession, verification_id: UUID) -> GVerifyKybVerification:
+    row = await db.get(GVerifyKybVerification, verification_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="KYB verification not found")
+    return row
+
+
+async def list_kyb_verifications(
+    db: AsyncSession, *, status: str = STATUS_MANUAL_REVIEW
+) -> list[AdminKybReviewOut]:
+    """KYB attempts in one status, oldest first so the queue is worked in order."""
+    rows = (
+        await db.execute(
+            select(GVerifyKybVerification)
+            .where(GVerifyKybVerification.status == status)
+            .order_by(GVerifyKybVerification.created_at)
+            .limit(KYB_REVIEW_LIST_LIMIT)
+        )
+    ).scalars().all()
+    return [await _kyb_review_out(db, row) for row in rows]
+
+
+async def get_kyb_verification(db: AsyncSession, verification_id: UUID) -> AdminKybReviewOut:
+    return await _kyb_review_out(db, await _get_kyb_verification(db, verification_id))
+
+
+async def get_kyb_certificate_url(
+    db: AsyncSession, verification_id: UUID
+) -> AdminKybCertificateUrlResponse:
+    """A 10-minute read URL for an attempt's submitted certificate."""
+    row = await _get_kyb_verification(db, verification_id)
+    located = await asyncio.to_thread(gverify_storage.find_kyb_certificate, row.id)
+    if located is None:
+        raise HTTPException(status_code=404, detail="This certificate was not stored")
+    key, content_type = located
+    return AdminKybCertificateUrlResponse(
+        url=await asyncio.to_thread(gverify_storage.presign_kyb_certificate, key),
+        expires_in=gverify_storage.CERTIFICATE_URL_TTL_SECONDS,
+        content_type=content_type,
+    )
 
 
 async def decide_application(
@@ -786,6 +920,7 @@ async def _kyc_verification_out(
         created_at=row.created_at,
         user=_kyc_account_ref(owner),
         conflicts=conflicts,
+        provider_checked=gverify_service.provider_checked(row),
     )
 
 
@@ -859,15 +994,24 @@ async def resolve_kyc_verification(
     note: str | None,
     actor: User,
     ip_address: str | None = None,
+    person_number: str | None = None,
+    full_name: str | None = None,
+    date_of_birth: str | None = None,
 ) -> AdminKycVerificationOut:
-    """Settle a KYC attempt the engine parked for a human.
+    """Settle a KYC attempt parked for a human.
 
     Rules, beyond the KYB equivalent:
-      * Approving needs a note. It overrides a fraud signal (this ID is already
-        verified on another account), so the reason has to be on record.
       * Nobody may settle their own attempt.
       * The row is locked, so two operators can't settle it at once.
       * The note stays internal; a rejected investor sees a fixed message.
+      * An attempt the provider read and flagged (this ID is already verified
+        on another account) needs a note to approve: that overrides a fraud
+        signal, so the reason has to be on record.
+      * An attempt submitted in manual verification mode had no OCR. Approving
+        it needs the ID number and name typed from the card; the
+        one-ID-one-account check then runs on what the reviewer entered, and a
+        conflict found there needs a note like any other. Without a conflict
+        the note is optional: in manual mode every submission comes here.
     """
     row = await _get_kyc_verification(db, verification_id, for_update=True)
     if row.status != STATUS_MANUAL_REVIEW:
@@ -878,13 +1022,33 @@ async def resolve_kyc_verification(
     if row.user_id == actor.id:
         raise HTTPException(status_code=403, detail="You cannot review your own verification")
     note = (note or "").strip() or None
-    if decision is AdminDecision.approved and not note:
+
+    provider_checked = gverify_service.provider_checked(row)
+    entered = {"person_number": person_number, "full_name": full_name, "date_of_birth": date_of_birth}
+    if provider_checked and any(entered.values()):
+        raise HTTPException(
+            status_code=400,
+            detail="This attempt's ID details were read by the provider and cannot be edited",
+        )
+    if not provider_checked:
+        if decision is AdminDecision.approved and not (person_number and full_name):
+            raise HTTPException(
+                status_code=400,
+                detail="Enter the ID number and full name from the card to approve this verification",
+            )
+        if person_number:
+            row.person_number = person_number
+        if full_name:
+            row.full_name = full_name
+        if date_of_birth:
+            row.date_of_birth = date_of_birth
+
+    conflicts = await gverify_service.approved_elsewhere(db, row.person_number, row.user_id)
+    if decision is AdminDecision.approved and not note and (provider_checked or conflicts):
         raise HTTPException(
             status_code=400,
             detail="A note is required to approve a flagged verification",
         )
-
-    conflicts = await gverify_service.approved_elsewhere(db, row.person_number, row.user_id)
     before = {"status": row.status}
     row.status = decision.value
     row.rejection_reason = None if decision is AdminDecision.approved else KYC_REJECTED_REASON
@@ -900,6 +1064,11 @@ async def resolve_kyc_verification(
             "note": note,
             "user_id": str(row.user_id),
             "conflicting_verification_ids": [str(c.id) for c in conflicts],
+            **(
+                {"provider_checked": False, "entered_by_reviewer": {k: v for k, v in entered.items() if v}}
+                if not provider_checked
+                else {}
+            ),
         },
         ip_address=ip_address,
     )

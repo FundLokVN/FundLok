@@ -48,8 +48,19 @@ def _put(key: str, raw: bytes) -> None:
     r2.put_bytes(key, raw, content_type, bucket=_bucket())
 
 
-async def _store(kind: str, verification_id, documents: dict[str, bytes]) -> None:
+class StorageUnavailable(RuntimeError):
+    """Documents could not be stored, in a mode where storing them is the
+    point (manual review: the files are the only thing an admin can judge)."""
+
+
+async def _store(kind: str, verification_id, documents: dict[str, bytes], *, strict: bool = False) -> None:
+    """Best-effort by default (see module docstring). With strict=True a
+    failure raises StorageUnavailable instead: in manual verification mode no
+    provider looks at the documents, so an attempt whose files did not land
+    could never be reviewed and must not be accepted."""
     if not r2.is_configured():
+        if strict:
+            raise StorageUnavailable("object storage is not configured")
         logger.warning(
             "R2 not configured — %s documents for %s not retained", kind, verification_id
         )
@@ -59,24 +70,27 @@ async def _store(kind: str, verification_id, documents: dict[str, bytes]) -> Non
             ext, _ = _ext_and_type(raw)
             key = f"verification/{kind}/{verification_id}/{name}.{ext}"
             await asyncio.to_thread(_put, key, raw)
-    except Exception:  # noqa: BLE001 — retention must never break verification
+    except Exception as exc:  # noqa: BLE001 — retention must never break verification
         logger.exception(
             "Failed to store %s verification documents for %s", kind, verification_id
         )
+        if strict:
+            raise StorageUnavailable(str(exc)) from exc
 
 
 async def store_kyc_documents(
-    verification_id, *, id_front: bytes, id_back: bytes, portrait: bytes
+    verification_id, *, id_front: bytes, id_back: bytes, portrait: bytes, strict: bool = False
 ) -> None:
     await _store(
         "KYC",
         verification_id,
         {"id_front": id_front, "id_back": id_back, "portrait": portrait},
+        strict=strict,
     )
 
 
-async def store_kyb_document(verification_id, *, certificate: bytes) -> None:
-    await _store("KYB", verification_id, {"certificate": certificate})
+async def store_kyb_document(verification_id, *, certificate: bytes, strict: bool = False) -> None:
+    await _store("KYB", verification_id, {"certificate": certificate}, strict=strict)
 
 
 # The extensions _ext_and_type can produce. The chosen one is NOT recorded in
