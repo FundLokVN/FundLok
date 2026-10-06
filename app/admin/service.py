@@ -1,8 +1,9 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 from sqlalchemy.sql import Select
@@ -55,10 +56,12 @@ from app.notifications.models import (
     EVENT_APPLICATION_REJECTED,
 )
 from app.notifications import realtime
-from app.utils.email import send_application_updated_email
+from app.auth.service import password_fingerprint
+from app.utils.email import send_admin_invite_email, send_application_updated_email
+from app.utils.jwt import create_password_reset_token
 from app.notifications.service import create_notification
 from app.projects.service import activate_project_if_approved
-from app.users.models import Role, User
+from app.users.models import USER_STATUS_ACTIVE, Role, User
 from app.utils import r2
 from app.utils.audit import append_audit
 
@@ -598,6 +601,84 @@ async def set_user_status(
     await db.commit()
     await db.refresh(target)
     return AdminUserDetail.model_validate(target)
+
+
+ADMIN_INVITE_TTL = timedelta(hours=24)
+
+
+async def invite_admin(
+    db: AsyncSession,
+    *,
+    email: str,
+    full_name: str,
+    actor: User,
+    background_tasks: BackgroundTasks,
+    ip_address: str | None = None,
+) -> AdminUserDetail:
+    """Create an ADMIN account and email the invitee a link to set a password.
+
+    SYSTEM_ADMIN only (enforced by the route): granting admin access is acting
+    on an admin-level account, the same line set_user_status draws.
+
+    The account is created with no password, so it cannot be signed into with
+    one until the invitee sets theirs through the emailed link -- an ordinary
+    password-reset token, single-use because it is bound to the current
+    (empty) password. email_verified is set because the address is vouched
+    for by the inviter and proven when the link is used; without it the
+    frontend's verification gate would trap the new admin on /verify-email.
+    """
+    # Emails are stored as entered (register does the same), so compare
+    # case-insensitively: "Ops@x.com" and "ops@x.com" must not become two
+    # accounts, one of them an admin.
+    existing = (
+        await db.execute(select(User.id).where(func.lower(User.email) == email.lower()))
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+
+    user = User(
+        email=email,
+        full_name=full_name,
+        role=Role.ADMIN.value,
+        status=USER_STATUS_ACTIVE,
+        email_verified=True,
+        password_hash=None,
+    )
+    db.add(user)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        # Lost a race with another invite/registration for the same address.
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="An account with this email already exists") from exc
+
+    append_audit(
+        db,
+        entity_type="USER",
+        entity_id=user.id,
+        action="ADMIN_INVITED",
+        actor_id=actor.id,
+        after_state={"email": email, "role": Role.ADMIN.value},
+        ip_address=ip_address,
+    )
+    await db.commit()
+    await db.refresh(user)
+
+    # Queued only after the commit, so no email ever points at an account
+    # that does not exist.
+    token = create_password_reset_token(
+        user.id,
+        password_fingerprint=password_fingerprint(user.password_hash),
+        expires_delta=ADMIN_INVITE_TTL,
+    )
+    background_tasks.add_task(
+        send_admin_invite_email,
+        to_email=user.email,
+        token=token,
+        invited_by=actor.full_name or actor.email,
+        expires_hours=int(ADMIN_INVITE_TTL.total_seconds() // 3600),
+    )
+    return AdminUserDetail.model_validate(user)
 
 
 async def list_audit_logs(

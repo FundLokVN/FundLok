@@ -151,15 +151,24 @@ def verify_email_token(token: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid or expired verification token")
 
 
-def create_password_reset_token(user_id: str, *, password_fingerprint: str | None = None) -> str:
-    """A one-hour reset token. ``password_fingerprint`` (``pwv``) ties it to the
-    password the account has right now; see app/auth/service.reset_password,
-    which refuses a token whose fingerprint no longer matches. Without one the
-    token cannot reset anything there."""
+def create_password_reset_token(
+    user_id: str,
+    *,
+    password_fingerprint: str | None = None,
+    expires_delta: timedelta = timedelta(hours=1),
+) -> str:
+    """A reset token, one hour by default. ``password_fingerprint`` (``pwv``)
+    ties it to the password the account has right now; see
+    app/auth/service.reset_password, which refuses a token whose fingerprint
+    no longer matches. Without one the token cannot reset anything there.
+
+    ``expires_delta`` is longer only for the admin invitation link
+    (app/admin/service.invite_admin): an invitee may not open their email
+    within the hour, and the fingerprint still makes the link single-use."""
     data = {"sub": str(user_id), "purpose": "password_reset"}
     if password_fingerprint is not None:
         data["pwv"] = password_fingerprint
-    return create_access_token(data=data, expires_delta=timedelta(hours=1))
+    return create_access_token(data=data, expires_delta=expires_delta)
 
 
 def decode_password_reset_token(token: str) -> tuple[str, str | None]:

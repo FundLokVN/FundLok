@@ -379,6 +379,53 @@ def send_password_reset_email(to_email: str, token: str) -> None:
     )
 
 
+def send_admin_invite_email(to_email: str, token: str, invited_by: str, expires_hours: int) -> None:
+    """Invite a new operator to the admin console.
+
+    The account already exists (role ADMIN, no password). The link is an
+    ordinary password-reset token, so setting a password through it is the
+    whole of onboarding and the link dies once used. `invited_by` is a person's
+    display name and is escaped: it is user-editable profile text.
+    """
+    from datetime import datetime
+    from html import escape
+
+    setup_link = f"{settings.FRONTEND_URL}/reset-password?token={token}&invite=1"
+    forgot_link = f"{settings.FRONTEND_URL}/forgot-password"
+    inviter = escape(invited_by)
+
+    subject = "You've been added as a FundLok admin"
+
+    html_content = email_shell(
+        f"""
+          <h1 style="margin:0 0 20px;font-size:24px;font-weight:700;color:#111827;">Set up your admin account</h1>
+          <p><strong>{inviter}</strong> has created a <strong>FundLok</strong> admin account for this email address.
+          Choose a password to finish setting it up:</p>
+          {cta_button(setup_link, "Set your password")}
+          <p>If the button doesn't work, copy and paste this link into your browser:</p>
+          <p style="word-break:break-all;"><a href="{setup_link}" style="color:#16a34a;">{setup_link}</a></p>
+          <p>This link works once and expires in {expires_hours} hours. If it has expired, request a new one at
+          <a href="{forgot_link}" style="color:#16a34a;">{forgot_link}</a>.</p>
+          <p>If you weren't expecting this, you can ignore this email, and please let us know.</p>
+          <p style="color:#9ca3af;font-size:13px;">&copy; {datetime.now().year} FundLok. All rights reserved.</p>
+        """
+    )
+
+    text_content = (
+        f"{invited_by} has created a FundLok admin account for this email address. "
+        f"Choose a password to finish setting it up: {setup_link} "
+        f"The link works once and expires in {expires_hours} hours. If it has expired, "
+        f"request a new one at {forgot_link}."
+    )
+
+    send_email(
+        to_email=to_email,
+        subject=subject,
+        html_content=html_content,
+        text_content=text_content,
+    )
+
+
 def send_password_changed_notice(to_email: str, first_time: bool = False) -> None:
     """Tell the account owner their password just changed.
 

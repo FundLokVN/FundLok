@@ -357,6 +357,21 @@ def make_admin(make_user, db_session):
 
 
 @pytest.fixture
+def make_system_admin(make_user, db_session):
+    """SYSTEM_ADMIN, provisioned out of band like make_admin does for ADMIN."""
+
+    async def _make(email: str | None = None):
+        user = await make_user(role=None, email=email)
+        result = await db_session.execute(select(User).where(User.id == user["id"]))
+        row = result.scalar_one()
+        row.role = "SYSTEM_ADMIN"
+        await db_session.commit()
+        return user
+
+    return _make
+
+
+@pytest.fixture
 def make_project(client):
     async def _make(sme: dict, legal_name: str | None = None, tax_id: str | None = None):
         legal_name = legal_name or f"Test Co {uuid.uuid4().hex[:8]}"

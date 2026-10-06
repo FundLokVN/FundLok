@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Any, Generic, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 T = TypeVar("T")
 
@@ -93,6 +93,30 @@ class AdminUserStatusRequest(BaseModel):
 
     status: Literal["ACTIVE", "PENDING_KYC", "SUSPENDED"]
     note: str | None = None
+
+
+class AdminInviteRequest(BaseModel):
+    """Create an ADMIN account and email the invitee a set-password link.
+
+    There is deliberately no `role` field: the endpoint only ever creates
+    ADMIN accounts (a SYSTEM_ADMIN is provisioned out of band), and
+    extra="forbid" turns an attempt to send one into a 422 rather than a
+    silently ignored field. No password either: the invitee chooses their own,
+    so nobody else ever knows it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    full_name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("full_name")
+    @classmethod
+    def _strip_full_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("full_name must not be blank")
+        return value
 
 
 class AdminUserDetail(BaseModel):

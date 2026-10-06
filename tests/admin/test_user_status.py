@@ -8,32 +8,11 @@ writes a column is worse than no button, because it looks like a control.
 """
 import uuid
 
-import pytest
-
 from app.users.models import (
     USER_STATUS_ACTIVE,
     USER_STATUS_PENDING_KYC,
     USER_STATUS_SUSPENDED,
 )
-
-
-@pytest.fixture
-def make_system_admin(make_user, db_session):
-    """SYSTEM_ADMIN, provisioned out of band like make_admin does for ADMIN."""
-    from sqlalchemy import select
-
-    from app.users.models import User
-
-    async def _make():
-        user = await make_user(role=None)
-        row = (
-            await db_session.execute(select(User).where(User.id == user["id"]))
-        ).scalar_one()
-        row.role = "SYSTEM_ADMIN"
-        await db_session.commit()
-        return user
-
-    return _make
 
 
 # --------------------------------------------------------------------------- #

@@ -9,6 +9,7 @@ from app.admin import service
 from app.admin.schemas import (
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
+    AdminInviteRequest,
     AdminKybVerificationOut,
     AdminKycImageUrlResponse,
     AdminKycVerificationOut,
@@ -29,6 +30,8 @@ from app.utils.rbac import require_roles
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 require_admin = require_roles(Role.ADMIN, Role.SYSTEM_ADMIN)
+# Acting on admin-level accounts (creating one) is SYSTEM_ADMIN only.
+require_system_admin = require_roles(Role.SYSTEM_ADMIN)
 
 
 @router.get("/overview", response_model=AdminOverview)
@@ -205,6 +208,32 @@ async def set_user_status(
         new_status=body.status,
         note=body.note,
         actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.post("/users/admins", response_model=AdminUserDetail, status_code=201)
+async def invite_admin(
+    body: AdminInviteRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_system_admin),
+):
+    """Create an ADMIN account and email the invitee a set-password link.
+
+    SYSTEM_ADMIN only, matching set_user_status: only a system admin may act
+    on admin-level accounts, and granting admin access is the most
+    consequential such act. Always creates ADMIN, never SYSTEM_ADMIN. 409 if
+    the email already has an account (no silent promotion of an existing
+    member to admin).
+    """
+    return await service.invite_admin(
+        db,
+        email=body.email,
+        full_name=body.full_name,
+        actor=current_user,
+        background_tasks=background_tasks,
         ip_address=request.client.host if request.client else None,
     )
 
