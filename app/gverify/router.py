@@ -70,7 +70,7 @@ async def _run_verification(
     db: AsyncSession,
     user: User,
 ) -> KycVerifyResponse:
-    """Shared verify flow for both the session and handoff-token entrypoints."""
+    await service.lock_user_verification(db, user.id, "KYC")
     latest = await service.latest_for_user(db, user.id)
     if latest is not None and latest.is_approved:
         raise HTTPException(status_code=409, detail="KYC is already approved")
@@ -81,7 +81,18 @@ async def _run_verification(
 
     # Read per submission, uncached: a switch to MANUAL must stop provider
     # calls from the very next request.
-    manual = await system_service.is_manual_verification(db)
+    current_mode_state = await system_service.get_verification_mode(db)
+    current_mode = current_mode_state.mode
+    if body.expected_mode and body.expected_mode.upper() != current_mode.upper():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VERIFICATION_MODE_CHANGED",
+                "message": f"Verification mode changed to {current_mode}",
+                "mode": current_mode,
+            },
+        )
+    manual = current_mode.upper() == "MANUAL"
     try:
         attempt = await service.run_kyc_verification(
             db,
@@ -142,6 +153,7 @@ async def _run_verification(
         date_of_birth=attempt.date_of_birth,
         face_match_score=service.face_match_score(attempt),
         created_at=attempt.created_at,
+        mode=current_mode,
     )
 
 
@@ -161,16 +173,21 @@ async def verify(
 
 
 @router.post("/handoff", response_model=HandoffResponse, status_code=201)
-async def create_handoff(current_user: User = Depends(_authorized)):
+async def create_handoff(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_authorized),
+):
     """Mint a short-lived token so the user can continue on their phone.
 
     The frontend encodes it in a QR; the phone submits the images to
     /gverify/kyc/handoff/verify with `Authorization: Bearer <token>`. The
     token authorizes ONLY that submission and expires after 10 minutes.
     """
+    current_mode_state = await system_service.get_verification_mode(db)
     return HandoffResponse(
         token=create_handoff_token(current_user.id),
         expires_in_seconds=int(HANDOFF_TTL.total_seconds()),
+        mode=current_mode_state.mode,
     )
 
 
@@ -243,6 +260,7 @@ async def kyb_verify(
     A REJECTED outcome is still 201 — the business verdict is in the body.
     Only provider failures surface as 502 (the attempt is persisted FAILED).
     """
+    await service.lock_user_verification(db, current_user.id, "KYB")
     latest = await kyb_service.latest_for_user(db, current_user.id)
     if latest is not None and latest.is_approved:
         raise HTTPException(status_code=409, detail="KYB is already approved")
@@ -261,7 +279,18 @@ async def kyb_verify(
             headers={"X-Error-Code": "KYC_REQUIRED"},
         )
 
-    manual = await system_service.is_manual_verification(db)
+    current_mode_state = await system_service.get_verification_mode(db)
+    current_mode = current_mode_state.mode
+    if body.expected_mode and body.expected_mode.upper() != current_mode.upper():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VERIFICATION_MODE_CHANGED",
+                "message": f"Verification mode changed to {current_mode}",
+                "mode": current_mode,
+            },
+        )
+    manual = current_mode.upper() == "MANUAL"
     try:
         attempt = await kyb_service.run_kyb_verification(
             db,
@@ -325,6 +354,7 @@ async def kyb_verify(
             for rep in (attempt.representatives or [])
         ],
         created_at=attempt.created_at,
+        mode=current_mode,
     )
 
 

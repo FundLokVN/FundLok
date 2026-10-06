@@ -234,11 +234,12 @@ async def test_manual_kyc_with_an_id_already_verified_elsewhere_needs_a_note(
 ):
     # Someone else already holds an approved KYC with this ID number.
     other = await make_user(role="INVESTOR")
-    db_session.add(
-        GVerifyVerification(
-            user_id=uuid.UUID(other["id"]), status="APPROVED", person_number="079203001234", full_name="NGUYEN VAN A"
-        )
+    other_kyc = GVerifyVerification(
+        user_id=uuid.UUID(other["id"]), status="APPROVED", person_number="079203001234", full_name="NGUYEN VAN A"
     )
+    db_session.add(other_kyc)
+    await db_session.flush()
+    other_kyc_id = str(other_kyc.id)
     await db_session.commit()
 
     await set_mode("MANUAL")
@@ -248,10 +249,30 @@ async def test_manual_kyc_with_an_id_already_verified_elsewhere_needs_a_note(
     url = f"/admin/kyc-verifications/{attempt['verification_id']}/resolve"
     details = {"decision": "APPROVED", "person_number": "079203001234", "full_name": "NGUYEN VAN A"}
 
-    without_note = await client.post(url, json=details, headers=admin["headers"])
-    assert without_note.status_code == 400
+    # First attempt without acknowledging the conflict is refused with 409 and conflicts listed
+    first_attempt = await client.post(url, json=details, headers=admin["headers"])
+    assert first_attempt.status_code == 409
+    data = first_attempt.json()["detail"]
+    assert data["code"] == "ID_CONFLICT_ACK_REQUIRED"
+    assert len(data["conflicts"]) == 1
+    conflict_id = data["conflicts"][0]["verification_id"]
+    assert conflict_id == other_kyc_id
+
+    # Acknowledging without a sufficient note fails validation (422)
+    without_note = await client.post(
+        url, json={**details, "acknowledged_conflict_ids": [conflict_id]}, headers=admin["headers"]
+    )
+    assert without_note.status_code == 422
+
+    # Acknowledging with a substantive note succeeds (200)
     with_note = await client.post(
-        url, json={**details, "note": "Same person, lost access to the old account"}, headers=admin["headers"]
+        url,
+        json={
+            **details,
+            "acknowledged_conflict_ids": [conflict_id],
+            "note": "Same person, lost access to the old account",
+        },
+        headers=admin["headers"],
     )
     assert with_note.status_code == 200, with_note.text
 

@@ -4,7 +4,9 @@ from enum import Enum
 from typing import Any, Generic, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+
+from app.gverify.normalize import normalize_identifier
 
 T = TypeVar("T")
 
@@ -85,11 +87,12 @@ class AdminDecision(str, Enum):
 
 class AdminDecisionRequest(BaseModel):
     decision: AdminDecision
-    note: str | None = None
+    # The note lands in the audit log, so it is bounded.
+    note: str | None = Field(default=None, max_length=1000)
 
 
-_PERSON_NUMBER_RE = re.compile(r"^\d{9}(\d{3})?$")  # CMND (9) or CCCD (12)
-_TAX_CODE_RE = re.compile(r"^\d{10}(-\d{3})?$")  # MST, optionally a branch suffix
+_PERSON_NUMBER_RE = re.compile(r"^[0-9]{9}([0-9]{3})?$")  # CMND (9) or CCCD (12)
+_TAX_CODE_RE = re.compile(r"^[0-9]{10}(-[0-9]{3})?$")  # MST, optionally a branch suffix
 
 
 def _clean_optional(value: str | None) -> str | None:
@@ -99,16 +102,26 @@ def _clean_optional(value: str | None) -> str | None:
     return value or None
 
 
+OVERRIDE_NOTE_MIN_LENGTH = 20
+
+
 class AdminKycResolveRequest(AdminDecisionRequest):
     """Settle a KYC attempt. The ID fields are for attempts submitted in
     manual verification mode, which have no OCR: approving one needs the ID
     number and name typed from the card, so the one-ID-one-account check and
     later KYB matching have something to compare. They are refused on an
-    attempt the provider read, whose details must stay the provider's."""
+    attempt the provider read, whose details must stay the provider's.
 
-    person_number: str | None = None
+    ``acknowledged_conflict_ids`` is the reviewer's explicit acknowledgement
+    that this ID number is already verified on other accounts. It names the
+    conflicting verifications (as listed by a refused first approval), and is
+    accepted only with a substantive note — enforced here, not by convention.
+    """
+
+    person_number: str | None = Field(default=None, max_length=32)
     full_name: str | None = Field(default=None, max_length=120)
     date_of_birth: str | None = Field(default=None, max_length=20)
+    acknowledged_conflict_ids: list[UUID] = Field(default_factory=list, max_length=50)
 
     @field_validator("person_number")
     @classmethod
@@ -116,7 +129,7 @@ class AdminKycResolveRequest(AdminDecisionRequest):
         value = _clean_optional(value)
         if value is None:
             return None
-        value = "".join(value.split())
+        value = normalize_identifier(value)
         if not _PERSON_NUMBER_RE.match(value):
             raise ValueError("person_number must be a 9-digit CMND or 12-digit CCCD number")
         return value
@@ -126,6 +139,18 @@ class AdminKycResolveRequest(AdminDecisionRequest):
     def _strip(cls, value: str | None) -> str | None:
         return _clean_optional(value)
 
+    @model_validator(mode="after")
+    def _acknowledgement_needs_a_note(self) -> "AdminKycResolveRequest":
+        if self.acknowledged_conflict_ids:
+            if self.decision is not AdminDecision.approved:
+                raise ValueError("acknowledged_conflict_ids only applies to an approval")
+            if len((self.note or "").strip()) < OVERRIDE_NOTE_MIN_LENGTH:
+                raise ValueError(
+                    "acknowledging an ID conflict needs a note of at least "
+                    f"{OVERRIDE_NOTE_MIN_LENGTH} characters explaining the override"
+                )
+        return self
+
 
 class AdminKybResolveRequest(AdminDecisionRequest):
     """Settle a KYB attempt. For a manual-mode attempt (no OCR, no registry
@@ -133,7 +158,18 @@ class AdminKybResolveRequest(AdminDecisionRequest):
     certificate; the SME's own declaration is only a starting point."""
 
     business_name: str | None = Field(default=None, max_length=300)
-    tax_code: str | None = None
+    tax_code: str | None = Field(default=None, max_length=32)
+    representative_id_numbers: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("representative_id_numbers")
+    @classmethod
+    def _clean_rep_ids(cls, values: list[str]) -> list[str]:
+        cleaned = []
+        for v in values:
+            norm = normalize_identifier(v)
+            if norm:
+                cleaned.append(norm)
+        return cleaned
 
     @field_validator("tax_code")
     @classmethod
@@ -141,7 +177,7 @@ class AdminKybResolveRequest(AdminDecisionRequest):
         value = _clean_optional(value)
         if value is None:
             return None
-        value = value.replace(" ", "")
+        value = normalize_identifier(value)
         if not _TAX_CODE_RE.match(value):
             raise ValueError("tax_code must be a 10-digit MST, optionally -NNN for a branch")
         return value
@@ -260,6 +296,11 @@ class AdminKycVerificationOut(BaseModel):
     # False when the attempt was submitted in manual verification mode: no
     # OCR or face match ran, and the reviewer must read the card themselves.
     provider_checked: bool = True
+    # False while the attempt has no ID number yet (manual mode, before the
+    # reviewer types it): `conflicts` is then empty because nothing was
+    # checked, NOT because the ID is clear. The reviewer's first approval
+    # runs the check and is refused with the conflicts if there are any.
+    conflicts_evaluated: bool = True
 
 
 class AdminKybReviewOut(BaseModel):

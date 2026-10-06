@@ -636,3 +636,36 @@ async def test_certificate_rejects_a_non_sme(client, make_user):
 async def test_certificate_rejects_an_anonymous_caller(client):
     resp = await client.get("/gverify/kyb/certificate")
     assert resp.status_code in (401, 403)
+
+
+async def test_kyb_verify_rejects_oversized_or_invalid_license_code(client, make_sme):
+    sme = await make_sme()
+
+    # Longer than 32 chars
+    resp = await client.post(
+        "/gverify/kyb/verify",
+        json=_body(license_code="A" * 33),
+        headers=sme["headers"],
+    )
+    assert resp.status_code == 422
+
+    # Invalid characters in license_code (must match pattern)
+    resp = await client.post(
+        "/gverify/kyb/verify",
+        json=_body(license_code="INVALID CODE WITH SPACES!"),
+        headers=sme["headers"],
+    )
+    assert resp.status_code == 422
+
+
+async def test_kyc_verify_rejects_oversized_b64(client, make_user):
+    investor = await make_user(role="INVESTOR")
+    # Exceeding MAX_B64_CHARS
+    oversized = "A" * 14_000_001
+    resp = await client.post(
+        "/gverify/kyc/verify",
+        json={"id_front_b64": oversized, "id_back_b64": "A", "portrait_b64": "A"},
+        headers=investor["headers"],
+    )
+    assert resp.status_code == 422
+

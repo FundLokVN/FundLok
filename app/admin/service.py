@@ -32,14 +32,17 @@ from app.admin.schemas import (
     AdminStats,
     AdminUserDetail,
     AuditLogOut,
+    OVERRIDE_NOTE_MIN_LENGTH,
     Page,
     ProjectRow,
     UNASSIGNED_ROLE,
     UserRow,
 )
+from app.core.config import settings
 from app.gverify import kyb_service
 from app.gverify import service as gverify_service
 from app.gverify import storage as gverify_storage
+from app.gverify.normalize import normalize_identifier
 from app.gverify.models import (
     STATUS_APPROVED,
     STATUS_MANUAL_REVIEW,
@@ -333,6 +336,7 @@ async def resolve_kyb_verification(
     ip_address: str | None = None,
     business_name: str | None = None,
     tax_code: str | None = None,
+    representative_id_numbers: list[str] | None = None,
 ) -> AdminKybVerificationOut:
     """Settle a KYB attempt parked for a human.
 
@@ -379,6 +383,16 @@ async def resolve_kyb_verification(
                 status_code=400,
                 detail="Enter the business name and tax code from the certificate to approve this verification",
             )
+        if decision is AdminDecision.approved and settings.GVERIFY_KYB_REQUIRE_REP_MATCH:
+            sme_id_number = await kyb_service.approved_kyc_person_number(db, row.user_id)
+            clean_reps = [
+                normalize_identifier(x) for x in (representative_id_numbers or []) if x
+            ]
+            if not sme_id_number or normalize_identifier(sme_id_number) not in clean_reps:
+                raise HTTPException(
+                    status_code=400,
+                    detail=kyb_service.NOT_A_REPRESENTATIVE_REASON,
+                )
         row.business_name = effective_name
         row.tax_code = effective_tax_code
         if tax_code and not row.license_code:
@@ -443,7 +457,7 @@ async def _kyb_review_out(db: AsyncSession, row: GVerifyKybVerification) -> Admi
         rejection_reason=row.rejection_reason,
         document_type=row.document_type,
         tax_code=row.tax_code,
-        license_code=row.license_code,
+        license_code=row.license_code[:32] if row.license_code else None,
         business_name=row.business_name,
         business_type=row.business_type,
         company_address=row.company_address,
@@ -484,7 +498,10 @@ async def get_kyb_verification(db: AsyncSession, verification_id: UUID) -> Admin
 
 
 async def get_kyb_certificate_url(
-    db: AsyncSession, verification_id: UUID
+    db: AsyncSession,
+    verification_id: UUID,
+    actor: User | None = None,
+    ip_address: str | None = None,
 ) -> AdminKybCertificateUrlResponse:
     """A 10-minute read URL for an attempt's submitted certificate."""
     row = await _get_kyb_verification(db, verification_id)
@@ -492,6 +509,20 @@ async def get_kyb_certificate_url(
     if located is None:
         raise HTTPException(status_code=404, detail="This certificate was not stored")
     key, content_type = located
+    if actor is not None:
+        append_audit(
+            db,
+            entity_type="GVERIFY_KYB_VERIFICATION",
+            entity_id=row.id,
+            action="KYB_CERTIFICATE_VIEWED",
+            actor_id=actor.id,
+            after_state={
+                "subject_user_id": str(row.user_id),
+                "expires_in": gverify_storage.CERTIFICATE_URL_TTL_SECONDS,
+            },
+            ip_address=ip_address,
+        )
+        await db.commit()
     return AdminKybCertificateUrlResponse(
         url=await asyncio.to_thread(gverify_storage.presign_kyb_certificate, key),
         expires_in=gverify_storage.CERTIFICATE_URL_TTL_SECONDS,
@@ -890,12 +921,11 @@ def _kyc_account_ref(user: User) -> AdminKycAccountRef:
     )
 
 
-async def _kyc_verification_out(
-    db: AsyncSession, row: GVerifyVerification
-) -> AdminKycVerificationOut:
-    owner = await db.get(User, row.user_id)
+async def _kyc_conflicts(
+    db: AsyncSession, others: list[GVerifyVerification]
+) -> list[AdminKycConflict]:
     conflicts = []
-    for other in await gverify_service.approved_elsewhere(db, row.person_number, row.user_id):
+    for other in others:
         other_user = await db.get(User, other.user_id)
         if other_user is None:
             continue
@@ -908,6 +938,16 @@ async def _kyc_verification_out(
                 approved_at=other.updated_at or other.created_at,
             )
         )
+    return conflicts
+
+
+async def _kyc_verification_out(
+    db: AsyncSession, row: GVerifyVerification
+) -> AdminKycVerificationOut:
+    owner = await db.get(User, row.user_id)
+    conflicts = await _kyc_conflicts(
+        db, await gverify_service.approved_elsewhere(db, row.person_number, row.user_id)
+    )
     return AdminKycVerificationOut(
         id=row.id,
         status=row.status,
@@ -921,6 +961,9 @@ async def _kyc_verification_out(
         user=_kyc_account_ref(owner),
         conflicts=conflicts,
         provider_checked=gverify_service.provider_checked(row),
+        # No ID number yet means nothing was compared; "no conflicts" must not
+        # be read as "clear".
+        conflicts_evaluated=bool(row.person_number),
     )
 
 
@@ -967,7 +1010,11 @@ async def get_kyc_verification(
 
 
 async def get_kyc_image_url(
-    db: AsyncSession, verification_id: UUID, name: str
+    db: AsyncSession,
+    verification_id: UUID,
+    name: str,
+    actor: User | None = None,
+    ip_address: str | None = None,
 ) -> AdminKycImageUrlResponse:
     """A 10-minute read URL for one of an attempt's submitted images."""
     row = await _get_kyc_verification(db, verification_id)
@@ -979,6 +1026,21 @@ async def get_kyc_image_url(
         # when the attempt ran. Say so rather than hand out a dead link.
         raise HTTPException(status_code=404, detail="This image was not stored")
     key, content_type = located
+    if actor is not None:
+        append_audit(
+            db,
+            entity_type="GVERIFY_KYC_VERIFICATION",
+            entity_id=row.id,
+            action="KYC_IMAGE_VIEWED",
+            actor_id=actor.id,
+            after_state={
+                "image_name": name,
+                "subject_user_id": str(row.user_id),
+                "expires_in": gverify_storage.CERTIFICATE_URL_TTL_SECONDS,
+            },
+            ip_address=ip_address,
+        )
+        await db.commit()
     return AdminKycImageUrlResponse(
         url=await asyncio.to_thread(gverify_storage.presign_kyc_document, key),
         expires_in=gverify_storage.CERTIFICATE_URL_TTL_SECONDS,
@@ -997,21 +1059,24 @@ async def resolve_kyc_verification(
     person_number: str | None = None,
     full_name: str | None = None,
     date_of_birth: str | None = None,
+    acknowledged_conflict_ids: list[UUID] | None = None,
 ) -> AdminKycVerificationOut:
     """Settle a KYC attempt parked for a human.
 
     Rules, beyond the KYB equivalent:
       * Nobody may settle their own attempt.
-      * The row is locked, so two operators can't settle it at once.
+      * The row is locked, so two operators can't settle it at once; approvals
+        of the same ID number are also serialised (advisory lock).
       * The note stays internal; a rejected investor sees a fixed message.
-      * An attempt the provider read and flagged (this ID is already verified
-        on another account) needs a note to approve: that overrides a fraud
-        signal, so the reason has to be on record.
+      * An attempt the provider read and flagged needs a note to approve.
       * An attempt submitted in manual verification mode had no OCR. Approving
-        it needs the ID number and name typed from the card; the
-        one-ID-one-account check then runs on what the reviewer entered, and a
-        conflict found there needs a note like any other. Without a conflict
-        the note is optional: in manual mode every submission comes here.
+        it needs the ID number and name typed from the card.
+      * Whatever the mode, if the ID number is already verified on another
+        account the approval is refused (409 ID_CONFLICT_ACK_REQUIRED, listing
+        those accounts) unless the reviewer acknowledges every one of them in
+        ``acknowledged_conflict_ids`` and adds a substantive note. A note
+        alone never overrides: the reviewer must have been shown the conflict.
+        The override is recorded in the audit log (KYC_ID_CONFLICT_OVERRIDDEN).
     """
     row = await _get_kyc_verification(db, verification_id, for_update=True)
     if row.status != STATUS_MANUAL_REVIEW:
@@ -1043,8 +1108,47 @@ async def resolve_kyc_verification(
         if date_of_birth:
             row.date_of_birth = date_of_birth
 
+    conflicts: list[GVerifyVerification] = []
+    if decision is AdminDecision.approved:
+        # Serialise on the number, then look: see lock_id_number. Held until
+        # the commit/rollback below.
+        await gverify_service.lock_id_number(db, row.person_number)
     conflicts = await gverify_service.approved_elsewhere(db, row.person_number, row.user_id)
-    if decision is AdminDecision.approved and not note and (provider_checked or conflicts):
+    acknowledged = set(acknowledged_conflict_ids or [])
+    override = False
+    if decision is AdminDecision.approved and conflicts:
+        unacknowledged = [c for c in conflicts if c.id not in acknowledged]
+        if unacknowledged:
+            # Nothing is persisted: the typed ID details written above are
+            # thrown away, so a refused approval leaves the attempt untouched.
+            listed = [
+                c.model_dump(mode="json") for c in await _kyc_conflicts(db, conflicts)
+            ]
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ID_CONFLICT_ACK_REQUIRED",
+                    "message": (
+                        "This ID number is already verified on other accounts. "
+                        "Review them, then acknowledge them and add a note to approve."
+                    ),
+                    "conflicts": listed,
+                },
+            )
+        # Every conflict is acknowledged. The schema guarantees a substantive
+        # note comes with an acknowledgement; re-check here for other callers.
+        if len(note or "") < OVERRIDE_NOTE_MIN_LENGTH:
+            await db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Overriding an ID conflict needs a note of at least "
+                    f"{OVERRIDE_NOTE_MIN_LENGTH} characters"
+                ),
+            )
+        override = True
+    if decision is AdminDecision.approved and not note and provider_checked:
         raise HTTPException(
             status_code=400,
             detail="A note is required to approve a flagged verification",
@@ -1072,6 +1176,25 @@ async def resolve_kyc_verification(
         },
         ip_address=ip_address,
     )
+    if override:
+        append_audit(
+            db,
+            entity_type="GVERIFY_KYC_VERIFICATION",
+            entity_id=row.id,
+            action="KYC_ID_CONFLICT_OVERRIDDEN",
+            actor_id=actor.id,
+            before_state=before,
+            after_state={
+                "status": row.status,
+                "note": note,
+                "user_id": str(row.user_id),
+                "person_number": row.person_number,
+                "acknowledged_verification_ids": sorted(str(c.id) for c in conflicts),
+                "conflicting_user_ids": sorted({str(c.user_id) for c in conflicts}),
+                "provider_checked": provider_checked,
+            },
+            ip_address=ip_address,
+        )
     await db.commit()
     await db.refresh(row)
     return await _kyc_verification_out(db, row)

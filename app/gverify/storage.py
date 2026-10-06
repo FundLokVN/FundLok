@@ -65,16 +65,25 @@ async def _store(kind: str, verification_id, documents: dict[str, bytes], *, str
             "R2 not configured — %s documents for %s not retained", kind, verification_id
         )
         return
+    stored_keys: list[str] = []
     try:
         for name, raw in documents.items():
             ext, _ = _ext_and_type(raw)
             key = f"verification/{kind}/{verification_id}/{name}.{ext}"
             await asyncio.to_thread(_put, key, raw)
+            stored_keys.append(key)
     except Exception as exc:  # noqa: BLE001 — retention must never break verification
         logger.exception(
             "Failed to store %s verification documents for %s", kind, verification_id
         )
         if strict:
+            # Delete any objects already uploaded to avoid orphaned bucket files
+            bucket = _bucket()
+            for key in stored_keys:
+                try:
+                    await asyncio.to_thread(r2.delete_object, key, bucket=bucket)
+                except Exception:
+                    logger.warning("Failed to delete partially stored object %s", key)
             raise StorageUnavailable(str(exc)) from exc
 
 

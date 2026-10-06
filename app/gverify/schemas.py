@@ -1,7 +1,11 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+# 10 MiB raw is ~13,981,013 chars in base64. 14,000,000 provides a safe outer bound
+# to reject multi-megabyte / gigabyte payloads before base64 decoding into memory.
+MAX_B64_CHARS = 14_000_000
 
 
 class KycVerifyRequest(BaseModel):
@@ -11,9 +15,10 @@ class KycVerifyRequest(BaseModel):
     mirroring GVerify's own base64 endpoints.
     """
 
-    id_front_b64: str
-    id_back_b64: str
-    portrait_b64: str
+    id_front_b64: str = Field(..., max_length=MAX_B64_CHARS)
+    id_back_b64: str = Field(..., max_length=MAX_B64_CHARS)
+    portrait_b64: str = Field(..., max_length=MAX_B64_CHARS)
+    expected_mode: str | None = Field(default=None, max_length=20)
 
 
 class KycVerifyResponse(BaseModel):
@@ -28,6 +33,7 @@ class KycVerifyResponse(BaseModel):
     date_of_birth: str | None = None
     face_match_score: float | None = None
     created_at: datetime | None = None
+    mode: str | None = None
 
 
 class HandoffResponse(BaseModel):
@@ -35,6 +41,7 @@ class HandoffResponse(BaseModel):
 
     token: str
     expires_in_seconds: int
+    mode: str | None = None
 
 
 class KycStatusResponse(BaseModel):
@@ -67,18 +74,23 @@ class KybVerifyRequest(BaseModel):
     unknown value returns the spec'd 400, not a 422).
     """
 
-    document_b64: str
-    document_type: str
+    document_b64: str = Field(..., max_length=MAX_B64_CHARS)
+    document_type: str = Field(..., max_length=50)
     # Optional declared MST — fallback when OCR fails to extract the tax code
     # from the certificate (seen live 2026-07-15: legible "Mã số doanh nghiệp"
     # line returned as tax_code:""). Untrusted, but bound by the registry
     # name cross-check: the registry's official name for this MST must still
     # match the OCR'd certificate name.
-    tax_code: str | None = None
+    tax_code: str | None = Field(default=None, max_length=32)
     # Optional declared business-registration / licence code — part of the
     # tax-verify working contract (KYB plan §7.3). OCR rarely returns it, so
     # the SME may supply it; falls back to the tax code when absent.
-    license_code: str | None = None
+    license_code: str | None = Field(
+        default=None,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9./_-]{0,31}$",
+    )
+    expected_mode: str | None = Field(default=None, max_length=20)
 
 
 class KybVerifyResponse(BaseModel):
@@ -97,6 +109,7 @@ class KybVerifyResponse(BaseModel):
     business_status: str | None = None  # from the tax registry, when reached
     representatives: list[KybRepresentative] = []
     created_at: datetime | None = None
+    mode: str | None = None
 
 
 class KybStatusResponse(BaseModel):

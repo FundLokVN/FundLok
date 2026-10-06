@@ -97,6 +97,7 @@ async def resolve_kyb_verification(
         ip_address=request.client.host if request.client else None,
         business_name=body.business_name,
         tax_code=body.tax_code,
+        representative_id_numbers=body.representative_id_numbers,
     )
 
 
@@ -127,11 +128,17 @@ async def get_kyb_verification(
 )
 async def get_kyb_certificate_url(
     verification_id: UUID,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """A 10-minute read URL for the submitted certificate. Admin-only."""
-    return await service.get_kyb_certificate_url(db, verification_id)
+    return await service.get_kyb_certificate_url(
+        db,
+        verification_id,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
 
 
 @router.get("/kyc-verifications", response_model=list[AdminKycVerificationOut])
@@ -162,11 +169,18 @@ async def get_kyc_verification(
 async def get_kyc_image_url(
     verification_id: UUID,
     name: Literal["id_front", "id_back", "portrait"],
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """A 10-minute read URL for one submitted image. Admin-only."""
-    return await service.get_kyc_image_url(db, verification_id, name)
+    return await service.get_kyc_image_url(
+        db,
+        verification_id,
+        name,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
 
 
 @router.post(
@@ -181,8 +195,9 @@ async def resolve_kyc_verification(
     current_user: User = Depends(require_admin),
 ):
     """Settle a KYC attempt parked in MANUAL_REVIEW. Admin-only. Approving a
-    flagged attempt requires a note; approving a manual-mode attempt requires
-    the ID number and name from the card."""
+    manual-mode attempt requires the ID number and name from the card. If that
+    ID is already verified on other accounts the approval is refused (409,
+    listing them) until the reviewer acknowledges them and adds a note."""
     return await service.resolve_kyc_verification(
         db,
         verification_id,
@@ -193,6 +208,7 @@ async def resolve_kyc_verification(
         person_number=body.person_number,
         full_name=body.full_name,
         date_of_birth=body.date_of_birth,
+        acknowledged_conflict_ids=body.acknowledged_conflict_ids,
     )
 
 

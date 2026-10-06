@@ -16,11 +16,12 @@ from __future__ import annotations
 import base64
 import binascii
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.gverify import client, storage
+from app.gverify.normalize import normalize_identifier
 from app.gverify.models import (
     STATUS_APPROVED,
     STATUS_FAILED,
@@ -241,7 +242,31 @@ def provider_checked(attempt: GVerifyVerification) -> bool:
 
 
 def _normalize_person_number(value: str | None) -> str:
-    return "".join((value or "").split())
+    return normalize_identifier(value or "")
+
+
+async def lock_id_number(db: AsyncSession, person_number: str | None) -> None:
+    """Serialise approvals of the same ID number until this transaction ends.
+
+    Without it two reviewers approving two different attempts that carry the
+    same typed number each see "no conflict" and both pass. A unique index is
+    not an option: acknowledged overrides legitimately create duplicates.
+    """
+    wanted = _normalize_person_number(person_number)
+    if wanted:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"gverify-kyc-id:{wanted}"},
+        )
+
+
+async def lock_user_verification(db: AsyncSession, user_id, kind: str = "KYC") -> None:
+    """Serialise verification attempts for a specific user to prevent duplicate pending submissions."""
+    if user_id:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"gverify-user-lock:{kind}:{user_id}"},
+        )
 
 
 async def approved_elsewhere(

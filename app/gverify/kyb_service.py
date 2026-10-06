@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.gverify import client, storage
+from app.gverify.normalize import normalize_identifier
 from app.gverify.models import (
     STATUS_APPROVED,
     STATUS_FAILED,
@@ -53,14 +54,14 @@ DOCUMENT_TYPES = ("COMPANY", "COMPANY_BRANCH")
 _ACTIVE_STATUSES = ("đang hoạt động", "active")
 
 # Vietnamese MST: 10 digits, optionally a -NNN branch suffix.
-_TAX_CODE_RE = re.compile(r"^\d{10}(-\d{3})?$")
+_TAX_CODE_RE = re.compile(r"^[0-9]{10}(-[0-9]{3})?$")
 
 
 def _clean_declared_tax_code(value: str | None) -> str | None:
     """Validate an SME-declared MST; None when absent, 400 when malformed."""
     if value is None:
         return None
-    cleaned = value.strip().replace(" ", "")
+    cleaned = normalize_identifier(value)
     if not cleaned:
         return None
     if not _TAX_CODE_RE.match(cleaned):

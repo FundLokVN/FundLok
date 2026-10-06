@@ -37,10 +37,12 @@ def parked_attempt(client, make_user, mock_gverify):  # noqa: F811
     return _make
 
 
-async def _resolve(client, admin, verification_id, decision, note=None):
+async def _resolve(client, admin, verification_id, decision, note=None, acknowledged_conflict_ids=None):
     body = {"decision": decision}
     if note is not None:
         body["note"] = note
+    if acknowledged_conflict_ids is not None:
+        body["acknowledged_conflict_ids"] = acknowledged_conflict_ids
     return await client.post(
         f"/admin/kyc-verifications/{verification_id}/resolve",
         json=body,
@@ -131,13 +133,36 @@ async def test_unknown_verification_is_404(client, make_admin):
 # --- settling an attempt -------------------------------------------------------
 
 
-async def test_approving_requires_a_note(client, make_admin, parked_attempt):
+async def test_approving_with_unacknowledged_conflict_returns_409(client, make_admin, parked_attempt):
     _, _, verification_id = await parked_attempt()
     admin = await make_admin()
 
-    for note in (None, "", "   "):
-        resp = await _resolve(client, admin, verification_id, "APPROVED", note=note)
-        assert resp.status_code == 400, resp.text
+    resp = await _resolve(
+        client, admin, verification_id, "APPROVED", note="Verified the investor manually"
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["code"] == "ID_CONFLICT_ACK_REQUIRED"
+    assert len(resp.json()["detail"]["conflicts"]) == 1
+
+    # Still parked: a refused approval changes nothing.
+    row = (await client.get(f"/admin/kyc-verifications/{verification_id}", headers=admin["headers"])).json()
+    assert row["status"] == "MANUAL_REVIEW"
+
+
+async def test_approving_requires_a_note(client, make_admin, parked_attempt):
+    _, _, verification_id = await parked_attempt()
+    admin = await make_admin()
+    conflicts = (
+        await client.get(f"/admin/kyc-verifications/{verification_id}", headers=admin["headers"])
+    ).json()["conflicts"]
+    ack_ids = [c["verification_id"] for c in conflicts]
+
+    # Without note or with short/empty note, schema rejects validation (422)
+    for note in (None, "", "   ", "too short"):
+        resp = await _resolve(
+            client, admin, verification_id, "APPROVED", note=note, acknowledged_conflict_ids=ack_ids
+        )
+        assert resp.status_code == 422, resp.text
 
     # Still parked: a refused approval changes nothing.
     row = (await client.get(f"/admin/kyc-verifications/{verification_id}", headers=admin["headers"])).json()
@@ -147,9 +172,18 @@ async def test_approving_requires_a_note(client, make_admin, parked_attempt):
 async def test_approval_verifies_the_investor(client, make_admin, parked_attempt):
     _, impostor, verification_id = await parked_attempt()
     admin = await make_admin()
+    conflicts = (
+        await client.get(f"/admin/kyc-verifications/{verification_id}", headers=admin["headers"])
+    ).json()["conflicts"]
+    ack_ids = [c["verification_id"] for c in conflicts]
 
     resp = await _resolve(
-        client, admin, verification_id, "APPROVED", note="Same person, lost access to old account"
+        client,
+        admin,
+        verification_id,
+        "APPROVED",
+        note="Same person, lost access to old account",
+        acknowledged_conflict_ids=ack_ids,
     )
 
     assert resp.status_code == 200, resp.text
@@ -239,26 +273,44 @@ async def test_nobody_can_resolve_their_own_attempt(client, make_admin, db_sessi
 async def test_resolution_is_audited_with_the_note_and_the_conflict(
     client, make_admin, parked_attempt, db_session
 ):
-    _, impostor, verification_id = await parked_attempt()
+    owner, impostor, verification_id = await parked_attempt()
     admin = await make_admin()
     conflict_id = (
         await client.get(f"/admin/kyc-verifications/{verification_id}", headers=admin["headers"])
     ).json()["conflicts"][0]["verification_id"]
 
-    await _resolve(client, admin, verification_id, "APPROVED", note="Checked by phone")
+    await _resolve(
+        client,
+        admin,
+        verification_id,
+        "APPROVED",
+        note="Checked by phone and confirmed account transition",
+        acknowledged_conflict_ids=[conflict_id],
+    )
 
-    row = (
+    resolved_log = (
         await db_session.execute(
             select(AuditLog).where(AuditLog.action == "KYC_MANUAL_REVIEW_RESOLVED")
         )
     ).scalar_one()
-    assert str(row.entity_id) == verification_id
-    assert str(row.actor_id) == admin["id"]
-    assert row.before_state == {"status": "MANUAL_REVIEW"}
-    assert row.after_state["status"] == "APPROVED"
-    assert row.after_state["note"] == "Checked by phone"
-    assert row.after_state["user_id"] == impostor["id"]
-    assert row.after_state["conflicting_verification_ids"] == [conflict_id]
+    assert str(resolved_log.entity_id) == verification_id
+    assert str(resolved_log.actor_id) == admin["id"]
+    assert resolved_log.before_state == {"status": "MANUAL_REVIEW"}
+    assert resolved_log.after_state["status"] == "APPROVED"
+    assert resolved_log.after_state["note"] == "Checked by phone and confirmed account transition"
+    assert resolved_log.after_state["user_id"] == impostor["id"]
+    assert resolved_log.after_state["conflicting_verification_ids"] == [conflict_id]
+
+    override_log = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "KYC_ID_CONFLICT_OVERRIDDEN")
+        )
+    ).scalar_one()
+    assert str(override_log.entity_id) == verification_id
+    assert str(override_log.actor_id) == admin["id"]
+    assert override_log.after_state["person_number"] == "079203001234"
+    assert override_log.after_state["acknowledged_verification_ids"] == [conflict_id]
+    assert override_log.after_state["conflicting_user_ids"] == [owner["id"]]
 
 
 # --- submitted images ------------------------------------------------------------
@@ -323,3 +375,37 @@ def test_find_kyc_document_ignores_unknown_names(monkeypatch):
         gverify_storage.r2, "head_object", lambda key, bucket=None: pytest.fail(f"probed {key}")
     )
     assert gverify_storage.find_kyc_document(uuid.uuid4(), "../../secret") is None
+
+
+async def test_approving_with_partial_or_wrong_acknowledgement_fails(
+    client, make_admin, parked_attempt
+):
+    _, _, verification_id = await parked_attempt()
+    admin = await make_admin()
+    random_id = str(uuid.uuid4())
+
+    resp = await _resolve(
+        client,
+        admin,
+        verification_id,
+        "APPROVED",
+        note="Valid explanation for overriding conflict",
+        acknowledged_conflict_ids=[random_id],
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "ID_CONFLICT_ACK_REQUIRED"
+
+
+async def test_conflicts_evaluated_is_false_when_no_id_number(client, make_admin, make_user, make_system_admin):
+    sysadmin = await make_system_admin()
+    resp = await client.put("/system/verification-mode", json={"mode": "MANUAL"}, headers=sysadmin["headers"])
+    assert resp.status_code == 200
+
+    investor = await make_user(role="INVESTOR")
+    attempt = (await client.post("/gverify/kyc/verify", json=_body(), headers=investor["headers"])).json()
+    admin = await make_admin()
+
+    row = (await client.get(f"/admin/kyc-verifications/{attempt['verification_id']}", headers=admin["headers"])).json()
+    assert row["conflicts_evaluated"] is False
+    assert row["person_number"] is None
+
