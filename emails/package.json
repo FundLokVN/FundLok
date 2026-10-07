@@ -1,0 +1,27 @@
+{
+  "name": "fundlok-emails",
+  "private": true,
+  "description": "FundLok email templates (React Email). Exported to app/email_templates/ and filled in by Python with Jinja.",
+  "type": "module",
+  "scripts": {
+    "dev": "email dev --dir src/templates --port 3030",
+    "react-email": "email dev --dir src/templates --port 3030",
+    "export": "node scripts/export.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@react-email/components": "1.0.12",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@react-email/ui": "6.11.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.3",
+    "react-email": "6.11.1",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "next": "16.3.6"
+  }
+}

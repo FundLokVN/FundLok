@@ -24,6 +24,10 @@
     "docker:test": "./scripts/docker_test.sh",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
-    "docker:logs": "docker compose logs -f api"
+    "docker:logs": "docker compose logs -f api",
+    "react-email": "bun run --cwd emails dev",
+    "react-email:export": "bun run --cwd emails export",
+    "email:dev": "bun run --cwd emails dev",
+    "email:export": "bun run --cwd emails export"
   }
 }

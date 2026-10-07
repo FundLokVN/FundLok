@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.admin.router import router as admin_router
+from app.admin.internal_email.router import router as admin_email_router
 from app.banking.router import router as banking_router
 from app.system.service import is_maintenance_active
 from app.system.router import router as system_router
@@ -197,6 +198,7 @@ app.include_router(contact_router)
 app.include_router(notifications_router)
 app.include_router(rates_router)
 app.include_router(admin_rates_router)
+app.include_router(admin_email_router)
 
 if __name__ == "__main__":
     # Get the port from Cloud Run environment (default to 8080 if not set)

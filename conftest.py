@@ -47,6 +47,9 @@ os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production")
 # bypass. Deliberately NOT derived from SECRET_KEY — see app/auth/totp_crypto.py
 # for why the two secrets are separate.
 os.environ.setdefault("TOTP_ENCRYPTION_KEY", "n5W7jlQOzlCKwRHfeCH4cpb6vUvai3kOX0GnEgEh9i4=")
+# Same reasoning for the Gmail app password (app/admin/internal_email/crypto.py),
+# and its own key, as in production.
+os.environ.setdefault("EMAIL_SETTINGS_ENCRYPTION_KEY", "Xx7VZ9pu2gIfJmp5ZLKE3WMA6Hj6w5Hu0qMj2Bm2F9M=")
 os.environ.setdefault("ALGORITHM", "HS256")
 os.environ.setdefault("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
 os.environ.setdefault("REFRESH_TOKEN_EXPIRE_DAYS", "14")
@@ -267,6 +270,14 @@ def _mock_external_io(monkeypatch):
     # here, so a new one can no longer reach the network just by being
     # forgotten.
     monkeypatch.setattr("app.utils.email.send_email", lambda *a, **kw: None)
+
+    # Admin > Email talks to Gmail over its own connection, not send_email.
+    # Opening it fails loudly in every test; the internal-email tests replace
+    # it with a fake server.
+    def _no_gmail(*a, **kw):
+        raise AssertionError("a test tried to connect to Gmail")
+
+    monkeypatch.setattr("app.admin.internal_email.transport._connect", _no_gmail)
 
     # GVerify verification-document retention writes to R2 — never in tests.
     async def _no_store(*a, **kw):
