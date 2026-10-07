@@ -23,6 +23,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.gverify import kyb_service, service
 from app.gverify import storage
+from app.system import service as system_service
 from app.gverify.client import GVerifyError
 from app.gverify.models import STATUS_MANUAL_REVIEW
 from app.gverify.schemas import (
@@ -47,6 +48,9 @@ logger = logging.getLogger(__name__)
 # Returned with every 502. Deliberately generic: the underlying message can
 # carry provider error bodies or resolver details ("[Errno 8] ...").
 PROVIDER_FAILED_DETAIL = "The verification provider could not process the request. Please try again."
+# Manual verification mode, when the documents could not be stored: nothing
+# would be left for an admin to review, so the submission is not accepted.
+STORAGE_UNAVAILABLE_DETAIL = "Verification is temporarily unavailable. Please try again later."
 
 router = APIRouter(prefix="/gverify/kyc", tags=["gverify-kyc"])
 
@@ -66,7 +70,7 @@ async def _run_verification(
     db: AsyncSession,
     user: User,
 ) -> KycVerifyResponse:
-    """Shared verify flow for both the session and handoff-token entrypoints."""
+    await service.lock_user_verification(db, user.id, "KYC")
     latest = await service.latest_for_user(db, user.id)
     if latest is not None and latest.is_approved:
         raise HTTPException(status_code=409, detail="KYC is already approved")
@@ -75,6 +79,20 @@ async def _run_verification(
     if latest is not None and latest.status == STATUS_MANUAL_REVIEW:
         raise HTTPException(status_code=409, detail="KYC is under manual review")
 
+    # Read per submission, uncached: a switch to MANUAL must stop provider
+    # calls from the very next request.
+    current_mode_state = await system_service.get_verification_mode(db)
+    current_mode = current_mode_state.mode
+    if body.expected_mode and body.expected_mode.upper() != current_mode.upper():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VERIFICATION_MODE_CHANGED",
+                "message": f"Verification mode changed to {current_mode}",
+                "mode": current_mode,
+            },
+        )
+    manual = current_mode.upper() == "MANUAL"
     try:
         attempt = await service.run_kyc_verification(
             db,
@@ -82,9 +100,15 @@ async def _run_verification(
             id_front_b64=body.id_front_b64,
             id_back_b64=body.id_back_b64,
             portrait_b64=body.portrait_b64,
+            manual=manual,
         )
     except ImageValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except storage.StorageUnavailable as exc:
+        user_id = user.id  # read before the rollback expires the instance
+        await db.rollback()
+        logger.error("KYC documents for user %s could not be stored in manual mode: %s", user_id, exc)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=STORAGE_UNAVAILABLE_DETAIL)
     except GVerifyError as exc:
         # The FAILED attempt row is already flushed — commit so it's recorded.
         await db.commit()
@@ -103,9 +127,13 @@ async def _run_verification(
             "status": attempt.status,
             "person_number": attempt.person_number,
             # Internal only (never shown to the user): tells a reviewer why
-            # the attempt was parked. The only automatic cause today.
+            # the attempt was parked.
             **(
-                {"review_cause": "PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT"}
+                {
+                    "review_cause": "MANUAL_VERIFICATION_MODE"
+                    if manual
+                    else "PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT"
+                }
                 if attempt.status == STATUS_MANUAL_REVIEW
                 else {}
             ),
@@ -125,6 +153,7 @@ async def _run_verification(
         date_of_birth=attempt.date_of_birth,
         face_match_score=service.face_match_score(attempt),
         created_at=attempt.created_at,
+        mode=current_mode,
     )
 
 
@@ -144,16 +173,21 @@ async def verify(
 
 
 @router.post("/handoff", response_model=HandoffResponse, status_code=201)
-async def create_handoff(current_user: User = Depends(_authorized)):
+async def create_handoff(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_authorized),
+):
     """Mint a short-lived token so the user can continue on their phone.
 
     The frontend encodes it in a QR; the phone submits the images to
     /gverify/kyc/handoff/verify with `Authorization: Bearer <token>`. The
     token authorizes ONLY that submission and expires after 10 minutes.
     """
+    current_mode_state = await system_service.get_verification_mode(db)
     return HandoffResponse(
         token=create_handoff_token(current_user.id),
         expires_in_seconds=int(HANDOFF_TTL.total_seconds()),
+        mode=current_mode_state.mode,
     )
 
 
@@ -226,9 +260,14 @@ async def kyb_verify(
     A REJECTED outcome is still 201 — the business verdict is in the body.
     Only provider failures surface as 502 (the attempt is persisted FAILED).
     """
+    await service.lock_user_verification(db, current_user.id, "KYB")
     latest = await kyb_service.latest_for_user(db, current_user.id)
     if latest is not None and latest.is_approved:
         raise HTTPException(status_code=409, detail="KYB is already approved")
+    # As for KYC: a parked attempt waits for a person, and in manual mode every
+    # resubmission would add another row to the admin queue.
+    if latest is not None and latest.status == STATUS_MANUAL_REVIEW:
+        raise HTTPException(status_code=409, detail="KYB is under manual review")
     # Rule 7 needs the SME's own verified identity. Refuse up front rather than
     # after the (billable) certificate OCR, which could only end in rejection.
     if settings.GVERIFY_KYB_REQUIRE_REP_MATCH and not await kyb_service.approved_kyc_person_number(
@@ -240,6 +279,18 @@ async def kyb_verify(
             headers={"X-Error-Code": "KYC_REQUIRED"},
         )
 
+    current_mode_state = await system_service.get_verification_mode(db)
+    current_mode = current_mode_state.mode
+    if body.expected_mode and body.expected_mode.upper() != current_mode.upper():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VERIFICATION_MODE_CHANGED",
+                "message": f"Verification mode changed to {current_mode}",
+                "mode": current_mode,
+            },
+        )
+    manual = current_mode.upper() == "MANUAL"
     try:
         attempt = await kyb_service.run_kyb_verification(
             db,
@@ -248,9 +299,15 @@ async def kyb_verify(
             document_type=body.document_type,
             declared_tax_code=body.tax_code,
             declared_license_code=body.license_code,
+            manual=manual,
         )
     except ImageValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except storage.StorageUnavailable as exc:
+        user_id = current_user.id  # read before the rollback expires the instance
+        await db.rollback()
+        logger.error("KYB certificate for user %s could not be stored in manual mode: %s", user_id, exc)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=STORAGE_UNAVAILABLE_DETAIL)
     except GVerifyError as exc:
         # The FAILED attempt row is already flushed — commit so it's recorded.
         await db.commit()
@@ -265,7 +322,11 @@ async def kyb_verify(
         entity_id=attempt.id,
         action="VERIFY",
         actor_id=current_user.id,
-        after_state={"status": attempt.status, "tax_code": attempt.tax_code},
+        after_state={
+            "status": attempt.status,
+            "tax_code": attempt.tax_code,
+            **({"review_cause": "MANUAL_VERIFICATION_MODE"} if manual else {}),
+        },
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -293,6 +354,7 @@ async def kyb_verify(
             for rep in (attempt.representatives or [])
         ],
         created_at=attempt.created_at,
+        mode=current_mode,
     )
 
 

@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     # password-equivalent secrets in plaintext.
     TOTP_ENCRYPTION_KEY: str | None = None
 
+    # Encrypts the Gmail app password an admin saves under Admin > Email
+    # (app/admin/internal_email/crypto.py). Its own key, separate from both
+    # SECRET_KEY and TOTP_ENCRYPTION_KEY, so each can rotate alone. Unset means
+    # the password cannot be saved: fail closed, never plaintext.
+    EMAIL_SETTINGS_ENCRYPTION_KEY: str | None = None
+
     # PartyKit realtime push for the notification bell (app/notifications/
     # realtime.py). All three unset = feature off and polling is the only path.
     # PARTYKIT_HOST is e.g. "fundlok-notifications.<user>.partykit.dev" (no

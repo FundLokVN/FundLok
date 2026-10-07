@@ -124,9 +124,9 @@ def presign_get(
     )
 
 
-def delete_object(file_key: str) -> None:
+def delete_object(file_key: str, *, bucket: str | None = None) -> None:
     """Delete an object; deleting a nonexistent key is a no-op in S3/R2."""
-    _client().delete_object(Bucket=settings.R2_BUCKET, Key=file_key)
+    _client().delete_object(Bucket=bucket or settings.R2_BUCKET, Key=file_key)
 
 
 def head_object(file_key: str, *, bucket: str | None = None) -> dict | None:

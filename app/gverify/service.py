@@ -16,11 +16,12 @@ from __future__ import annotations
 import base64
 import binascii
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.gverify import client, storage
+from app.gverify.normalize import normalize_identifier
 from app.gverify.models import (
     STATUS_APPROVED,
     STATUS_FAILED,
@@ -134,12 +135,19 @@ async def run_kyc_verification(
     id_front_b64: str,
     id_back_b64: str,
     portrait_b64: str,
+    manual: bool = False,
 ) -> GVerifyVerification:
     """Run the full one-shot KYC flow and return the terminal attempt row.
 
-    Raises ImageValidationError (caller error, no row created) or
+    With manual=True (system verification mode MANUAL) the provider is not
+    called at all: the images are stored and the attempt parks in
+    MANUAL_REVIEW for an admin, who reads the ID details off the card.
+
+    Raises ImageValidationError (caller error, no row created),
     client.GVerifyError (provider failure — the attempt row is left FAILED;
-    the caller must still commit so the failure is recorded).
+    the caller must still commit so the failure is recorded), or, in manual
+    mode only, storage.StorageUnavailable (nothing to review; the caller must
+    roll back).
     """
     front, front_raw = _validate_image("id_front_b64", id_front_b64)
     back, back_raw = _validate_image("id_back_b64", id_back_b64)
@@ -148,6 +156,16 @@ async def run_kyc_verification(
     attempt = GVerifyVerification(user_id=user.id, status=STATUS_PENDING)
     db.add(attempt)
     await db.flush()
+
+    if manual:
+        # Strict: the stored images are the only evidence an admin will see.
+        await storage.store_kyc_documents(
+            attempt.id, id_front=front_raw, id_back=back_raw, portrait=portrait_raw, strict=True
+        )
+        attempt.status = STATUS_MANUAL_REVIEW
+        attempt.rejection_reason = MANUAL_REVIEW_REASON
+        await db.flush()
+        return attempt
 
     # Retain the submitted documents under verification/KYC/<attempt-id>/ —
     # best-effort; the attempt proceeds even if storage is down.
@@ -214,8 +232,41 @@ async def run_kyc_verification(
 MANUAL_REVIEW_REASON = "Your verification needs a manual review"
 
 
+def provider_checked(attempt: GVerifyVerification) -> bool:
+    """False for an attempt submitted in manual verification mode: the
+    provider never saw it, so there is no OCR, no face match, and the ID
+    details are whatever the reviewing admin typed from the card. (An
+    automatic attempt that reaches MANUAL_REVIEW always has OCR data; a
+    provider failure ends FAILED, not in review.)"""
+    return attempt.ocr_data is not None
+
+
 def _normalize_person_number(value: str | None) -> str:
-    return "".join((value or "").split())
+    return normalize_identifier(value or "")
+
+
+async def lock_id_number(db: AsyncSession, person_number: str | None) -> None:
+    """Serialise approvals of the same ID number until this transaction ends.
+
+    Without it two reviewers approving two different attempts that carry the
+    same typed number each see "no conflict" and both pass. A unique index is
+    not an option: acknowledged overrides legitimately create duplicates.
+    """
+    wanted = _normalize_person_number(person_number)
+    if wanted:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"gverify-kyc-id:{wanted}"},
+        )
+
+
+async def lock_user_verification(db: AsyncSession, user_id, kind: str = "KYC") -> None:
+    """Serialise verification attempts for a specific user to prevent duplicate pending submissions."""
+    if user_id:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"gverify-user-lock:{kind}:{user_id}"},
+        )
 
 
 async def approved_elsewhere(

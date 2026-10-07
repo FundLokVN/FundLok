@@ -9,8 +9,13 @@ from app.admin import service
 from app.admin.schemas import (
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
+    AdminInviteRequest,
+    AdminKybCertificateUrlResponse,
+    AdminKybResolveRequest,
+    AdminKybReviewOut,
     AdminKybVerificationOut,
     AdminKycImageUrlResponse,
+    AdminKycResolveRequest,
     AdminKycVerificationOut,
     AdminLoanApplicationRow,
     AdminMode,
@@ -29,6 +34,8 @@ from app.utils.rbac import require_roles
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 require_admin = require_roles(Role.ADMIN, Role.SYSTEM_ADMIN)
+# Acting on admin-level accounts (creating one) is SYSTEM_ADMIN only.
+require_system_admin = require_roles(Role.SYSTEM_ADMIN)
 
 
 @router.get("/overview", response_model=AdminOverview)
@@ -73,17 +80,62 @@ async def get_project_detail(
 )
 async def resolve_kyb_verification(
     verification_id: UUID,
-    body: AdminDecisionRequest,
+    body: AdminKybResolveRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Settle a KYB attempt the engine parked in MANUAL_REVIEW. Admin-only."""
+    """Settle a KYB attempt parked in MANUAL_REVIEW. Admin-only. Approving a
+    manual-mode attempt needs the business name and tax code from the
+    certificate."""
     return await service.resolve_kyb_verification(
         db,
         verification_id,
         decision=body.decision,
         note=body.note,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+        business_name=body.business_name,
+        tax_code=body.tax_code,
+        representative_id_numbers=body.representative_id_numbers,
+    )
+
+
+@router.get("/kyb-verifications", response_model=list[AdminKybReviewOut])
+async def list_kyb_verifications(
+    status: Literal["MANUAL_REVIEW", "APPROVED", "REJECTED", "FAILED"] = "MANUAL_REVIEW",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """KYB attempts in one status, oldest first. Defaults to the review queue.
+    Admin-only."""
+    return await service.list_kyb_verifications(db, status=status)
+
+
+@router.get("/kyb-verifications/{verification_id}", response_model=AdminKybReviewOut)
+async def get_kyb_verification(
+    verification_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """One KYB attempt with the SME's own identity check beside it. Admin-only."""
+    return await service.get_kyb_verification(db, verification_id)
+
+
+@router.get(
+    "/kyb-verifications/{verification_id}/certificate",
+    response_model=AdminKybCertificateUrlResponse,
+)
+async def get_kyb_certificate_url(
+    verification_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A 10-minute read URL for the submitted certificate. Admin-only."""
+    return await service.get_kyb_certificate_url(
+        db,
+        verification_id,
         actor=current_user,
         ip_address=request.client.host if request.client else None,
     )
@@ -117,11 +169,18 @@ async def get_kyc_verification(
 async def get_kyc_image_url(
     verification_id: UUID,
     name: Literal["id_front", "id_back", "portrait"],
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """A 10-minute read URL for one submitted image. Admin-only."""
-    return await service.get_kyc_image_url(db, verification_id, name)
+    return await service.get_kyc_image_url(
+        db,
+        verification_id,
+        name,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
 
 
 @router.post(
@@ -130,13 +189,15 @@ async def get_kyc_image_url(
 )
 async def resolve_kyc_verification(
     verification_id: UUID,
-    body: AdminDecisionRequest,
+    body: AdminKycResolveRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Settle a KYC attempt parked in MANUAL_REVIEW. Admin-only; approving
-    requires a note."""
+    """Settle a KYC attempt parked in MANUAL_REVIEW. Admin-only. Approving a
+    manual-mode attempt requires the ID number and name from the card. If that
+    ID is already verified on other accounts the approval is refused (409,
+    listing them) until the reviewer acknowledges them and adds a note."""
     return await service.resolve_kyc_verification(
         db,
         verification_id,
@@ -144,6 +205,10 @@ async def resolve_kyc_verification(
         note=body.note,
         actor=current_user,
         ip_address=request.client.host if request.client else None,
+        person_number=body.person_number,
+        full_name=body.full_name,
+        date_of_birth=body.date_of_birth,
+        acknowledged_conflict_ids=body.acknowledged_conflict_ids,
     )
 
 
@@ -205,6 +270,32 @@ async def set_user_status(
         new_status=body.status,
         note=body.note,
         actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.post("/users/admins", response_model=AdminUserDetail, status_code=201)
+async def invite_admin(
+    body: AdminInviteRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_system_admin),
+):
+    """Create an ADMIN account and email the invitee a set-password link.
+
+    SYSTEM_ADMIN only, matching set_user_status: only a system admin may act
+    on admin-level accounts, and granting admin access is the most
+    consequential such act. Always creates ADMIN, never SYSTEM_ADMIN. 409 if
+    the email already has an account (no silent promotion of an existing
+    member to admin).
+    """
+    return await service.invite_admin(
+        db,
+        email=body.email,
+        full_name=body.full_name,
+        actor=current_user,
+        background_tasks=background_tasks,
         ip_address=request.client.host if request.client else None,
     )
 

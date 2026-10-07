@@ -11,3 +11,7 @@ __pycache__/
 *.db
 cloud-sql-proxy
 docker-compose.override.yml
+
+# React Email source (emails/). The API only reads the exported HTML in
+# app/email_templates/, so neither the sources nor node_modules belong in the image.
+emails/

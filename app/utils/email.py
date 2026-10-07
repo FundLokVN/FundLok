@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from email_validator import EmailNotValidError, validate_email
 
 from app.core.config import settings
+from app.utils.email_templates import LOGO_CID, render_email
 
 logger = logging.getLogger(__name__)
 
@@ -22,103 +23,28 @@ logger = logging.getLogger(__name__)
 # through Mailpit would be logo-less. A CID part travels inside the message, so
 # it renders offline, with images blocked, and in dev. A base64 data: URI is the
 # third option and is not viable -- Gmail strips them.
+#
+# The HTML itself comes from the React Email templates (emails/), exported to
+# app/email_templates/ and filled in by app/utils/email_templates.py. They
+# reference the logo as <img src="cid:fundlok-logo">.
 _LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "email-logo.png"
-
-# Referenced from the HTML as <img src="cid:fundlok-logo">. The angle brackets
-# belong in the header but never in the src.
-_LOGO_CID = "fundlok-logo"
 
 
 @lru_cache(maxsize=1)
-def _logo_bytes() -> bytes | None:
-    """The logo, read once per process. `None` if the asset is missing, which
-    degrades to a text-only header rather than failing the send -- a password
-    reset must not be blocked by a missing image."""
+def logo_bytes() -> bytes | None:
+    """The logo, read once per process. `None` if the asset is missing: the
+    email still goes, showing the image's alt text ("FundLok"), because a
+    password reset must not be blocked by a missing image."""
     try:
         return _LOGO_PATH.read_bytes()
     except OSError:
         return None
 
 
-def brand_header() -> str:
-    """The dark band that opens every email.
-
-    Dark ground, not white: the brand mark is only ever placed on black or very
-    dark teal (Handbook v3 §7.3), and the mark itself is the light-on-dark
-    variant. `background-color` sits on the <td>, and the table is the layout --
-    Outlook ignores CSS backgrounds on divs and does not do flexbox.
-
-    Width is set in HTML attributes as well as CSS because Outlook reads the
-    attribute and ignores the style.
-    """
-    if _logo_bytes() is None:
-        return (
-            '<tr><td align="center" style="background-color:#0a1512;'
-            'padding:28px 20px;border-radius:12px 12px 0 0;">'
-            '<span style="font-family:\'Helvetica Neue\',Arial,sans-serif;'
-            'font-size:24px;font-weight:700;color:#ffffff;">Fund'
-            '<span style="color:#84cc16;">Lok</span></span>'
-            "</td></tr>"
-        )
-    return (
-        '<tr><td align="center" style="background-color:#0a1512;'
-        'padding:28px 20px;border-radius:12px 12px 0 0;">'
-        f'<img src="cid:{_LOGO_CID}" alt="FundLok" width="180" height="64" '
-        'style="display:block;width:180px;height:auto;border:0;outline:none;'
-        'text-decoration:none;" />'
-        "</td></tr>"
-    )
-
 if TYPE_CHECKING:
     # Type-only: app.contact.router imports this module, so a runtime import
     # back into app.contact would close the loop.
     from app.contact.schemas import ContactPurpose
-
-def email_shell(body_html: str) -> str:
-    """Wrap body content in the branded shell: dark logo band, white card, footer.
-
-    Table-based and inline-styled on purpose. Email clients are not browsers --
-    Outlook renders through Word, Gmail strips <style> blocks in some contexts,
-    and neither does flexbox. Tables with inline styles are what actually works,
-    which is why this does not look like the rest of the codebase's HTML.
-    """
-    return f"""<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background-color:#f4f7f6;-webkit-font-smoothing:antialiased;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f7f6;padding:24px 12px;">
-    <tr><td align="center">
-      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;">
-        {brand_header()}
-        <tr><td style="background-color:#ffffff;padding:36px 40px;font-family:'Helvetica Neue',Arial,sans-serif;color:#4b5563;font-size:16px;line-height:1.6;">
-          {body_html}
-        </td></tr>
-        <tr><td style="background-color:#ffffff;border-radius:0 0 12px 12px;padding:0 40px 28px;font-family:'Helvetica Neue',Arial,sans-serif;">
-          <p style="border-top:1px solid #e5e7eb;padding-top:18px;margin:0;color:#9ca3af;font-size:13px;text-align:center;">
-            FundLok &middot; This is an automated message, please do not reply.
-          </p>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>"""
-
-
-def cta_button(href: str, label: str) -> str:
-    """A centred call-to-action button.
-
-    `color` is repeated inline on the anchor because some clients (notably
-    Outlook and a few webmail readers) override link colour unless the anchor
-    itself carries it -- white text on the green fill otherwise turns blue and
-    becomes unreadable.
-    """
-    return f"""
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:32px 0;">
-        <tr><td align="center">
-          <a href="{href}" style="display:inline-block;padding:14px 28px;background-color:#16a34a;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;font-size:16px;font-family:'Helvetica Neue',Arial,sans-serif;">{label}</a>
-        </td></tr>
-      </table>"""
 
 
 def valid_email_address(address: object) -> str | None:
@@ -186,13 +112,13 @@ def send_email(
     body.attach(MIMEText(html_content, "html"))
     message.attach(body)
 
-    logo = _logo_bytes()
+    logo = logo_bytes()
     if logo is not None:
         image = MIMEImage(logo, "png")
         # Angle brackets are part of the Content-ID header syntax; the HTML
         # refers to the bare id. Getting this wrong is the usual reason a CID
         # image renders as a broken box.
-        image.add_header("Content-ID", f"<{_LOGO_CID}>")
+        image.add_header("Content-ID", f"<{LOGO_CID}>")
         # "inline" keeps it out of the client's attachment list -- without it
         # every email arrives looking like it has a file attached.
         image.add_header("Content-Disposition", "inline", filename="fundlok.png")
@@ -214,25 +140,12 @@ def send_email(
 
 
 def send_verification_email(to_email: str, token: str) -> None:
-    from datetime import datetime
-    # We construct a verification link. Let's make it point to the backend route or frontend route.
-    # The requirement is: "it attach a button for user to click on it will local to somewhere to verify user email"
-    # We will point it to the frontend verify URL: {FRONTEND_URL}/verify-email?token={token}
+    # Points at the frontend, which calls the API with the token.
     verification_link = f"{settings.FRONTEND_URL}/verify-email?token={token}"
-    
+
     subject = "Verify your email for FundLok"
-    
-    html_content = email_shell(
-        f"""
-          <h1 style="margin:0 0 20px;font-size:24px;font-weight:700;color:#111827;">Verify Your Email Address</h1>
-          <p>Thank you for signing up with <strong>FundLok</strong>. To activate your account and start investing or raising funds, please verify your email address by clicking the button below:</p>
-          {cta_button(verification_link, "Verify Email")}
-          <p>If the button doesn't work, you can copy and paste the following link into your browser:</p>
-          <p style="word-break:break-all;"><a href="{verification_link}" style="color:#16a34a;">{verification_link}</a></p>
-          <p>This verification link will expire in 24 hours.</p>
-          <p style="color:#9ca3af;font-size:13px;">&copy; {datetime.now().year} FundLok. All rights reserved.</p>
-        """
-    )
+
+    html_content = render_email("verification", link=verification_link)
 
     text_content = f"Please verify your email by visiting this link: {verification_link}"
     
@@ -258,14 +171,8 @@ def send_contact_autoreply(to_email: str) -> None:
     """
     subject = "We have received your message - FundLok"
 
-    html_content = email_shell(
-        """
-          <h2 style="margin:0 0 20px;font-size:22px;color:#111827;">Thank you for contacting FundLok!</h2>
-          <p>Hello,</p>
-          <p>We have successfully received your information. Our team will review your message and get back to you as soon as possible.</p>
-          <p>Best regards,<br/>The FundLok Team</p>
-        """
-    )
+    # The template takes no variables: nothing submitted can reach it.
+    html_content = render_email("contact-autoreply")
 
     text_content = "Hello,\n\nWe have successfully received your information. Our team will review your message and get back to you as soon as possible.\n\nBest regards,\nThe FundLok Team"
 
@@ -296,8 +203,6 @@ def send_contact_notification(
     alone. The prefix comes from the server-side enum label, never from the
     request body.
     """
-    import html as html_lib
-
     # Subject and name land in a mail header, so newlines are stripped out
     # (they would otherwise let a submitter inject extra headers) and the
     # result is capped to keep the header a sane length.
@@ -310,26 +215,15 @@ def send_contact_notification(
     # dropdown, so the subject shape stays constant for inbox filters.
     purpose_label = purpose.label if purpose else "General"
 
-    safe_name = html_lib.escape(name)
-    safe_email = html_lib.escape(email)
-    safe_topic = html_lib.escape(topic)
-    safe_purpose = html_lib.escape(purpose_label)
-    safe_message = html_lib.escape(message).replace("\n", "<br/>")
-
-    label = (
-        "color:#9ca3af;font-size:12px;text-transform:uppercase;"
-        "letter-spacing:0.08em;"
-    )
-    html_content = email_shell(
-        f"""
-          <h1 style="margin:0 0 24px;font-size:20px;font-weight:700;color:#111827;">New contact form submission</h1>
-          <p style="margin:0 0 8px;"><span style="{label}">Purpose</span><br/>{safe_purpose}</p>
-          <p style="margin:0 0 8px;"><span style="{label}">Name</span><br/>{safe_name}</p>
-          <p style="margin:0 0 8px;"><span style="{label}">Email</span><br/><a href="mailto:{safe_email}" style="color:#16a34a;">{safe_email}</a></p>
-          <p style="margin:0 0 8px;"><span style="{label}">Subject</span><br/>{safe_topic}</p>
-          <p style="margin:0 0 8px;"><span style="{label}">Message</span></p>
-          <div style="color:#111827;font-size:15px;line-height:1.6;background-color:#f9fafb;border-radius:8px;padding:16px;margin-top:8px;white-space:pre-wrap;">{safe_message}</div>
-        """
+    # render_email escapes every value; the template runs `message` through
+    # nl2br, which escapes each line and joins them with <br/>.
+    html_content = render_email(
+        "contact-notification",
+        purpose=purpose_label,
+        name=name,
+        email=email,
+        topic=topic,
+        message=message,
     )
 
     text_content = (
@@ -351,23 +245,11 @@ def send_contact_notification(
 
 
 def send_password_reset_email(to_email: str, token: str) -> None:
-    from datetime import datetime
     reset_link = f"{settings.FRONTEND_URL}/reset-password?token={token}"
-    
+
     subject = "Reset your password for FundLok"
-    
-    html_content = email_shell(
-        f"""
-          <h1 style="margin:0 0 20px;font-size:24px;font-weight:700;color:#111827;">Reset Your Password</h1>
-          <p>You requested to reset your password for your <strong>FundLok</strong> account. Click the button below to set a new password:</p>
-          {cta_button(reset_link, "Reset Password")}
-          <p>If the button doesn't work, you can copy and paste the following link into your browser:</p>
-          <p style="word-break:break-all;"><a href="{reset_link}" style="color:#16a34a;">{reset_link}</a></p>
-          <p>This password reset link will expire in 1 hour.</p>
-          <p>If you did not request a password reset, please ignore this email.</p>
-          <p style="color:#9ca3af;font-size:13px;">&copy; {datetime.now().year} FundLok. All rights reserved.</p>
-        """
-    )
+
+    html_content = render_email("password-reset", link=reset_link)
 
     text_content = f"Please reset your password by visiting this link: {reset_link}"
 
@@ -376,6 +258,42 @@ def send_password_reset_email(to_email: str, token: str) -> None:
         subject=subject,
         html_content=html_content,
         text_content=text_content
+    )
+
+
+def send_admin_invite_email(to_email: str, token: str, invited_by: str, expires_hours: int) -> None:
+    """Invite a new operator to the admin console.
+
+    The account already exists (role ADMIN, no password). The link is an
+    ordinary password-reset token, so setting a password through it is the
+    whole of onboarding and the link dies once used. `invited_by` is a person's
+    display name and is escaped: it is user-editable profile text.
+    """
+    setup_link = f"{settings.FRONTEND_URL}/reset-password?token={token}&invite=1"
+    forgot_link = f"{settings.FRONTEND_URL}/forgot-password"
+
+    subject = "You've been added as a FundLok admin"
+
+    html_content = render_email(
+        "admin-invite",
+        inviter=invited_by,
+        setup_link=setup_link,
+        forgot_link=forgot_link,
+        expires_hours=expires_hours,
+    )
+
+    text_content = (
+        f"{invited_by} has created a FundLok admin account for this email address. "
+        f"Choose a password to finish setting it up: {setup_link} "
+        f"The link works once and expires in {expires_hours} hours. If it has expired, "
+        f"request a new one at {forgot_link}."
+    )
+
+    send_email(
+        to_email=to_email,
+        subject=subject,
+        html_content=html_content,
+        text_content=text_content,
     )
 
 
@@ -391,8 +309,6 @@ def send_password_changed_notice(to_email: str, first_time: bool = False) -> Non
     `first_time` swaps the wording for an account setting its first password
     (the OAuth case) -- "was changed" would be untrue there.
     """
-    from datetime import datetime
-
     reset_link = f"{settings.FRONTEND_URL}/forgot-password"
 
     subject = (
@@ -400,24 +316,9 @@ def send_password_changed_notice(to_email: str, first_time: bool = False) -> Non
         if first_time
         else "Your FundLok password was changed"
     )
-    headline = "Your password was set" if first_time else "Your password was changed"
-    lede = (
-        "A password was just added to your <strong>FundLok</strong> account. You can now "
-        "sign in with your email address and password."
-        if first_time
-        else "The password on your <strong>FundLok</strong> account was just changed."
-    )
 
-    html_content = email_shell(
-        f"""
-          <h1 style="margin:0 0 20px;font-size:24px;font-weight:700;color:#111827;">{headline}</h1>
-          <p>{lede}</p>
-          <p>If this was you, nothing further is needed — you can ignore this email.</p>
-          <p><strong>If this wasn't you</strong>, reset your password immediately using the button
-          below, and contact us so we can secure your account.</p>
-          {cta_button(reset_link, "Reset your password")}
-          <p style="color:#9ca3af;font-size:13px;">&copy; {datetime.now().year} FundLok. All rights reserved.</p>
-        """
+    html_content = render_email(
+        "password-set" if first_time else "password-changed", reset_link=reset_link
     )
 
     text_content = (
@@ -447,23 +348,13 @@ def send_existing_account_notice(to_email: str) -> None:
     or reset their password) without the registration endpoint ever confirming
     to the submitter that the account exists — the anti-enumeration guarantee.
     """
-    from datetime import datetime
-
     login_link = f"{settings.FRONTEND_URL}/login"
     reset_link = f"{settings.FRONTEND_URL}/forgot-password"
 
     subject = "About your FundLok account"
 
-    html_content = email_shell(
-        f"""
-          <h1 style="margin:0 0 20px;font-size:24px;font-weight:700;color:#111827;">Your account already exists</h1>
-          <p>We received a request to create a new <strong>FundLok</strong> account with this email address, but you already have one.</p>
-          <p>If this was you, just sign in — there's no need to register again. If you've forgotten your password, you can reset it.</p>
-          {cta_button(login_link, "Sign in")}
-          <p>Forgot your password? <a href="{reset_link}" style="color:#16a34a;">Reset it here</a>.</p>
-          <p>If you did not try to register, you can safely ignore this email — no changes were made to your account.</p>
-          <p style="color:#9ca3af;font-size:13px;">&copy; {datetime.now().year} FundLok. All rights reserved.</p>
-        """
+    html_content = render_email(
+        "existing-account", login_link=login_link, reset_link=reset_link
     )
 
     text_content = (
@@ -495,29 +386,19 @@ def send_new_device_signin_alert(
     (users.signin_alerts_enabled), and only for an unrecognised device: mailing
     on every sign-in trains people to ignore it.
     """
-    import html as html_lib
-
     security_link = f"{settings.FRONTEND_URL}/dashboard/security"
     reset_link = f"{settings.FRONTEND_URL}/forgot-password"
-    # Escaped although safe today: device/browser come from fixed labels plus
-    # digits (app/auth/user_agent.py), but they are derived from a header the
-    # signing-in party controls, and this email goes to the account owner.
-    browser = html_lib.escape(browser)
-    device = html_lib.escape(device)
-    where = html_lib.escape(ip_address or "an unknown address")
-
-    html_content = email_shell(
-        f"""
-          <h1 style="margin:0 0 16px;font-size:22px;font-weight:700;color:#111827;">New sign-in to your FundLok account</h1>
-          <p>Someone signed in from <strong>{browser} on {device}</strong> ({where}).
-          If that was you, nothing more is needed.</p>
-          <p>If it was not you, sign that device out and change your password now:</p>
-          {cta_button(security_link, "Review signed-in devices")}
-          <p style="color:#6b7280;font-size:13px;">
-            You can also <a href="{reset_link}" style="color:#16a34a;">reset your password</a>. This email was sent
-            because sign-in alerts are switched on for your account.
-          </p>
-        """
+    # Escaped (render_email escapes every value) although safe today:
+    # device/browser come from fixed labels plus digits (app/auth/user_agent.py),
+    # but they are derived from a header the signing-in party controls, and this
+    # email goes to the account owner.
+    html_content = render_email(
+        "new-device-signin",
+        browser=browser,
+        device=device,
+        where=ip_address or "an unknown address",
+        security_link=security_link,
+        reset_link=reset_link,
     )
 
     send_email(
@@ -541,16 +422,7 @@ def send_application_updated_email(to_email: str) -> None:
     link = f"{settings.FRONTEND_URL}/dashboard"
     subject = "Hồ sơ vay của bạn đã được cập nhật | Your loan application has been updated"
 
-    html_content = email_shell(
-        f"""
-          <h1 style="margin:0 0 16px;font-size:22px;font-weight:700;color:#111827;">Hồ sơ vay của bạn đã được cập nhật</h1>
-          <p>Hồ sơ đề nghị vay của bạn trên <strong>FundLok</strong> vừa có cập nhật mới. Vui lòng đăng nhập để xem chi tiết.</p>
-          <h2 style="margin:28px 0 12px;font-size:18px;font-weight:700;color:#111827;">Your loan application has been updated</h2>
-          <p>Your loan application on <strong>FundLok</strong> has a new update. Please sign in to see the details.</p>
-          {cta_button(link, "Xem trên FundLok / View on FundLok")}
-          <p style="word-break:break-all;color:#6b7280;font-size:13px;"><a href="{link}" style="color:#16a34a;">{link}</a></p>
-        """
-    )
+    html_content = render_email("application-updated", link=link)
 
     text_content = (
         "Hồ sơ vay của bạn trên FundLok đã được cập nhật. Đăng nhập để xem chi tiết: "

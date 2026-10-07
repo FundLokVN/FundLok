@@ -25,7 +25,7 @@
 # (curve-fit artifacts); the clamp neutralises them. Do not change them to 100.
 
 engine_version: "1.0.0"
-params_version: "wb-v1-20260917"  # T0a/T0b/T3/T5: gate 3 enabled, working_days_per_month 21->22, bank_rate now sourced from config
+params_version: "wb-v2-20261005"  # loan_constraints.max_vnd 1bn -> 100M. Prior: wb-v1-20260917 (T0a/T0b/T3/T5: gate 3 enabled, working_days_per_month 21->22, bank_rate now sourced from config)
 source_workbook: "FundLok formula factors v0.xlsx"
 source_tab: "Scoring From Raw"
 factor_count: 22
@@ -417,7 +417,7 @@ company_sizes:
 
 loan_constraints:
   min_vnd: 20000000
-  max_vnd: 1000000000
+  max_vnd: 100000000  # wb-v2-20261005: lowered from 1000000000
   allowed_durations_months: [1, 2, 3, 4, 5, 6]
 
 decision_states: [APPROVED, REVIEW, REJECT, INSUFFICIENT_DATA, AI_PENDING]

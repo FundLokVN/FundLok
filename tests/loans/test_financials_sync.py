@@ -36,7 +36,7 @@ def storage(monkeypatch):
 
 async def _apply(client, sme, *, employee_count=25, duration_months=3):
     """The project-application form, as the frontend sends it."""
-    loan = {"requested_amount": 300_000_000, "purpose": "Working capital"}
+    loan = {"requested_amount": 80_000_000, "purpose": "Working capital"}
     if duration_months is not None:
         loan["duration_months"] = duration_months
     body = {

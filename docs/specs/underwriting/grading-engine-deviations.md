@@ -127,3 +127,4 @@ before scoping it.
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 1.0 | 2026-07-28 | Edward | Initial register. 27 items: 13 doc-fix, 5 deliberate, 9 open. Sync deviation (D14) approved by Edward. |
+| 1.1 | 2026-10-05 | — | `loan_constraints.max_vnd` lowered 1,000,000,000 → 100,000,000 VND (range now 20M–100M). `params_version` wb-v1-20260917 → wb-v2-20261005. No factor/curve/rollup change; golden set unaffected (its conftest widens `max_vnd`). `rate_inquiries` DB CHECK left at 20M–1bn as an outer bound. |
