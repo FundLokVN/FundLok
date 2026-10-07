@@ -85,7 +85,13 @@ class InternalEmail(Base):
     # heading, body, button_label, button_url: what the admin wrote.
     content = Column(JSONB, nullable=False)
     status = Column(Text, nullable=False, default=STATUS_PENDING)
-    # One of the X-Error-Code values in service.py when FAILED.
+    # One of the X-Error-Code values in service.py when FAILED, or
+    # SOME_RECIPIENTS_REFUSED when SENT to some but not all.
     error_code = Column(Text, nullable=True)
+    # Each recipient gets their own copy; these are the ones that did not go
+    # out (refused by Gmail, or left when the connection dropped).
+    undelivered = Column(
+        ARRAY(Text), nullable=False, default=list, server_default=text("'{}'")
+    )
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     sent_at = Column(DateTime(timezone=True), nullable=True)

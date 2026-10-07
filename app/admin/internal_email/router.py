@@ -11,6 +11,7 @@ from app.admin.internal_email.schemas import (
     EmailSettingsUpdate,
     EmailTestResult,
     InternalEmailOut,
+    RecipientOut,
     SendEmailRequest,
 )
 from app.core.database import get_db
@@ -100,6 +101,19 @@ async def list_messages(
 ):
     """Your own sends; a system admin sees every admin's."""
     return await service.list_messages(db, actor=current_user, limit=limit)
+
+
+@router.get("/recipients", response_model=list[RecipientOut])
+async def list_recipients(
+    q: str | None = Query(None, max_length=100),
+    fundlok_only: bool = False,
+    limit: int = Query(200, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Users to pick for the To list: active, verified accounts, searched by
+    name or email. `fundlok_only` keeps FundLok's own addresses."""
+    return await service.list_recipients(db, query=q, fundlok_only=fundlok_only, limit=limit)
 
 
 @router.get("/policy", response_model=EmailPolicyOut)

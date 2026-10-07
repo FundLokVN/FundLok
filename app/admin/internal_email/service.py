@@ -16,7 +16,7 @@ from uuid import UUID
 
 from email_validator import EmailNotValidError, validate_email
 from fastapi import HTTPException, status
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
@@ -38,10 +38,11 @@ from app.admin.internal_email.schemas import (
     EmailSettingsUpdate,
     EmailTestResult,
     InternalEmailOut,
+    RecipientOut,
     SendEmailRequest,
 )
 from app.system.models import SystemSetting
-from app.users.models import Role, User
+from app.users.models import USER_STATUS_SUSPENDED, Role, User
 from app.utils.audit import append_audit
 from app.utils.email import logo_bytes
 from app.utils.email_templates import render_email
@@ -56,10 +57,15 @@ TEMPLATE_FILES = {
 # system_settings key for the org-wide policy (EmailPolicyOut).
 POLICY_KEY = "internal_email_policy"
 
-# Per admin, rolling hour, test emails included. Gmail caps a Workspace
-# mailbox at about 2,000 recipients a day; this keeps one console session far
-# below that and bounds what a hijacked session could send.
-SENDS_PER_HOUR = 20
+# Recipients per admin per rolling hour, test emails included (one each).
+# Counted in recipients, not sends, since each recipient is its own message.
+# Gmail caps a Workspace mailbox at about 2,000 recipients a day; this keeps
+# one admin well below that and bounds what a hijacked session could send.
+RECIPIENTS_PER_HOUR = 200
+
+# Addresses on these domains are FundLok's own: the composer's "FundLok only"
+# filter and "add all FundLok emails" button use them.
+FUNDLOK_EMAIL_DOMAINS = ("fundlok.com", "fundlok.vn")
 
 _ENTITY = "EMAIL_SETTINGS"
 
@@ -337,8 +343,9 @@ async def _connected_account(
     return row, password
 
 
-async def _check_rate(db: AsyncSession, actor_id: UUID) -> None:
-    """Raise 429 when the admin has used up the hour.
+async def _check_rate(db: AsyncSession, actor_id: UUID, recipient_count: int) -> None:
+    """Raise 429 when sending to `recipient_count` more would take the admin
+    past RECIPIENTS_PER_HOUR.
 
     Takes a transaction-scoped advisory lock on the admin first and holds it
     until the commit that writes the PENDING row (_send_logged). Without it,
@@ -349,16 +356,31 @@ async def _check_rate(db: AsyncSession, actor_id: UUID) -> None:
         select(func.pg_advisory_xact_lock(func.hashtextextended(str(actor_id), 0)))
     )
     since = datetime.now(timezone.utc) - timedelta(hours=1)
-    recent = await db.scalar(
-        select(func.count())
-        .select_from(InternalEmail)
-        .where(InternalEmail.sent_by == actor_id, InternalEmail.created_at > since)
+    # What each logged send costs: a pending one its whole list (it may still
+    # go out), a sent one the copies that actually went, a failed one a single
+    # attempt. Charging failures in full would let a Gmail outage, retried a
+    # few times, lock the admin out for the hour without anything sent.
+    cost = case(
+        (InternalEmail.status == STATUS_FAILED, 1),
+        (
+            InternalEmail.status == STATUS_SENT,
+            func.cardinality(InternalEmail.recipients)
+            - func.cardinality(InternalEmail.undelivered),
+        ),
+        else_=func.cardinality(InternalEmail.recipients),
     )
-    if (recent or 0) >= SENDS_PER_HOUR:
+    used = await db.scalar(
+        select(func.coalesce(func.sum(cost), 0)).where(
+            InternalEmail.sent_by == actor_id, InternalEmail.created_at > since
+        )
+    )
+    remaining = max(RECIPIENTS_PER_HOUR - int(used or 0), 0)
+    if recipient_count > remaining:
         raise _error(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "EMAIL_RATE_LIMITED",
-            f"You can send {SENDS_PER_HOUR} emails an hour. Try again later.",
+            f"You can email {RECIPIENTS_PER_HOUR} recipients an hour; {remaining} left now. "
+            "Try again later or send to fewer people.",
         )
 
 
@@ -410,17 +432,27 @@ async def _send_logged(
     """Check the hourly limit, write the log row and commit it, then contact
     Gmail and record the outcome. Committing first means the attempt is on
     record even if the process dies mid-send, and the hourly limit already
-    counts it."""
+    counts it.
+
+    One message per recipient, each addressed to that person alone: the list
+    can hold customers picked from the user directory, and none of them may
+    see the others' addresses."""
     from_address = account.gmail_address
     try:
-        message = transport.build_message(
-            from_name=account.from_name,
-            from_address=from_address,
-            recipients=recipients,
-            subject=subject,
-            html=html,
-            text=text,
-        )
+        messages = [
+            (
+                recipient,
+                transport.build_message(
+                    from_name=account.from_name,
+                    from_address=from_address,
+                    recipients=[recipient],
+                    subject=subject,
+                    html=html,
+                    text=text,
+                ),
+            )
+            for recipient in recipients
+        ]
     except ValueError:
         # The email package refuses a header value it would split across
         # lines. The schemas reject those first; this is the backstop, so a
@@ -430,7 +462,7 @@ async def _send_logged(
             detail="The subject, sender name or a recipient contains a line break.",
         ) from None
 
-    await _check_rate(db, actor.id)
+    await _check_rate(db, actor.id, len(recipients))
     log = InternalEmail(
         sent_by=actor.id,
         from_address=from_address,
@@ -444,20 +476,24 @@ async def _send_logged(
     await db.commit()
 
     failure: transport.DeliveryError | None = None
-    refused: list[str] = []
+    undelivered: list[str] = []
     try:
-        refused = await run_in_threadpool(transport.deliver, from_address, password, message)
+        undelivered = await run_in_threadpool(
+            transport.deliver, from_address, password, messages
+        )
     except transport.DeliveryError as exc:
         failure = exc
 
     if failure is None:
         log.status = STATUS_SENT
         log.sent_at = datetime.now(timezone.utc)
-        if refused:
+        log.undelivered = undelivered
+        if undelivered:
             log.error_code = "SOME_RECIPIENTS_REFUSED"
     else:
         log.status = STATUS_FAILED
         log.error_code = failure.code
+        log.undelivered = list(recipients)
     append_audit(
         db,
         entity_type="INTERNAL_EMAIL",
@@ -468,6 +504,7 @@ async def _send_logged(
             "status": log.status,
             "template": template,
             "recipient_count": len(recipients),
+            "undelivered_count": len(log.undelivered),
             "error_code": log.error_code,
         },
         ip_address=ip_address,
@@ -568,3 +605,47 @@ async def list_messages(
         query = query.where(InternalEmail.sent_by == actor.id)
     rows = (await db.execute(query)).scalars()
     return [InternalEmailOut.model_validate(row) for row in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Recipient directory
+# --------------------------------------------------------------------------- #
+
+
+def _is_fundlok(address: str) -> bool:
+    return address.rsplit("@", 1)[-1].lower() in FUNDLOK_EMAIL_DOMAINS
+
+
+async def list_recipients(
+    db: AsyncSession, *, query: str | None, fundlok_only: bool, limit: int
+) -> list[RecipientOut]:
+    """Users an admin can add to the To list: every account that is not
+    suspended (the codebase's one deny status; PENDING_KYC is normal
+    onboarding) and has a verified email (an unverified address may be a typo
+    or someone else's). Admins already see every user in the console, so this
+    exposes nothing new."""
+    domain = func.lower(func.split_part(User.email, "@", 2))
+    stmt = select(User).where(
+        User.status != USER_STATUS_SUSPENDED, User.email_verified.is_(True)
+    )
+    if fundlok_only:
+        stmt = stmt.where(domain.in_(FUNDLOK_EMAIL_DOMAINS))
+    if query and query.strip():
+        # Escape LIKE wildcards so a "%" or "_" in the search is literal.
+        term = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{term}%"
+        stmt = stmt.where(
+            User.email.ilike(pattern, escape="\\") | User.full_name.ilike(pattern, escape="\\")
+        )
+    stmt = stmt.order_by(func.lower(func.coalesce(User.full_name, User.email)), User.email).limit(limit)
+    users = (await db.execute(stmt)).scalars().all()
+    return [
+        RecipientOut(
+            id=user.id,
+            full_name=user.full_name,
+            email=user.email,
+            role=user.role,
+            is_fundlok=_is_fundlok(user.email),
+        )
+        for user in users
+    ]

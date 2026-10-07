@@ -15,7 +15,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
 
-from app.admin.internal_email import crypto, service
+from app.admin.internal_email import crypto, service, transport
 from app.admin.internal_email.models import EmailSettings, InternalEmail
 from app.admin.internal_email.schemas import SendEmailRequest
 from app.core.database import SessionLocal
@@ -29,13 +29,19 @@ SETTINGS = "/admin/email/settings"
 
 
 class FakeGmail:
-    """Stands in for smtplib.SMTP_SSL: records logins and messages."""
+    """Stands in for smtplib.SMTP_SSL: records logins and messages.
+
+    `refuse` holds addresses Gmail refuses at RCPT (send_message raises, as
+    smtplib does when a message's only recipient is refused); `drop_after`
+    makes the connection die after that many messages went out."""
 
     def __init__(self):
         self.logins: list[tuple[str, str]] = []
         self.sent = []
         self.reject_login = False
         self.unreachable = False
+        self.refuse: set[str] = set()
+        self.drop_after: int | None = None
 
     def __call__(self):
         if self.unreachable:
@@ -54,6 +60,10 @@ class FakeGmail:
         self.logins.append((user, password))
 
     def send_message(self, message):
+        if self.drop_after is not None and len(self.sent) >= self.drop_after:
+            raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+        if message["To"] in self.refuse:
+            raise smtplib.SMTPRecipientsRefused({message["To"]: (550, b"5.1.1 No such user")})
         self.sent.append(message)
         return {}
 
@@ -482,10 +492,12 @@ async def test_a_send_reaches_gmail_with_the_rendered_template(
     assert out["status"] == "SENT"
     assert out["recipients"] == ["colleague@fundlok.com", "second@fundlok.com"]
 
-    [message] = gmail.sent
+    # One copy each, addressed to that person alone.
+    assert [m["To"] for m in gmail.sent] == ["colleague@fundlok.com", "second@fundlok.com"]
+    message = gmail.sent[0]
     assert message["Subject"] == "Friday review"
-    assert message["To"] == "colleague@fundlok.com, second@fundlok.com"
     assert "FundLok Team" in message["From"] and "team@fundlok.com" in message["From"]
+    assert message["Cc"] is None and message["Bcc"] is None
 
     html = _html_part(message)
     assert "Announcement" in html
@@ -620,7 +632,7 @@ async def test_too_many_recipients_are_rejected(client, make_system_admin):
     sysadmin = await make_system_admin()
     resp = await client.post(
         "/admin/email/send",
-        json=_message(to=[f"person{i}@fundlok.com" for i in range(21)]),
+        json=_message(to=[f"person{i}@fundlok.com" for i in range(51)]),
         headers=sysadmin["headers"],
     )
     assert resp.status_code == 422
@@ -629,7 +641,7 @@ async def test_too_many_recipients_are_rejected(client, make_system_admin):
 async def test_the_hourly_limit_applies(client, make_system_admin, gmail, monkeypatch):
     sysadmin = await make_system_admin()
     await _connect(client, sysadmin)
-    monkeypatch.setattr(service, "SENDS_PER_HOUR", 2)
+    monkeypatch.setattr(service, "RECIPIENTS_PER_HOUR", 2)
 
     for _ in range(2):
         ok = await client.post("/admin/email/send", json=_message(), headers=sysadmin["headers"])
@@ -646,7 +658,7 @@ async def test_the_hourly_limit_is_per_admin(client, make_admin, gmail, monkeypa
     bob = await make_admin()
     await _connect(client, alice, gmail_address="alice@fundlok.com")
     await _connect(client, bob, gmail_address="bob@fundlok.com")
-    monkeypatch.setattr(service, "SENDS_PER_HOUR", 1)
+    monkeypatch.setattr(service, "RECIPIENTS_PER_HOUR", 1)
 
     ok = await client.post("/admin/email/send", json=_message(), headers=alice["headers"])
     assert ok.status_code == 200, ok.text
@@ -665,7 +677,7 @@ async def test_the_hourly_limit_holds_under_concurrent_sends(
     # inserts, and all pass.
     sysadmin = await make_system_admin()
     await _connect(client, sysadmin)
-    monkeypatch.setattr(service, "SENDS_PER_HOUR", 3)
+    monkeypatch.setattr(service, "RECIPIENTS_PER_HOUR", 3)
     body = SendEmailRequest(**_message())
 
     async def one_send() -> int:
@@ -706,6 +718,203 @@ async def test_the_test_email_only_verifies_the_credentials_it_tested(
     assert resp.status_code == 200, resp.text
     settings = (await client.get(SETTINGS, headers=sysadmin["headers"])).json()
     assert settings["last_verified_at"] is None
+
+
+async def test_the_hourly_limit_counts_recipients(client, make_system_admin, gmail, monkeypatch):
+    sysadmin = await make_system_admin()
+    await _connect(client, sysadmin)
+    monkeypatch.setattr(service, "RECIPIENTS_PER_HOUR", 3)
+    two = _message(to=["a@fundlok.com", "b@fundlok.com"])
+
+    ok = await client.post("/admin/email/send", json=two, headers=sysadmin["headers"])
+    assert ok.status_code == 200, ok.text
+    # 2 used, 1 left: another 2 would go over, a single one fits.
+    over = await client.post("/admin/email/send", json=two, headers=sysadmin["headers"])
+    assert over.status_code == 429
+    assert over.headers["X-Error-Code"] == "EMAIL_RATE_LIMITED"
+    fits = await client.post(
+        "/admin/email/send", json=_message(to=["c@fundlok.com"]), headers=sysadmin["headers"]
+    )
+    assert fits.status_code == 200, fits.text
+    assert len(gmail.sent) == 3
+
+
+async def test_no_recipient_sees_the_others(client, make_system_admin, gmail):
+    sysadmin = await make_system_admin()
+    await _connect(client, sysadmin)
+    people = ["sme.owner@example.com", "investor@example.com", "staff@fundlok.com"]
+
+    resp = await client.post("/admin/email/send", json=_message(to=people), headers=sysadmin["headers"])
+    assert resp.status_code == 200, resp.text
+    assert len(gmail.sent) == 3
+    for message, person in zip(gmail.sent, people):
+        raw = message.as_string()
+        assert message["To"] == person
+        for other in people:
+            if other != person:
+                assert other not in raw
+
+
+async def test_refused_recipients_are_recorded_and_the_rest_still_go(
+    client, make_system_admin, db_session, gmail
+):
+    sysadmin = await make_system_admin()
+    await _connect(client, sysadmin)
+    gmail.refuse = {"gone@fundlok.com"}
+
+    resp = await client.post(
+        "/admin/email/send",
+        json=_message(to=["a@fundlok.com", "gone@fundlok.com", "b@fundlok.com"]),
+        headers=sysadmin["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+    assert out["status"] == "SENT"
+    assert out["error_code"] == "SOME_RECIPIENTS_REFUSED"
+    assert out["undelivered"] == ["gone@fundlok.com"]
+    assert [m["To"] for m in gmail.sent] == ["a@fundlok.com", "b@fundlok.com"]
+
+
+async def test_every_recipient_refused_is_a_failure(client, make_system_admin, db_session, gmail):
+    sysadmin = await make_system_admin()
+    await _connect(client, sysadmin)
+    gmail.refuse = {"gone@fundlok.com"}
+
+    resp = await client.post(
+        "/admin/email/send", json=_message(to=["gone@fundlok.com"]), headers=sysadmin["headers"]
+    )
+    assert resp.status_code == 502
+    assert resp.headers["X-Error-Code"] == "GMAIL_RECIPIENT_REFUSED"
+    log = (await db_session.execute(select(InternalEmail))).scalar_one()
+    assert (log.status, log.undelivered) == ("FAILED", ["gone@fundlok.com"])
+
+
+async def test_a_dropped_connection_keeps_what_was_sent(client, make_system_admin, db_session, gmail):
+    sysadmin = await make_system_admin()
+    await _connect(client, sysadmin)
+    gmail.drop_after = 1
+
+    resp = await client.post(
+        "/admin/email/send",
+        json=_message(to=["a@fundlok.com", "b@fundlok.com", "c@fundlok.com"]),
+        headers=sysadmin["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+    assert out["status"] == "SENT"
+    assert out["undelivered"] == ["b@fundlok.com", "c@fundlok.com"]
+    assert [m["To"] for m in gmail.sent] == ["a@fundlok.com"]
+
+
+async def test_a_send_past_its_time_budget_returns_the_rest_undelivered(
+    client, make_system_admin, gmail, monkeypatch
+):
+    # A long list must not run past the proxy timeout while still sending:
+    # the loop stops starting new copies and reports the rest.
+    sysadmin = await make_system_admin()
+    await _connect(client, sysadmin)
+    monkeypatch.setattr(transport, "SEND_BUDGET_SECONDS", -1)
+
+    resp = await client.post(
+        "/admin/email/send",
+        json=_message(to=["a@fundlok.com", "b@fundlok.com", "c@fundlok.com"]),
+        headers=sysadmin["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["undelivered"] == ["b@fundlok.com", "c@fundlok.com"]
+    assert [m["To"] for m in gmail.sent] == ["a@fundlok.com"]
+
+
+async def test_failed_and_undelivered_copies_do_not_use_up_the_hour(
+    client, make_system_admin, gmail, monkeypatch
+):
+    sysadmin = await make_system_admin()
+    await _connect(client, sysadmin)
+    monkeypatch.setattr(service, "RECIPIENTS_PER_HOUR", 4)
+
+    # A failed attempt to two people costs one.
+    gmail.reject_login = True
+    failed = await client.post(
+        "/admin/email/send", json=_message(to=["a@fundlok.com", "b@fundlok.com"]), headers=sysadmin["headers"]
+    )
+    assert failed.status_code == 502
+    gmail.reject_login = False
+
+    # A send to three where one is refused costs the two that went: 1 + 2 = 3.
+    gmail.refuse = {"gone@fundlok.com"}
+    partial = await client.post(
+        "/admin/email/send",
+        json=_message(to=["c@fundlok.com", "gone@fundlok.com", "d@fundlok.com"]),
+        headers=sysadmin["headers"],
+    )
+    assert partial.status_code == 200, partial.text
+
+    one_left = await client.post(
+        "/admin/email/send", json=_message(to=["e@fundlok.com"]), headers=sysadmin["headers"]
+    )
+    assert one_left.status_code == 200, one_left.text
+    none_left = await client.post(
+        "/admin/email/send", json=_message(to=["f@fundlok.com"]), headers=sysadmin["headers"]
+    )
+    assert none_left.status_code == 429
+
+
+# --------------------------------------------------------------------------- #
+# Recipient directory
+# --------------------------------------------------------------------------- #
+
+
+async def _user(client, make_user, db_session, *, email, full_name, role=None, verified=True, status="ACTIVE"):
+    created = await make_user(role=role, email=email, full_name=full_name)
+    row = (await db_session.execute(select(User).where(User.id == UUID(created["id"])))).scalar_one()
+    row.email_verified = verified
+    row.status = status
+    await db_session.commit()
+    return created
+
+
+async def test_the_recipient_directory_lists_active_verified_users(
+    client, make_admin, make_user, db_session
+):
+    admin = await make_admin(email="lan.admin@fundlok.com")
+    await _user(client, make_user, db_session, email="minh@fundlok.vn", full_name="Minh Tran")
+    await _user(client, make_user, db_session, email="owner@shop.vn", full_name="Shop Owner", role="SME")
+    await _user(client, make_user, db_session, email="new@shop.vn", full_name="Unverified", verified=False)
+    await _user(client, make_user, db_session, email="gone@fundlok.com", full_name="Suspended", status="SUSPENDED")
+    # Back in onboarding is still a working account (only SUSPENDED is a deny).
+    await _user(client, make_user, db_session, email="kyc@shop.vn", full_name="Re-submitting", status="PENDING_KYC")
+
+    resp = await client.get("/admin/email/recipients", headers=admin["headers"])
+    assert resp.status_code == 200, resp.text
+    emails = {r["email"] for r in resp.json()}
+    assert {"minh@fundlok.vn", "owner@shop.vn", "kyc@shop.vn"} <= emails
+    assert "new@shop.vn" not in emails and "gone@fundlok.com" not in emails
+    owner = next(r for r in resp.json() if r["email"] == "owner@shop.vn")
+    assert owner == {
+        "id": owner["id"],
+        "full_name": "Shop Owner",
+        "email": "owner@shop.vn",
+        "role": "SME",
+        "is_fundlok": False,
+    }
+
+    fundlok = (
+        await client.get("/admin/email/recipients?fundlok_only=true", headers=admin["headers"])
+    ).json()
+    assert fundlok and all(r["is_fundlok"] for r in fundlok)
+    assert "minh@fundlok.vn" in {r["email"] for r in fundlok}
+    assert "owner@shop.vn" not in {r["email"] for r in fundlok}
+
+    found = (await client.get("/admin/email/recipients?q=minh", headers=admin["headers"])).json()
+    assert [r["email"] for r in found] == ["minh@fundlok.vn"]
+    # LIKE wildcards in the search are literal.
+    assert (await client.get("/admin/email/recipients?q=%25", headers=admin["headers"])).json() == []
+
+
+async def test_only_admins_can_list_recipients(client, make_user):
+    investor = await make_user(role="INVESTOR")
+    resp = await client.get("/admin/email/recipients", headers=investor["headers"])
+    assert resp.status_code == 403
 
 
 async def test_preview_renders_without_sending(client, make_system_admin, db_session, gmail):

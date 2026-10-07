@@ -10,6 +10,10 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 # Email template in service.TEMPLATE_FILES.
 ComposeTemplate = Literal["general", "announcement", "action_required"]
 
+# Per email. Each recipient gets their own copy (service.send), so this bounds
+# one burst of SMTP sends, not who can see whom.
+MAX_RECIPIENTS = 50
+
 # Any control character, CR/LF included. Values that land in a mail header
 # (subject, from name) or on a single line of the email must not carry one:
 # a newline in a header would let the value add headers of its own (Bcc: …).
@@ -188,12 +192,23 @@ class EmailContent(BaseModel):
 
 
 class SendEmailRequest(EmailContent):
-    to: list[EmailStr] = Field(min_length=1, max_length=20)
+    to: list[EmailStr] = Field(min_length=1, max_length=MAX_RECIPIENTS)
 
     @field_validator("to")
     @classmethod
     def _to(cls, values: list[str]) -> list[str]:
         return [_plain_address(value) for value in values]
+
+
+class RecipientOut(BaseModel):
+    """A user an admin can add to the To list."""
+
+    id: UUID
+    full_name: str | None
+    email: str
+    role: str | None
+    # The address is on a FundLok domain (service.FUNDLOK_EMAIL_DOMAINS).
+    is_fundlok: bool
 
 
 class EmailPreview(BaseModel):
@@ -217,5 +232,7 @@ class InternalEmailOut(BaseModel):
     subject: str
     status: str
     error_code: str | None
+    # Recipients whose copy did not go out (the rest did).
+    undelivered: list[str]
     created_at: datetime
     sent_at: datetime | None

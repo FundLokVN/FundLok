@@ -6,7 +6,7 @@
 | **Owner** | Phat |
 | **Implementer(s)** | Phat (backend + frontend) |
 | **Module** | `app/admin/internal_email/`, `emails/` (React Email templates), `app/utils/email.py` |
-| **Version** | 1.1 (per-admin accounts) |
+| **Version** | 1.2 (recipient directory, one copy per recipient) |
 | **Date** | 2026-10-07 |
 | **Related ADR** | — |
 | **Depends on** | — |
@@ -19,7 +19,9 @@ Admins need to send company email (announcements, reminders, one-off notes)
 without leaving the admin console. **Every admin** (ADMIN and SYSTEM_ADMIN)
 connects **their own** Gmail / Google Workspace account with their own **App
 Password**, and their email goes out from that address. They then compose a
-message: recipients, a template, a subject and the content. A system admin also
+message: recipients (typed, picked from the system's users, or "add all FundLok
+emails" in one click), a template, a subject and the content. Each recipient
+gets their own copy. A system admin also
 sets the recipient domains every admin may send to, and can see every admin's
 sends.
 
@@ -88,6 +90,7 @@ internal_emails
 ├── content        JSONB        NOT NULL   -- heading, body, button_label, button_url
 ├── status         TEXT         NOT NULL, CHECK IN ('PENDING', 'SENT', 'FAILED')
 ├── error_code     TEXT         nullable
+├── undelivered    TEXT[]       NOT NULL DEFAULT '{}'  -- recipients whose copy did not go out (migration 11d74e4c16bf)
 ├── created_at     TIMESTAMPTZ  DEFAULT NOW()
 └── sent_at        TIMESTAMPTZ  nullable
 INDEX (sent_by, created_at)
@@ -127,6 +130,7 @@ else, 401 if not signed in). Only `PUT /admin/email/policy` is SYSTEM_ADMIN only
 | POST | `/admin/email/preview` | `EmailContent` | `EmailPreview` |
 | POST | `/admin/email/send` | `SendEmailRequest` | `InternalEmailOut` |
 | GET | `/admin/email/messages?limit=20` | — | `list[InternalEmailOut]` (own; SYSTEM_ADMIN: everyone's) |
+| GET | `/admin/email/recipients?q=&fundlok_only=&limit=200` | — | `list[RecipientOut]` |
 | GET | `/admin/email/policy` | — | `EmailPolicyOut` |
 | PUT | `/admin/email/policy` | `EmailPolicyUpdate` (SYSTEM_ADMIN) | `EmailPolicyOut` |
 
@@ -144,10 +148,12 @@ EmailContent          { template: "general" | "announcement" | "action_required"
                         subject: str (1–200), heading: str | null (≤ 200),
                         body: str (1–10 000), button_label: str | null (≤ 60),
                         button_url: https URL | null (≤ 2 000) }
-SendEmailRequest      EmailContent + { to: email[] (1–20) }
+SendEmailRequest      EmailContent + { to: email[] (1–50) }
+RecipientOut          { id, full_name: str | null, email, role: str | null, is_fundlok: bool }
 EmailPreview          { subject: str, html: str }
 InternalEmailOut      { id, sent_by: UUID | null, from_address, recipients: str[], template,
-                        subject, status, error_code: str | null, created_at, sent_at }
+                        subject, status, error_code: str | null, undelivered: str[],
+                        created_at, sent_at }
 ```
 
 The test email always goes to **the signed-in admin's own address**, and never
@@ -186,11 +192,16 @@ PENDING ──(Gmail accepted)──▶ SENT
 7. **Content is plain text.** It is HTML-escaped and newlines become `<br/>`.
    The button URL must be `https://`. CR/LF are rejected in the subject,
    heading, from name and button label.
-8. **Recipients.** 1–20 per send, de-duplicated, sent as one message (every
-   recipient sees the list). When the policy's `allowed_domains` is non-empty,
+8. **Recipients.** 1–50 per send, de-duplicated. **One message per recipient**,
+   each addressed to that person alone, over one Gmail connection: recipients
+   can be customers picked from the directory, and none may see another's
+   address. A refused recipient, or the ones left when the connection drops,
+   go in `undelivered`; the send is `SENT` if anyone got it
+   (`SOME_RECIPIENTS_REFUSED` when some did not), `FAILED` if nobody did. When the policy's `allowed_domains` is non-empty,
    each recipient's domain (in punycode) must be in it, compared exactly.
-9. **Rate limit.** 20 sends per admin per rolling hour. Test emails count. The
-   count and the PENDING insert run under a per-admin, transaction-scoped
+9. **Rate limit.** 200 **recipients** per admin per rolling hour (the sum of
+   each logged send's recipients; a test email counts 1). The count and the
+   PENDING insert run under a per-admin, transaction-scoped
    advisory lock (`pg_advisory_xact_lock`), so concurrent requests cannot all
    read the same count and pass. The lock is released before Gmail is
    contacted.
@@ -202,6 +213,11 @@ PENDING ──(Gmail accepted)──▶ SENT
     deletes their settings and stored password.
 12. **Oversight.** `GET /messages` returns an admin's own sends; for a
     SYSTEM_ADMIN it returns every admin's.
+13. **Recipient directory.** `GET /recipients` lists active users with a
+    verified email (an unverified address may be a typo or someone else's),
+    searched by name or email (LIKE wildcards escaped). `fundlok_only` keeps
+    addresses on `FUNDLOK_EMAIL_DOMAINS` (`fundlok.com`, `fundlok.vn`). Admins
+    already see every user in the console, so this exposes nothing new.
 
 ---
 
@@ -252,6 +268,13 @@ PENDING ──(Gmail accepted)──▶ SENT
 - `test_recipients_outside_allowed_domains_are_refused`
 - `test_the_hourly_limit_applies`
 - `test_the_hourly_limit_is_per_admin`
+- `test_the_hourly_limit_counts_recipients`
+- `test_no_recipient_sees_the_others`
+- `test_refused_recipients_are_recorded_and_the_rest_still_go`
+- `test_every_recipient_refused_is_a_failure`
+- `test_a_dropped_connection_keeps_what_was_sent`
+- `test_the_recipient_directory_lists_active_verified_users`
+- `test_only_admins_can_list_recipients`
 - `test_the_hourly_limit_holds_under_concurrent_sends`
 - `test_the_test_email_only_verifies_the_credentials_it_tested`
 - `test_preview_renders_without_sending`
