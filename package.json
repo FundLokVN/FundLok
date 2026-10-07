@@ -28,6 +28,7 @@
     "react-email": "bun run --cwd emails dev",
     "react-email:export": "bun run --cwd emails export",
     "email:dev": "bun run --cwd emails dev",
-    "email:export": "bun run --cwd emails export"
+    "email:export": "bun run --cwd emails export",
+    "db:studio": "docker compose up -d postgres pgweb && echo '\\n  Database studio ready at: http://localhost:8081\\n' && open http://localhost:8081"
   }
 }
