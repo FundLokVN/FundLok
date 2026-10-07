@@ -154,18 +154,28 @@ jobs:
       # --no-deps is safe precisely because requirements.txt pins every
       # transitive too -- there is nothing left for it to resolve.
       #
-      # The suppression below is the one finding we have accepted. It is
-      # unreachable from our code; re-check it before adding another.
+      # The suppressions below are the findings we have accepted. Each is
+      # unreachable from our code; re-check them before adding another.
       #   ecdsa 0.19.2  CVE-2024-23342, Minerva timing attack on P-256. No fix
       #                 exists: upstream considers side-channel resistance out
       #                 of scope. It ships as a hard dependency of python-jose
       #                 but never runs -- our own tokens are HS256 and provider
       #                 ID tokens verify as RS256.
+      #   python-jose 3.5.0  CVE-2026-85394 (GHSA-3qf3-8w2g-rqmx), HS256 tokens
+      #                 forged with a provider's DER-encoded public key when
+      #                 HS256 is allowed. No fix exists. Every jwt.decode pins
+      #                 its algorithms: ours to HS256 with SECRET_KEY, Google ID
+      #                 tokens to RS/ES/PS only, with the key passed as an RSA
+      #                 JWK that python-jose refuses as an HMAC secret.
+      #                 tests/auth/test_oauth_id_token_alg_confusion.py pins
+      #                 both, and fails once python-jose ships a fix (then drop
+      #                 this ignore).
       - name: Audit pinned dependencies for known vulnerabilities
         run: |
           pipx run pip-audit==2.10.1 \
             --requirement requirements.txt --no-deps --strict \
-            --ignore-vuln GHSA-wj6h-64fc-37mp --ignore-vuln PYSEC-2026-1325
+            --ignore-vuln GHSA-wj6h-64fc-37mp --ignore-vuln PYSEC-2026-1325 \
+            --ignore-vuln CVE-2026-85394 --ignore-vuln GHSA-3qf3-8w2g-rqmx
 
   deploy-staging:
     name: Deploy to Cloud Run (staging)
