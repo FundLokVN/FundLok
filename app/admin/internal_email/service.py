@@ -10,9 +10,14 @@ carry an X-Error-Code header; `detail` stays a plain English string.
 """
 
 import base64
+import html
+import re
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from html.parser import HTMLParser
 from uuid import UUID
+
+from markupsafe import Markup
 
 from email_validator import EmailNotValidError, validate_email
 from fastapi import HTTPException, status
@@ -296,6 +301,113 @@ def _preview_logo_src() -> str | None:
     return "data:image/png;base64," + base64.b64encode(logo).decode()
 
 
+_ALLOWED_EMAIL_TAGS = {"b", "strong", "i", "em", "u", "a", "p", "br", "ul", "ol", "li", "span", "div"}
+_EMAIL_LINK_STYLE = "color:#16a34a;text-decoration:underline;font-weight:600;"
+
+
+class _SafeEmailHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.output: list[str] = []
+        self.plain: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+        tag_lower = tag.lower()
+        if tag_lower in _ALLOWED_EMAIL_TAGS:
+            if tag_lower == "a":
+                href = ""
+                for k, v in attrs:
+                    if k.lower() == "href" and v and (
+                        v.startswith("http://") or v.startswith("https://") or v.startswith("mailto:")
+                    ):
+                        href = v
+                if href:
+                    safe_href = html.escape(href, quote=True)
+                    self.output.append(
+                        f'<a href="{safe_href}" target="_blank" rel="noopener noreferrer" style="{_EMAIL_LINK_STYLE}">'
+                    )
+                else:
+                    self.output.append("<span>")
+            elif tag_lower == "br":
+                self.output.append("<br/>")
+                self.plain.append("\n")
+            elif tag_lower == "div":
+                current_out = "".join(self.output)
+                if current_out and not current_out.endswith(("<br/>", "<br>", "</ul>", "</ol>")):
+                    self.output.append("<br/>")
+                    self.plain.append("\n")
+            elif tag_lower == "p":
+                current_out = "".join(self.output)
+                if current_out:
+                    if current_out.endswith("<br/>"):
+                        self.output.append("<br/>")
+                        self.plain.append("\n")
+                    elif not current_out.endswith(("<br/><br/>", "</ul>", "</ol>")):
+                        self.output.append("<br/><br/>")
+                        self.plain.append("\n\n")
+            elif tag_lower == "li":
+                self.output.append("<li>")
+                self.plain.append("• ")
+            elif tag_lower in ("ul", "ol"):
+                self.output.append(f"<{tag_lower}>")
+                if self.plain and not "".join(self.plain).endswith("\n"):
+                    self.plain.append("\n")
+            else:
+                self.output.append(f"<{tag_lower}>")
+        else:
+            # Escape disallowed start tag so raw tags (like <script>) stay visible as text
+            raw = self.get_starttag_text() or f"<{tag}>"
+            self.output.append(html.escape(raw))
+            self.plain.append(raw)
+
+    def handle_endtag(self, tag: str):
+        tag_lower = tag.lower()
+        if tag_lower in _ALLOWED_EMAIL_TAGS:
+            if tag_lower == "a":
+                self.output.append("</a>")
+            elif tag_lower in ("p", "br", "div"):
+                pass
+            elif tag_lower in ("ul", "ol"):
+                self.output.append(f"</{tag_lower}>")
+                if self.plain and not "".join(self.plain).endswith("\n"):
+                    self.plain.append("\n")
+            elif tag_lower in ("b", "strong", "i", "em", "u", "li", "span"):
+                self.output.append(f"</{tag_lower}>")
+                if tag_lower == "li":
+                    self.plain.append("\n")
+        else:
+            raw = f"</{tag}>"
+            self.output.append(html.escape(raw))
+            self.plain.append(raw)
+
+    def handle_data(self, data: str):
+        self.output.append(html.escape(data, quote=False))
+        self.plain.append(data)
+
+
+def sanitize_internal_email_body(body: str) -> tuple[Markup, str]:
+    """Sanitize rich text / HTML or markdown from the admin email composer.
+    Preserves safe formatting (bold, italic, links, lists) and styles links.
+    Disallowed tags are HTML-escaped.
+    Returns (safe_html_markup, plain_text_fallback).
+    """
+    if not body:
+        return Markup(""), ""
+
+    # Support markdown syntax if user typed markdown instead of HTML
+    processed = re.sub(
+        r"\[([^\]]+)\]\((https?://[^\s\)]+|mailto:[^\s\)]+)\)",
+        r'<a href="\g<2>">\g<1></a>',
+        body,
+    )
+    processed = re.sub(r"\*\*([^*]+)\*\*", r"<b>\g<1></b>", processed)
+    processed = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\g<1></i>", processed)
+
+    parser = _SafeEmailHTMLParser()
+    parser.feed(processed)
+    return Markup("".join(parser.output)), "".join(parser.plain)
+
+
 def _render(
     content: EmailContent,
     *,
@@ -312,9 +424,10 @@ def _render(
     sign with).
     """
     include_signature = content.include_signature and bool(signature_name)
+    safe_body_html, plain_body = sanitize_internal_email_body(content.body)
     context = {
         "heading": content.heading or "",
-        "body": content.body,
+        "body": safe_body_html,
         "button_label": content.button_label or "",
         "button_url": content.button_url or "",
         "include_signature": include_signature,
@@ -328,7 +441,7 @@ def _render(
             context["logo_src"] = logo_src
     html = render_email(TEMPLATE_FILES[content.template], **context)
 
-    lines = [content.heading, content.body] if content.heading else [content.body]
+    lines = [content.heading, plain_body] if content.heading else [plain_body]
     if content.button_url:
         lines.append(f"{content.button_label}: {content.button_url}")
     if include_signature:

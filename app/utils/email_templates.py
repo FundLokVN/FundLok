@@ -41,8 +41,11 @@ def _escape(value: Any) -> Markup:
 
 
 def _nl2br(value: Any) -> Markup:
-    """Plain text -> escaped HTML, one <br/> per newline."""
+    """Plain text -> escaped HTML, one <br/> per newline.
+    If value is already Markup, preserve safe markup without re-escaping."""
     text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    if isinstance(value, Markup):
+        return Markup("<br/>").join(Markup(line) for line in text.split("\n"))
     return Markup("<br/>").join(_escape(line) for line in text.split("\n"))
 
 
