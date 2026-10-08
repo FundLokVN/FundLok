@@ -232,6 +232,80 @@ class AdminUserDetail(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AdminUserProjectRef(BaseModel):
+    """One company this user owns or co-owns, via project_ownerships."""
+
+    id: UUID
+    legal_name: str
+    tax_id: str | None = None
+    industry: str | None = None
+    status: str
+    # The role this user holds on the company (OWNER today; the column is free
+    # text, so it is passed through rather than assumed).
+    ownership_role: str
+    employee_count: int | None = None
+    applications_count: int = 0
+    total_requested_amount: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class AdminUserInvestmentSummary(BaseModel):
+    """The investor half of an account, aggregated.
+
+    Amounts are int VND for the same reason AdminLoanApplicationRow.
+    requested_amount is one: the column is Numeric(20, 0) and a float would
+    start losing whole dong somewhere above 2^53. Zero counts are real answers
+    (an SME account has no orders), not missing data.
+    """
+
+    orders_count: int
+    orders_amount: int
+    holdings_count: int
+    holdings_principal: int
+
+
+class AdminUserFullDetail(AdminUserDetail):
+    """The user preview panel's payload, in the spirit of AdminProjectDetail:
+    the whole panel in one response instead of the client stitching a list row
+    together with per-section calls.
+
+    Everything sensitive that a panel does not need stays out — no
+    password_hash, no totp_secret, no recovery codes; only their existence.
+    ``has_password`` is derived rather than stored: Google-OAuth users and
+    freshly invited admins have NO password at all, and an operator about to
+    suspend an account should know whether its owner could ever sign back in.
+    """
+
+    phone: str | None = None
+    bio: str | None = None
+    avatar_key: str | None = None
+    email_signature: str | None = None
+    has_password: bool
+    # Opt-in "a new device signed in" emails — see migration b8d41c60ea92.
+    signin_alerts_enabled: bool
+    totp_enabled: bool
+    totp_confirmed_at: datetime | None = None
+    onboarding_tour_completed_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    # Security & session insights
+    passkeys_count: int = 0
+    active_sessions_count: int = 0
+    last_sign_in_at: datetime | None = None
+    unused_recovery_codes_count: int = 0
+
+    # Verification & banking insights
+    kyc_status: str | None = None
+    linked_accounts_count: int = 0
+
+    # Empty for a user with no project ownerships, not an error.
+    projects: list[AdminUserProjectRef] = []
+    investments: AdminUserInvestmentSummary
+
+
 class AdminKybVerificationOut(BaseModel):
     """The verification ENGINE's half of the two-approval gate.
 
