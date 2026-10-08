@@ -62,6 +62,11 @@ class EmailSettingsOut(BaseModel):
     has_app_password: bool
     last_verified_at: datetime | None = None
     updated_at: datetime | None = None
+    # The admin's email signature (appended when "Include my email signature"
+    # is ticked). Optional: nothing is appended when name is blank.
+    signature_name: str | None = None
+    signature_title: str | None = None
+    signature_phone: str | None = None
 
 
 class EmailSettingsUpdate(BaseModel):
@@ -73,6 +78,11 @@ class EmailSettingsUpdate(BaseModel):
     # pasted exactly as Google displays it ("abcd efgh ijkl mnop").
     app_password: str | None = Field(default=None, max_length=64)
     enabled: bool
+    # The admin's email signature. Blank keeps the stored value for the
+    # existing fields (the whole row is sent each save).
+    signature_name: str | None = Field(default=None, max_length=80)
+    signature_title: str | None = Field(default=None, max_length=120)
+    signature_phone: str | None = Field(default=None, max_length=40)
 
     @field_validator("gmail_address")
     @classmethod
@@ -86,6 +96,13 @@ class EmailSettingsUpdate(BaseModel):
         if not value:
             raise ValueError("The sender name cannot be blank")
         return value
+
+    @field_validator("signature_name", "signature_title", "signature_phone")
+    @classmethod
+    def _signature_single_line(cls, value: str | None) -> str | None:
+        # A newline in a signature line would let it inject extra lines into
+        # the message body. Single line, blank kept as None.
+        return _single_line(value, "A signature field") or None
 
     @field_validator("app_password")
     @classmethod
@@ -140,6 +157,8 @@ class EmailContent(BaseModel):
     body: str = Field(min_length=1, max_length=10_000)
     button_label: str | None = Field(default=None, max_length=60)
     button_url: str | None = Field(default=None, max_length=2_000)
+    # Append the admin's signature (from their email settings) to the message.
+    include_signature: bool = False
 
     @field_validator("subject")
     @classmethod

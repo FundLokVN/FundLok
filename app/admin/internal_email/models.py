@@ -57,6 +57,12 @@ class EmailSettings(Base):
     enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     # Set by a successful test email.
     last_verified_at = Column(DateTime(timezone=True), nullable=True)
+    # The admin's email signature, appended to a message when they tick
+    # "Include my email signature" in the composer. Optional: nothing is
+    # appended when name is blank.
+    signature_name = Column(Text, nullable=True)
+    signature_title = Column(Text, nullable=True)
+    signature_phone = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

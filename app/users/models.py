@@ -34,6 +34,11 @@ class User(Base):
     full_name = Column(String, nullable=True)
     avatar_key = Column(Text, nullable=True)
     bio = Column(Text, nullable=True)
+    # Free-text signature appended to this user's outgoing emails. Markdown is
+    # accepted as-is; rendering happens at the send site (template escape), the
+    # same as any other user-supplied text. Nullable: nothing is appended when
+    # blank.
+    email_signature = Column(Text, nullable=True)
     role = Column(Text, nullable=True)  # null until the user selects a role post-registration
     email_verified = Column(Boolean, nullable=False, server_default="false")
     status = Column(Text, nullable=False, server_default="ACTIVE")

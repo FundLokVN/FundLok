@@ -44,6 +44,7 @@ def user_me_payload(user: User) -> dict:
         "status": user.status,
         "email_verified": user.email_verified,
         "bio": user.bio,
+        "email_signature": user.email_signature,
         "avatar_url": build_avatar_url(user),
         # Lets the profile page tell "change your password" from "set one for
         # the first time" (OAuth-only accounts have no hash). Never expose the
@@ -120,6 +121,9 @@ async def update_user_profile(db: AsyncSession, body: UserUpdateRequest, current
 
     if "bio" in data:
         current_user.bio = data["bio"]
+
+    if "email_signature" in data:
+        current_user.email_signature = data["email_signature"]
 
     db.add(current_user)
     await db.flush()

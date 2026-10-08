@@ -111,6 +111,9 @@ def _out(row: EmailSettings | None) -> EmailSettingsOut:
         has_app_password=has_password,
         last_verified_at=row.last_verified_at,
         updated_at=row.updated_at,
+        signature_name=row.signature_name,
+        signature_title=row.signature_title,
+        signature_phone=row.signature_phone,
     )
 
 
@@ -124,6 +127,9 @@ def _audit_state(row: EmailSettings | None) -> dict | None:
         "from_name": row.from_name,
         "enabled": row.enabled,
         "has_app_password": bool(row.app_password_encrypted),
+        "signature_name": row.signature_name,
+        "signature_title": row.signature_title,
+        "signature_phone": row.signature_phone,
     }
 
 
@@ -171,6 +177,9 @@ async def update_settings(
     row.gmail_address = body.gmail_address
     row.from_name = body.from_name
     row.enabled = body.enabled
+    row.signature_name = body.signature_name
+    row.signature_title = body.signature_title
+    row.signature_phone = body.signature_phone
     if encrypted is not None:
         row.app_password_encrypted = encrypted
     if credentials_changed:
@@ -287,13 +296,31 @@ def _preview_logo_src() -> str | None:
     return "data:image/png;base64," + base64.b64encode(logo).decode()
 
 
-def _render(content: EmailContent, *, for_preview: bool = False) -> tuple[str, str]:
-    """(html, text) for an admin's message."""
+def _render(
+    content: EmailContent,
+    *,
+    signature_name: str | None = None,
+    signature_title: str | None = None,
+    signature_phone: str | None = None,
+    for_preview: bool = False,
+) -> tuple[str, str]:
+    """(html, text) for an admin's message.
+
+    The signature is appended only when the admin ticked "Include my email
+    signature" AND has set a signature name. A name with no title/phone
+    still shows; a ticked box with no name shows nothing (there is nothing to
+    sign with).
+    """
+    include_signature = content.include_signature and bool(signature_name)
     context = {
         "heading": content.heading or "",
         "body": content.body,
         "button_label": content.button_label or "",
         "button_url": content.button_url or "",
+        "include_signature": include_signature,
+        "signature_name": signature_name or "",
+        "signature_title": signature_title or "",
+        "signature_phone": signature_phone or "",
     }
     if for_preview:
         logo_src = _preview_logo_src()
@@ -304,12 +331,35 @@ def _render(content: EmailContent, *, for_preview: bool = False) -> tuple[str, s
     lines = [content.heading, content.body] if content.heading else [content.body]
     if content.button_url:
         lines.append(f"{content.button_label}: {content.button_url}")
-    text = "\n\n".join(lines) + "\n\n--\nFundLok"
+    if include_signature:
+        sig = [signature_name]
+        if signature_title:
+            sig.append(signature_title)
+        if signature_phone:
+            sig.append(f"Mobile: {signature_phone}")
+        text = "\n\n".join(lines) + "\n\n" + "\n".join(sig)
+    else:
+        text = "\n\n".join(lines) + "\n\n--\nFundLok"
     return html, text
 
 
-def preview(content: EmailContent) -> EmailPreview:
-    html, _ = _render(content, for_preview=True)
+async def preview(db: AsyncSession, content: EmailContent, *, actor_id: UUID) -> EmailPreview:
+    """The rendered email, exactly as it would be sent. Sends nothing.
+
+    The signature comes from the admin's own settings (set under Email
+    settings), so the preview shows the same signature a send would.
+    """
+    row = await _row(db, actor_id)
+    signature_name = row.signature_name if row is not None else None
+    signature_title = row.signature_title if row is not None else None
+    signature_phone = row.signature_phone if row is not None else None
+    html, _ = _render(
+        content,
+        signature_name=signature_name,
+        signature_title=signature_title,
+        signature_phone=signature_phone,
+        for_preview=True,
+    )
     return EmailPreview(subject=content.subject, html=html)
 
 
@@ -573,7 +623,12 @@ async def send(
         )
     policy = await get_policy(db)
     recipients = _recipients(list(body.to), policy.allowed_domains)
-    html, text = _render(body)
+    html, text = _render(
+        body,
+        signature_name=account.signature_name,
+        signature_title=account.signature_title,
+        signature_phone=account.signature_phone,
+    )
     log = await _send_logged(
         db,
         account=account,
@@ -587,6 +642,7 @@ async def send(
             "body": body.body,
             "button_label": body.button_label,
             "button_url": body.button_url,
+            "include_signature": body.include_signature,
         },
         html=html,
         text=text,

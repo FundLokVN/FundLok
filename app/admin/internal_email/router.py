@@ -77,10 +77,11 @@ async def send_test_email(
 @router.post("/preview", response_model=EmailPreview)
 async def preview_email(
     body: EmailContent,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """The rendered email, exactly as it would be sent. Sends nothing."""
-    return service.preview(body)
+    return await service.preview(db, body, actor_id=current_user.id)
 
 
 @router.post("/send", response_model=InternalEmailOut)
