@@ -239,3 +239,44 @@ async def test_no_alert_when_the_preference_is_off(client, make_user, monkeypatc
         headers={"user-agent": EDGE_WINDOWS},
     )
     assert sent == [], "alerts are opt-in"
+
+
+# --- admin self-service -----------------------------------------------------
+
+
+async def test_admin_can_toggle_their_own_signin_alerts(client, make_admin):
+    """Admins are users: the security-settings endpoints have no role gate, so
+    the /admin/security tab (which reuses them) works for an admin's own
+    account exactly as /dashboard/security does for everyone else."""
+    admin = await make_admin()
+    resp = await client.get(
+        "/users/me/security-preferences", headers=auth_headers(admin)
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["signin_alerts_enabled"] is False
+
+    on = await client.patch(
+        "/users/me/security-preferences",
+        json={"signin_alerts_enabled": True},
+        headers=auth_headers(admin),
+    )
+    assert on.status_code == 200, on.text
+    assert on.json()["signin_alerts_enabled"] is True
+
+    events = (
+        await client.get("/auth/security-events", headers=auth_headers(admin))
+    ).json()
+    assert any(e["action"] == "SIGNIN_ALERTS_CHANGED" for e in events), events
+
+
+async def test_admin_sees_their_own_sessions_and_events(client, make_admin):
+    admin = await make_admin()
+    sessions = (
+        await client.get("/auth/sessions", headers=auth_headers(admin))
+    ).json()
+    assert len(sessions) >= 1, "the admin's own sign-in must appear"
+
+    events = (
+        await client.get("/auth/security-events", headers=auth_headers(admin))
+    ).json()
+    assert len(events) >= 1, "the admin's own security history must appear"
