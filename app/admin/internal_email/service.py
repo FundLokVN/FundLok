@@ -765,11 +765,16 @@ async def send(
 
 
 async def list_messages(
-    db: AsyncSession, *, actor: User, limit: int
+    db: AsyncSession, *, actor: User, limit: int, offset: int = 0
 ) -> list[InternalEmailOut]:
     """An admin sees their own sends; a system admin sees everyone's, which is
     the oversight of what goes out under FundLok's name."""
-    query = select(InternalEmail).order_by(InternalEmail.created_at.desc()).limit(limit)
+    query = (
+        select(InternalEmail)
+        .order_by(InternalEmail.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     if actor.role != Role.SYSTEM_ADMIN.value:
         query = query.where(InternalEmail.sent_by == actor.id)
     rows = (await db.execute(query)).scalars()
