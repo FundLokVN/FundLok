@@ -995,13 +995,18 @@ async def invite_admin(
         await db.rollback()
         raise HTTPException(status_code=409, detail="An account with this email already exists") from exc
 
+    is_external = not email.strip().lower().endswith("@fundlok.com")
     append_audit(
         db,
         entity_type="USER",
         entity_id=user.id,
         action="ADMIN_INVITED",
         actor_id=actor.id,
-        after_state={"email": email, "role": Role.ADMIN.value},
+        after_state={
+            "email": email,
+            "role": Role.ADMIN.value,
+            "is_external_domain": is_external,
+        },
         ip_address=ip_address,
     )
     await db.commit()
