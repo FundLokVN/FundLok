@@ -14,12 +14,23 @@ async def create_contract(db: AsyncSession, body: ContractCreate) -> Contract:
             status_code=400,
             detail="Score run must exist and be LOCKED",
         )
-    result = await db.execute(select(LoanApplication).where(LoanApplication.id == body.application_id))
+    result = await db.execute(
+        select(LoanApplication).where(LoanApplication.id == body.application_id).with_for_update()
+    )
     app = result.scalar_one_or_none()
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
     if sr.application_id != app.id:
         raise HTTPException(status_code=400, detail="Score run does not match application")
+
+    existing_contract = await db.execute(
+        select(Contract).where(Contract.application_id == app.id)
+    )
+    if existing_contract.scalar_one_or_none():
+        raise HTTPException(
+            status_code=409,
+            detail="A contract already exists for this application",
+        )
     # The operator half of the two-approval gate. A LOCKED score run is the
     # ENGINE saying the numbers work; this is a human saying the request should
     # proceed. Both are required, and PENDING is not a yes — an unreviewed

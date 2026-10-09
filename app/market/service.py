@@ -94,7 +94,7 @@ async def place_order(
                 )
             return existing, False
 
-    result = await db.execute(select(Listing).where(Listing.id == listing_id))
+    result = await db.execute(select(Listing).where(Listing.id == listing_id).with_for_update())
     lst = result.scalar_one_or_none()
     if not lst:
         raise HTTPException(status_code=404, detail="Listing not found")

@@ -391,17 +391,27 @@ class MicrosoftOAuthProvider(OAuthProviderBase):
         return f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/v2.0/.well-known/openid-configuration"
 
     def map_claims(self, claims: dict) -> OAuthUserInfo:
+        # Mitigate nOAuth: preferred_username is an unverified UPN editable by users in custom tenants.
+        # Genuine email must come from verified email claim.
+        email = claims.get("email") or claims.get("preferred_username")
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Microsoft account does not provide an email address",
+            )
         return OAuthUserInfo(
             provider=self.provider,
             provider_subject=claims["sub"],
-            email=claims.get("preferred_username") or claims["email"],
+            email=email,
             full_name=claims.get("name"),
-            email_verified=True,
+            email_verified=bool(claims.get("email")),
         )
 
     def _issuer_is_valid(self, issuer: str | None) -> bool:
         if not issuer:
             return False
+        if settings.MICROSOFT_TENANT_ID != "common":
+            return issuer == f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/v2.0"
         return issuer.startswith("https://login.microsoftonline.com/") and issuer.endswith("/v2.0")
 
 
