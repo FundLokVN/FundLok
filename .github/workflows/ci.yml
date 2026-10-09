@@ -3,11 +3,11 @@
 # docs/deployment/ci-cd-pipeline.md).
 #
 #   PR to preview / main  -> migration check + tests + dependency audit
-#   push to preview       -> migration check + tests -> deploy "staging"
-#   push to main          -> migration check + tests -> deploy "prod-api"
+#   push to preview       -> migration check + tests + dependency audit -> deploy "staging"
+#   push to main          -> migration check + tests + dependency audit -> deploy "prod-api"
 #
-# Deploy jobs are gated with `needs:` — a failing test suite never ships. The
-# dependency audit is intentionally outside that gate; see the job for why.
+# Deploy jobs are gated with `needs: [migration-check, tests, dependency-audit]`
+# — deployment only runs when all CI pipelines pass.
 # Google Cloud auth is keyless via Workload Identity Federation.
 #
 # Required GitHub repository secrets:
@@ -135,11 +135,8 @@ jobs:
     name: Audit Dependencies
     runs-on: ubuntu-latest
 
-    # Deliberately NOT in the deploy jobs' `needs:`. A new advisory published
-    # against a pin we never touched would otherwise block shipping a hotfix --
-    # the same "upstream turns CI red with no change to our code" failure that
-    # made requirements.txt fully pinned in the first place. This job goes red
-    # on the PR so the finding is visible; it does not gate the deploy.
+    # Gating the deploy jobs via `needs: [migration-check, tests, dependency-audit]`.
+    # Deploys will only trigger if all CI checks, including vulnerability audit, pass.
 
     steps:
       - name: Check out repository
@@ -180,7 +177,7 @@ jobs:
   deploy-staging:
     name: Deploy to Cloud Run (staging)
     runs-on: ubuntu-latest
-    needs: [migration-check, tests]
+    needs: [migration-check, tests, dependency-audit]
     if: github.event_name == 'push' && github.ref == 'refs/heads/preview'
 
     permissions:
@@ -222,7 +219,7 @@ jobs:
   deploy-production:
     name: Deploy to Cloud Run (prod-api)
     runs-on: ubuntu-latest
-    needs: [migration-check, tests]
+    needs: [migration-check, tests, dependency-audit]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     permissions:

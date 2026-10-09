@@ -53,19 +53,20 @@ flowchart LR
     A[push or PR] --> B[Backend CI/CD workflow]
     B --> C1[migration-check job]
     B --> C2[tests job]
+    B --> C3[dependency-audit job]
     C1 --> G{branch?}
     C2 --> G
-    G -->|"push to dev"| S["deploy-staging → Cloud Run 'staging'"]
+    C3 --> G
+    G -->|"push to preview"| S["deploy-staging → Cloud Run 'staging'"]
     G -->|"push to main"| P["deploy-production → Cloud Run 'prod-api'"]
-    G -->|"PR / preview"| N[tests only — no deploy]
+    G -->|"PR"| N[tests only — no deploy]
     S --> R1[Cloud Build builds Dockerfile]
     P --> R1
     R1 --> R2["entrypoint.sh: alembic upgrade head"]
     R2 --> R3["uvicorn app.main:app on :8080"]
 ```
 
-Deploy jobs declare `needs: [migration-check, tests]` — **a failing test suite
-never deploys**. A `concurrency` group serializes runs per branch (no
+Deploy jobs declare `needs: [migration-check, tests, dependency-audit]` — **deploys only run when all CI jobs pass**. A `concurrency` group serializes runs per branch (no
 overlapping deploys; in-flight deploys are never cancelled).
 
 ---
