@@ -280,3 +280,19 @@ async def test_admin_sees_their_own_sessions_and_events(client, make_admin):
         await client.get("/auth/security-events", headers=auth_headers(admin))
     ).json()
     assert len(events) >= 1, "the admin's own security history must appear"
+
+
+async def test_security_events_pagination(client, make_admin):
+    admin = await make_admin()
+    resp_limit = await client.get(
+        "/auth/security-events?limit=1", headers=auth_headers(admin)
+    )
+    assert resp_limit.status_code == 200
+    assert len(resp_limit.json()) <= 1
+
+    resp_offset = await client.get(
+        "/auth/security-events?limit=1&offset=1000", headers=auth_headers(admin)
+    )
+    assert resp_offset.status_code == 200
+    assert len(resp_offset.json()) == 0
+

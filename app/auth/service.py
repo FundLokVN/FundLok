@@ -570,7 +570,9 @@ async def reset_password(
     return {"status": "success", "message": "Password reset successfully"}
 
 
-async def list_security_events(db: AsyncSession, user_id: UUID, *, limit: int = 20):
+async def list_security_events(
+    db: AsyncSession, user_id: UUID, *, limit: int = 20, offset: int = 0
+):
     """Recent security-relevant audit rows for one account, newest first.
 
     Filtered to SESSION/AUTH entity types: the audit log also carries business
@@ -585,6 +587,7 @@ async def list_security_events(db: AsyncSession, user_id: UUID, *, limit: int = 
         )
         .order_by(AuditLog.created_at.desc())
         .limit(limit)
+        .offset(offset)
     )
     return result.scalars().all()
 

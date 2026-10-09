@@ -404,6 +404,7 @@ _EVENT_SEVERITY = {
 @router.get("/security-events", response_model=List[SecurityEventOut])
 async def list_security_events(
     limit: int = 20,
+    offset: int = 0,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -414,7 +415,7 @@ async def list_security_events(
     security history — so only SESSION and AUTH entity types are returned.
     """
     rows = await service.list_security_events(
-        db, current_user.id, limit=min(max(limit, 1), 100)
+        db, current_user.id, limit=min(max(limit, 1), 100), offset=max(offset, 0)
     )
     return [
         SecurityEventOut(
