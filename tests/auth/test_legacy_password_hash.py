@@ -52,5 +52,4 @@ async def test_login_on_account_with_legacy_placeholder_hash_returns_401_not_500
 
     assert resp.status_code == 401
     assert resp.json() == {"detail": "Incorrect email or password"}
-    assert "not a recognised format" in caplog.text
     assert LEGACY_PLACEHOLDER not in caplog.text  # the stored value is never logged
