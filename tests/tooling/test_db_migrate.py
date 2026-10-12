@@ -204,8 +204,11 @@ def test_choose_tools_picks_oldest_install_new_enough_for_source():
 
 
 def test_choose_tools_explains_how_to_fix_when_none_is_new_enough():
-    with pytest.raises(MigrationError, match="brew install postgresql@16"):
+    with pytest.raises(MigrationError, match="Install client tools >= 16") as exc:
         choose_tools([(14, TOOLS)], 16)
+    # The install command depends on the OS running the test (brew / apt / Windows
+    # installer), so compare with whatever this platform's hint is, not a fixed one.
+    assert db_migrate.install_hint(16) in str(exc.value)
 
 
 def test_discover_tool_installs_reads_versions_from_bin_dir(tmp_path):

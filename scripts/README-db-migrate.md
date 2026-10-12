@@ -199,8 +199,10 @@ Extra flags pass through bun: `bun run db:copy --dry-run --verbose`.
 Unit tests (URL parsing, password handling, prompts, tool discovery, row-count comparison):
 
 ```bash
-.venv/bin/pytest tests/tooling -q
+bun run db:copy:test
 ```
+
+Because this is a local tool rather than part of the app, these tests are **not** in the default suite. CI, `bun run test` and `bun run docker:test` skip them, so they never block a deploy. `tests/tooling/conftest.py` holds the switch: they run only when `DB_MIGRATE_TESTS=1` is set, which `db:copy:test` does for you.
 
 The full copy was tested on macOS against local Docker Postgres 16 in these cases:
 - empty target;
