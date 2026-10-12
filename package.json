@@ -16,6 +16,7 @@
     "db:reset": "./scripts/reset_db.sh",
     "migrate": "./.venv/bin/alembic upgrade head",
     "db:migrate": "./.venv/bin/alembic upgrade head",
+    "db:copy": "bun scripts/db_copy.ts",
     "migrate:new": "./.venv/bin/alembic revision --autogenerate -m",
     "seed": "docker compose exec -T postgres psql -U fundlok -d fundlok_dev -v ON_ERROR_STOP=1 < scripts/seed_data.sql",
     "psql": "docker compose exec postgres psql -U fundlok -d fundlok_dev",
