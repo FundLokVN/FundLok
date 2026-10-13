@@ -22,7 +22,7 @@ test_refresh_token_hash_not_stored_in_plaintext.
 """
 from datetime import timedelta
 
-from jose import jwt
+import jwt
 
 from app.auth.service import hash_refresh_token
 from app.core.config import settings

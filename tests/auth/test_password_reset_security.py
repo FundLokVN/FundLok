@@ -12,7 +12,7 @@ tied to the password it was issued for, so any change to the password (this
 reset or another) spends every outstanding link.
 """
 import pytest
-from jose import jwt
+import jwt
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -161,7 +161,7 @@ async def test_the_token_does_not_carry_the_password_hash(client, make_user, res
 
     user = await make_user()
     token = await _request_link(client, user["email"], reset_links)
-    claims = jwt.get_unverified_claims(token)
+    claims = jwt.decode(token, options={"verify_signature": False})
     row = (await db_session.execute(select(User).where(User.email == user["email"]))).scalar_one()
 
     assert claims["purpose"] == "password_reset"

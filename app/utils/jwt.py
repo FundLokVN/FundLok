@@ -2,7 +2,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from uuid import UUID as PyUUID
 
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
@@ -100,7 +101,7 @@ async def get_current_user(
         if user_id is None:
             raise credentials_exception
         token_data = TokenData(user_id=user_id)
-    except JWTError:
+    except InvalidTokenError:
         raise credentials_exception
     try:
         uid = PyUUID(str(token_data.user_id))
@@ -147,7 +148,7 @@ def verify_email_token(token: str) -> str:
         if not user_id:
             raise HTTPException(status_code=400, detail="Invalid token claim")
         return user_id
-    except JWTError:
+    except InvalidTokenError:
         raise HTTPException(status_code=400, detail="Invalid or expired verification token")
 
 
@@ -180,7 +181,7 @@ def decode_password_reset_token(token: str) -> tuple[str, str | None]:
             algorithms=[settings.ALGORITHM],
             options={"verify_aud": False},
         )
-    except JWTError:
+    except InvalidTokenError:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
     if payload.get("purpose") != "password_reset":
         raise HTTPException(status_code=400, detail="Invalid token purpose")

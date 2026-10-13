@@ -3,7 +3,8 @@ import hmac
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -140,7 +141,7 @@ async def refresh_token_pair(
         user_id = payload.get("sub")
         if not user_id:
             raise credentials_exception
-    except JWTError:
+    except InvalidTokenError:
         raise credentials_exception
 
     token_hash = hash_refresh_token(refresh_token)

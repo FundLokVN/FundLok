@@ -1,20 +1,20 @@
 """Google ID tokens cannot be forged with Google's own public key.
 
-python-jose up to 3.5.0 (GHSA-3qf3-8w2g-rqmx: CVE-2026-85394, an incomplete
-fix for CVE-2024-33663) will verify an HS256 token using an RSA *public* key
-as the HMAC secret when that key is DER-encoded. A caller who downloads the
-provider's public key can then mint a token that verifies, as long as the
-code lets HS256 through. No fixed version exists.
+An HS256 token whose "secret" is a DER-encoded copy of the provider's public
+key (which anyone can download from the JWKS endpoint) verifies wherever a JWT
+library accepts raw bytes as an HMAC secret. python-jose 3.5.0 had exactly
+this exposure (GHSA-3qf3-8w2g-rqmx, CVE-2026-85394, an incomplete fix for
+CVE-2024-33663) and shipped no fixed release — which is why FundLok migrated
+to PyJWT.
 
 FundLok is not exposed. verify_id_token is the only place a public key meets
 jwt.decode, and two things independently stop the forgery there:
-1. _signing_algorithms never allows an HMAC algorithm (RS/ES/PS only), so
-   python-jose refuses an HS256 header before looking at the key;
-2. the key reaches jwt.decode as an RSA JWK, which python-jose refuses as an
-   HMAC secret ("Incorrect key type"); the advisory needs raw DER bytes.
+1. _signing_algorithms never allows an HMAC algorithm (RS/ES/PS only), so an
+   HS256 header is refused before the key is ever consulted;
+2. PyJWT itself refuses a PEM/DER-formatted key as an HMAC secret
+   (InvalidKeyError), a second layer python-jose lacked.
 Every other decode uses the symmetric SECRET_KEY with algorithms pinned to
-HS256. These tests pin both layers and the end result, which keeps the
-pip-audit exception for this advisory in .github/workflows/ci.yml honest.
+HS256. These tests pin both layers and the end result.
 """
 import base64
 import hashlib
@@ -22,11 +22,11 @@ import hmac
 import json
 import time
 
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
-from jose import jwt
 
 from app.oauth.service import GoogleOAuthProvider
 
@@ -114,16 +114,16 @@ def test_a_genuine_rs256_id_token_is_accepted(provider, google_key):
     assert claims["email"] == "victim@example.com"
 
 
-def test_the_forgery_is_real_where_hs256_is_allowed(google_key):
-    # python-jose 3.5.0 accepts the DER-keyed forgery when HS256 is allowed,
-    # which is the advisory. If this starts failing, python-jose has fixed
-    # it: drop the --ignore-vuln for it in .github/workflows/ci.yml.
+def test_even_where_hs256_is_allowed_pyjwt_refuses_the_der_keyed_forgery(google_key):
+    # Layer 2 on its own: even if HS256 were ever allowed, PyJWT refuses a
+    # PEM/DER-formatted key as an HMAC secret — the exact behavior
+    # python-jose 3.5.0 lacked (GHSA-3qf3-8w2g-rqmx). Pinned so an upgrade
+    # that relaxes it is noticed.
     der = _public_key_bytes(google_key, serialization.Encoding.DER)
     forged = _forge_hs256(der)
 
-    claims = jwt.decode(forged, der, algorithms=["HS256"], audience=CLIENT_ID)
-
-    assert claims["email"] == "victim@example.com"
+    with pytest.raises(jwt.InvalidKeyError):
+        jwt.decode(forged, der, algorithms=["HS256"], audience=CLIENT_ID)
 
 
 @pytest.mark.parametrize("encoding", [serialization.Encoding.DER, serialization.Encoding.PEM])

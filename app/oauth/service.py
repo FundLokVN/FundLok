@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, status
-from jose import jwt
+import jwt
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, select, update
@@ -102,11 +102,14 @@ class OAuthProviderBase(ABC):
             discovery = self._fetch_json(self.discovery_url)
             jwks = self._fetch_json(discovery["jwks_uri"])
             header = jwt.get_unverified_header(id_token)
-            key = self._find_key(jwks["keys"], header.get("kid"))
+            jwk = self._find_key(jwks["keys"], header.get("kid"))
+            # PyJWT does not accept a raw JWK dict as the key: PyJWK parses it
+            # into a cryptography public key (kty RSA/EC -> RS/ES family).
+            key = jwt.PyJWK(jwk).key
             claims = jwt.decode(
                 id_token,
                 key,
-                algorithms=self._signing_algorithms(discovery, key),
+                algorithms=self._signing_algorithms(discovery, jwk),
                 audience=self.client_id,
                 options={"verify_iss": False},
             )

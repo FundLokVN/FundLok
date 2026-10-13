@@ -3,7 +3,7 @@ import uuid
 from unittest.mock import AsyncMock, patch
 
 import httpx
-from jose import jwt
+import jwt
 
 from app.core.config import settings
 from app.notifications import realtime
