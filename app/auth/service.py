@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import jwt
 from jwt import InvalidTokenError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import BackgroundTasks, HTTPException, status
@@ -70,37 +70,47 @@ def hash_refresh_token(token: str) -> str:
 async def create_token_pair(db: AsyncSession, user_id: UUID | str,
     *,
     session_id: UUID | None = None,
+    session_deadline: datetime | None = None,
     user_agent: str | None = None,
     ip_address: str | None = None,
 ) -> dict:
     """Issue an access/refresh JWT pair and persist the refresh token (hashed)
     in `refresh_tokens` so it can be looked up, revoked, and rotated.
 
+    `session_id` and `session_deadline` are passed on rotation to continue an
+    existing sign-in; a fresh sign-in leaves both unset and starts a new
+    session whose deadline is SESSION_MAX_LIFETIME_DAYS from now. The refresh
+    token never outlives that deadline, however often it is rotated.
+
     Only stages the RefreshToken row via db.add(); the caller controls the
     transaction boundary (commit), matching the rest of this module.
     """
     uid = user_id if isinstance(user_id, UUID) else UUID(str(user_id))
+    now = datetime.now(timezone.utc)
+    # A fresh sign-in starts a session; a rotation carries the existing one
+    # forward so the device does not look new after every refresh.
+    sid = session_id or uuid4()
+    deadline = session_deadline or now + timedelta(days=settings.SESSION_MAX_LIFETIME_DAYS)
 
+    # `sid` binds the access token to this session: get_current_user refuses it
+    # once the session has no live refresh token, so logging out ends it
+    # immediately instead of when it expires.
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": str(uid)}, expires_delta=access_token_expires
+        data={"sub": str(uid), "sid": str(sid)}, expires_delta=access_token_expires
     )
 
-    refresh_expires_delta = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    expires_at = min(now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS), deadline)
     refresh_token = create_access_token(
         data={"sub": str(uid), "typ": "refresh"},
-        expires_delta=refresh_expires_delta,
+        expires_delta=expires_at - now,
     )
-    now = datetime.now(timezone.utc)
-    expires_at = now + refresh_expires_delta
     db.add(
         RefreshToken(
             user_id=uid,
             token_hash=hash_refresh_token(refresh_token),
             expires_at=expires_at,
-            # A fresh sign-in starts a session; a rotation carries the existing
-            # one forward so the device does not look new after every refresh.
-            session_id=session_id or uuid4(),
+            session_id=sid,
             user_agent=user_agent,
             ip_address=ip_address,
             last_used_at=now,
@@ -108,6 +118,53 @@ async def create_token_pair(db: AsyncSession, user_id: UUID | str,
     )
 
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
+
+
+async def _revoke_session(
+    db: AsyncSession, user_id: UUID, session_id: UUID, now: datetime
+) -> int:
+    """Revoke every live token in one session; returns how many there were.
+
+    A session can briefly hold more than one live token — two refreshes racing
+    inside the reuse grace window each get a pair — so ending a session means
+    all of them, never just the token in hand.
+    """
+    result = await db.execute(
+        update(RefreshToken)
+        .where(
+            RefreshToken.user_id == user_id,
+            RefreshToken.session_id == session_id,
+            RefreshToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+    )
+    return result.rowcount or 0
+
+
+async def _session_has_live_token(
+    db: AsyncSession, user_id: UUID, session_id: UUID, now: datetime
+) -> bool:
+    result = await db.execute(
+        select(RefreshToken.id)
+        .where(
+            RefreshToken.user_id == user_id,
+            RefreshToken.session_id == session_id,
+            RefreshToken.revoked_at.is_(None),
+            RefreshToken.expires_at > now,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+# How long a just-rotated refresh token is still honoured. Rotation makes every
+# refresh token single-use, but a browser routinely sends the same one twice
+# within a moment: two tabs whose access tokens lapse together, or proxy.ts
+# refreshing a page load while lib/api-client.ts refreshes a query. The loser
+# of that race is not a thief, and refusing it — let alone treating it as theft
+# — signs the user out. Same idea and order of magnitude as Okta's 30-second
+# refresh-token grace period and Auth0's "reuse interval".
+REFRESH_REUSE_GRACE = timedelta(seconds=30)
 
 
 async def refresh_token_pair(
@@ -120,11 +177,24 @@ async def refresh_token_pair(
     """Verify + rotate a refresh token (HANDOFF-02 Fix B: stateful, revocable).
 
     JWT signature/expiry is checked first (cheap, no DB hit for garbage
-    input); the DB is then the source of truth for revocation -- missing,
-    already-revoked, or expired rows are all rejected. On success the
-    presented token is revoked and a new pair is issued and persisted, which
-    is proper rotation with reuse detection: a revoked token can never be
-    used again, including by an attacker who captured it before rotation.
+    input); the DB is then the source of truth for revocation. On success the
+    presented token is revoked and a new pair is issued in the same session.
+
+    A token that was already rotated is one of two things:
+
+      * within REFRESH_REUSE_GRACE of its rotation, and its session still
+        live: the same browser racing itself. It gets a fresh pair too.
+      * later than that: a copy is being replayed — the token was stolen, or
+        the thief rotated it first and this is the real user arriving second.
+        Either way one of the two holders is not the user, and there is no
+        telling which, so the whole session is revoked (RFC 9700 §4.14.2) and
+        the event goes on the user's security history. That is the reuse
+        detection; before it, a replay was merely refused and whoever had
+        rotated first kept the session.
+
+    The row is locked (FOR UPDATE) so two concurrent refreshes of one token
+    are decided one after the other instead of both passing the "not revoked"
+    check and silently forking the session.
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -145,12 +215,49 @@ async def refresh_token_pair(
         raise credentials_exception
 
     token_hash = hash_refresh_token(refresh_token)
-    result = await db.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
+    result = await db.execute(
+        select(RefreshToken).where(RefreshToken.token_hash == token_hash).with_for_update()
+    )
     stored = result.scalar_one_or_none()
 
     now = datetime.now(timezone.utc)
-    if stored is None or stored.revoked_at is not None or stored.expires_at < now:
+    if stored is None or stored.expires_at < now:
         raise credentials_exception
+
+    if stored.revoked_at is not None:
+        # Rows from before session ids existed cannot be grouped into a
+        # session, so they get neither the grace window nor family revocation.
+        if stored.session_id is None:
+            raise credentials_exception
+        session_live = await _session_has_live_token(
+            db, stored.user_id, stored.session_id, now
+        )
+        # A live session is what tells a rotation apart from a sign-out:
+        # logout and every revoke path end the whole session, so a token they
+        # revoked never finds one and can never be revived by the grace window.
+        if not session_live:
+            raise credentials_exception
+        if now - stored.revoked_at > REFRESH_REUSE_GRACE:
+            revoked = await _revoke_session(db, stored.user_id, stored.session_id, now)
+            append_audit(
+                db,
+                entity_type="SESSION",
+                entity_id=stored.user_id,
+                action="SESSION_REUSE_DETECTED",
+                actor_id=stored.user_id,
+                after_state={
+                    "session_id": str(stored.session_id),
+                    "sessions_revoked": revoked,
+                    "user_agent": user_agent,
+                },
+                ip_address=ip_address,
+            )
+            # Committed here, not by the caller: the caller only commits on
+            # success, and this revocation must stick although we refuse.
+            await db.commit()
+            raise credentials_exception
+        # Inside the grace window: fall through and issue a pair in the same
+        # session. The presented row is already revoked; leave it so.
 
     # Refresh authenticates by token, not by get_current_user, so it does NOT
     # inherit the suspension check from there. Without this, a suspended
@@ -163,7 +270,30 @@ async def refresh_token_pair(
     if owner is None or owner.status == USER_STATUS_SUSPENDED:
         raise credentials_exception
 
-    stored.revoked_at = now
+    # The session's hard deadline, counted from its original sign-in: the
+    # earliest row it has (rotation keeps revoked rows, it never deletes
+    # them). A pre-session-id row is its own session, so its own age.
+    session_started = stored.created_at
+    if stored.session_id is not None:
+        session_started = (
+            await db.execute(
+                select(func.min(RefreshToken.created_at)).where(
+                    RefreshToken.user_id == stored.user_id,
+                    RefreshToken.session_id == stored.session_id,
+                )
+            )
+        ).scalar_one()
+    deadline = session_started + timedelta(days=settings.SESSION_MAX_LIFETIME_DAYS)
+    if now >= deadline:
+        if stored.session_id is not None:
+            await _revoke_session(db, stored.user_id, stored.session_id, now)
+        else:
+            stored.revoked_at = now
+        await db.commit()
+        raise credentials_exception
+
+    if stored.revoked_at is None:
+        stored.revoked_at = now
     stored.last_used_at = now
     db.add(stored)
 
@@ -174,13 +304,18 @@ async def refresh_token_pair(
         db,
         user_id,
         session_id=stored.session_id,
+        session_deadline=deadline,
         user_agent=user_agent or stored.user_agent,
         ip_address=ip_address or stored.ip_address,
     )
 
 
 async def logout(db: AsyncSession, refresh_token: str | None) -> dict:
-    """Revoke the presented refresh token server-side (HANDOFF-02 Fix B).
+    """End the session the presented refresh token belongs to (HANDOFF-02 Fix B).
+
+    The whole session, not just this token: every live token in it is revoked,
+    which also kills its access tokens at once (get_current_user checks the
+    session), and leaves nothing for the reuse grace window to revive.
 
     Forgiving by design: a missing, already-revoked, or unrecognized token
     still returns success -- logout should never fail just because the
@@ -190,8 +325,11 @@ async def logout(db: AsyncSession, refresh_token: str | None) -> dict:
         token_hash = hash_refresh_token(refresh_token)
         result = await db.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
         stored = result.scalar_one_or_none()
-        if stored is not None and stored.revoked_at is None:
-            stored.revoked_at = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        if stored is not None and stored.session_id is not None:
+            await _revoke_session(db, stored.user_id, stored.session_id, now)
+        elif stored is not None and stored.revoked_at is None:
+            stored.revoked_at = now
             db.add(stored)
     return {"status": "success", "message": "Logged out successfully"}
 
@@ -289,13 +427,15 @@ async def is_unseen_device(
 
 
 async def list_sessions(
-    db: AsyncSession, user_id: UUID, *, current_token: str | None = None
+    db: AsyncSession, user_id: UUID, *, current_session_id: UUID | None = None
 ) -> list[dict]:
-    """Live sign-ins for a user, newest first.
+    """Live sign-ins for a user, most recently used first.
 
-    One row per session: rotation revokes the previous row, so the unrevoked,
-    unexpired rows ARE the open sessions. The row matching the caller's own
-    refresh token is flagged so the UI can label it and refuse to revoke it.
+    One entry per session. Rotation revokes the previous row, so a session
+    normally has exactly one live row — but two refreshes racing inside the
+    reuse grace window leave it two for a while, and listing both would show
+    one device twice. The caller's own session (the `sid` of the access token
+    it presented) is flagged so the UI can label it and refuse to revoke it.
     """
     now = datetime.now(timezone.utc)
     result = await db.execute(
@@ -307,46 +447,46 @@ async def list_sessions(
         )
         .order_by(RefreshToken.last_used_at.desc().nullslast())
     )
-    rows = result.scalars().all()
-    current_hash = hash_refresh_token(current_token) if current_token else None
 
-    return [
-        {
-            "session_id": row.session_id,
-            "user_agent": row.user_agent,
-            "ip_address": row.ip_address,
-            "created_at": row.created_at,
-            "last_used_at": row.last_used_at,
-            "current": row.token_hash == current_hash,
-        }
-        for row in rows
+    sessions: dict[UUID, dict] = {}
+    for row in result.scalars().all():
         # A pre-migration row has no session_id and cannot be addressed by the
         # revoke endpoints, so listing it would offer an action that fails.
-        if row.session_id is not None
-    ]
+        # setdefault keeps the first row seen, i.e. the most recently used.
+        if row.session_id is None:
+            continue
+        sessions.setdefault(
+            row.session_id,
+            {
+                "session_id": row.session_id,
+                "user_agent": row.user_agent,
+                "ip_address": row.ip_address,
+                "created_at": row.created_at,
+                "last_used_at": row.last_used_at,
+                "current": row.session_id == current_session_id,
+            },
+        )
+    return list(sessions.values())
 
 
 async def revoke_session(
-    db: AsyncSession, user_id: UUID, session_id: UUID, *, current_token: str | None
+    db: AsyncSession,
+    user_id: UUID,
+    session_id: UUID,
+    *,
+    current_session_id: UUID | None,
 ) -> dict:
     """Revoke every live token in one session — signing that device out.
 
     Scoped to the caller's own user_id: a session id is a UUID, but it must
     never be usable to sign out somebody else's device.
     """
-    current_hash = hash_refresh_token(current_token) if current_token else None
-    result = await db.execute(
-        select(RefreshToken).where(
-            RefreshToken.user_id == user_id,
-            RefreshToken.session_id == session_id,
-            RefreshToken.revoked_at.is_(None),
-        )
-    )
-    rows = result.scalars().all()
-    if not rows:
+    if not await _session_has_live_token(
+        db, user_id, session_id, datetime.now(timezone.utc)
+    ):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if current_hash is not None and any(r.token_hash == current_hash for r in rows):
+    if session_id == current_session_id:
         # Signing out the device you are using is logout, not session
         # management — different endpoint, and it also clears the cookies.
         raise HTTPException(
@@ -354,19 +494,19 @@ async def revoke_session(
             detail="Cannot revoke the session you are signed in with; use logout",
         )
 
-    now = datetime.now(timezone.utc)
-    for row in rows:
-        row.revoked_at = now
-        db.add(row)
-    return {"revoked": len(rows)}
+    revoked = await _revoke_session(db, user_id, session_id, datetime.now(timezone.utc))
+    return {"revoked": revoked}
 
 
 async def revoke_other_sessions(
-    db: AsyncSession, user_id: UUID, *, current_token: str | None
+    db: AsyncSession, user_id: UUID, *, current_session_id: UUID | None
 ) -> dict:
     """Sign out everywhere except here — the "I think someone else is in my
-    account" button. The caller's own session is deliberately spared."""
-    current_hash = hash_refresh_token(current_token) if current_token else None
+    account" button. The caller's own session is deliberately spared; with no
+    current session (a password reset, made signed-out) every one is revoked.
+
+    Counts sessions, not tokens, so "3 devices signed out" means three devices
+    even if one of them was mid-rotation."""
     result = await db.execute(
         select(RefreshToken).where(
             RefreshToken.user_id == user_id,
@@ -374,14 +514,15 @@ async def revoke_other_sessions(
         )
     )
     now = datetime.now(timezone.utc)
-    revoked = 0
+    ended: set[UUID | None] = set()
     for row in result.scalars().all():
-        if current_hash is not None and row.token_hash == current_hash:
+        if current_session_id is not None and row.session_id == current_session_id:
             continue
         row.revoked_at = now
         db.add(row)
-        revoked += 1
-    return {"revoked": revoked}
+        # A pre-session-id row is a sign-in of its own.
+        ended.add(row.session_id if row.session_id is not None else row.id)
+    return {"revoked": len(ended)}
 
 
 async def register_user(
@@ -552,7 +693,7 @@ async def reset_password(
     # account is compromised; leaving existing sessions alive meant whoever was
     # already in stayed in with the new password set. Unlike change_password
     # there is no "current" session to spare: this request is unauthenticated.
-    revoked = await revoke_other_sessions(db, user.id, current_token=None)
+    revoked = await revoke_other_sessions(db, user.id, current_session_id=None)
     append_audit(
         db,
         entity_type="AUTH",

@@ -6,10 +6,10 @@ that one only ever sets a FIRST password (overwriting an existing one from a
 borrowed session would be account takeover), so changing an existing password
 requires the current one as proof the session is not borrowed.
 """
-import pytest
 from sqlalchemy import select
 
-from app.users.models import RefreshToken, User
+from app.auth.service import hash_refresh_token
+from app.users.models import RefreshToken
 from conftest import auth_headers
 
 CHROME = (
@@ -86,7 +86,11 @@ async def test_change_password_revokes_every_other_session(
         headers=auth_headers(user),
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["sessions_revoked"] >= 2
+    # The other sign-in only. This used to revoke the session making the
+    # change as well (and assert >= 2), contradicting the name of this test
+    # and change_password's docstring; the user was then signed out of the
+    # device they had just secured.
+    assert resp.json()["sessions_revoked"] == len(live_before) - 1
 
     live_after = (
         await db_session.execute(
@@ -96,7 +100,9 @@ async def test_change_password_revokes_every_other_session(
             )
         )
     ).scalars().all()
-    assert live_after == []
+    assert [row.token_hash for row in live_after] == [
+        hash_refresh_token(user["refresh_token"])
+    ]
 
 
 async def test_change_password_rejects_reusing_the_same_password(client, make_user):

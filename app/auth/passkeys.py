@@ -21,7 +21,6 @@ Two properties are load-bearing and easy to lose in a refactor:
 from __future__ import annotations
 
 import base64
-import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status

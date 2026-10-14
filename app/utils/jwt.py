@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.auth.schemas import TokenData
-from app.users.models import USER_STATUS_SUSPENDED, User
+from app.users.models import USER_STATUS_SUSPENDED, RefreshToken, User
 
 # HTTPBearer parses Authorization: Bearer <token> reliably for API clients (curl, Postman).
 http_bearer = HTTPBearer(auto_error=False)
@@ -105,7 +105,12 @@ async def get_current_user(
         raise credentials_exception
     try:
         uid = PyUUID(str(token_data.user_id))
-    except (ValueError, TypeError):
+        # The sign-in this token belongs to (see the session check below).
+        # Required: every session token is minted by create_token_pair, which
+        # always sets it, so a token without one predates this check and is
+        # refused — the client's refresh then issues one that has it.
+        session_id = PyUUID(str(payload["sid"]))
+    except (KeyError, ValueError, TypeError):
         raise credentials_exception
     result = await db.execute(select(User).where(User.id == uid))
     user = result.scalar_one_or_none()
@@ -124,6 +129,35 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This account has been suspended",
         )
+
+    # The access token ends when its session does, not 30 minutes later.
+    #
+    # A JWT is valid until `exp` by construction, so revoking the refresh token
+    # alone — which is all logout, "sign out other devices", a password change
+    # and a password reset did — left the access token beside it working for
+    # the rest of its life. Anyone who had copied it kept full access after the
+    # user had signed out: the "JWT still works after logout" class of bug.
+    # Binding it to its session row closes that: once no live refresh token
+    # remains for the session, its access tokens stop working on the next
+    # request. Checked after suspension so a suspended user still gets the
+    # 403 that explains why, rather than a bare 401.
+    session_live = await db.execute(
+        select(RefreshToken.id)
+        .where(
+            RefreshToken.user_id == uid,
+            RefreshToken.session_id == session_id,
+            RefreshToken.revoked_at.is_(None),
+            RefreshToken.expires_at > datetime.now(timezone.utc),
+        )
+        .limit(1)
+    )
+    if session_live.scalar_one_or_none() is None:
+        raise credentials_exception
+
+    # For endpoints that act on "every session but this one" (password change,
+    # sign out other devices). Works for Bearer clients too, unlike reading the
+    # refresh cookie.
+    request.state.session_id = session_id
     return user
 
 

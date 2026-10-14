@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 14
+    # Hard ceiling on one sign-in, however often it is refreshed. Every
+    # rotation restarts REFRESH_TOKEN_EXPIRE_DAYS, so without this a session
+    # used once a fortnight never ends and a stolen one can be kept alive
+    # forever. Counted from the original sign-in, not the last refresh.
+    SESSION_MAX_LIFETIME_DAYS: int = 30
     GOOGLE_CLIENT_ID: str | None = None
     MICROSOFT_CLIENT_ID: str | None = None
     MICROSOFT_TENANT_ID: str = "common"

@@ -20,12 +20,14 @@ for Fix B: test_reused_refresh_token_after_rotation_is_rejected,
 test_logout_revokes_refresh_token_server_side, and
 test_refresh_token_hash_not_stored_in_plaintext.
 """
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import jwt
+from sqlalchemy import update
 
-from app.auth.service import hash_refresh_token
+from app.auth.service import REFRESH_REUSE_GRACE, hash_refresh_token
 from app.core.config import settings
+from app.users.models import RefreshToken
 from app.utils.jwt import create_access_token
 
 
@@ -114,13 +116,22 @@ async def test_refresh_token_hash_not_stored_in_plaintext(make_user, get_refresh
     assert rows[0].token_hash == hash_refresh_token(user["refresh_token"])
 
 
-async def test_reused_refresh_token_after_rotation_is_rejected(client, make_user):
+async def test_reused_refresh_token_after_rotation_is_rejected(client, make_user, db_session):
     user = await make_user()
     first = await client.post("/auth/refresh", json={"refresh_token": user["refresh_token"]})
     assert first.status_code == 200
 
     # The token just used for rotation is now revoked; presenting it again
-    # (e.g. an attacker replaying a captured token) must be rejected.
+    # (e.g. an attacker replaying a captured token) must be rejected — once
+    # the reuse grace window has passed. Inside it, a replay is the same
+    # browser racing itself and is answered (see test_session_binding.py),
+    # so the rotation is aged past it here.
+    await db_session.execute(
+        update(RefreshToken)
+        .where(RefreshToken.token_hash == hash_refresh_token(user["refresh_token"]))
+        .values(revoked_at=datetime.now(timezone.utc) - REFRESH_REUSE_GRACE - timedelta(seconds=5))
+    )
+    await db_session.commit()
     second = await client.post("/auth/refresh", json={"refresh_token": user["refresh_token"]})
     assert second.status_code == 401
     assert second.json() == {"detail": "Invalid or expired refresh token"}

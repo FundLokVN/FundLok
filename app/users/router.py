@@ -177,7 +177,13 @@ async def change_current_user_password(
     requires the current password as proof the session is not borrowed. Every
     other session is revoked as part of the change -- see change_password.
     """
-    revoked = await change_password(db, body, current_user, background_tasks)
+    revoked = await change_password(
+        db,
+        body,
+        current_user,
+        background_tasks,
+        current_session_id=request.state.session_id,
+    )
     append_audit(
         db,
         entity_type="AUTH",

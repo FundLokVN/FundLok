@@ -38,8 +38,11 @@ from app.utils.jwt import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-ACCESS_COOKIE_MAX_AGE = 30 * 60  # 30 minutes
-REFRESH_COOKIE_MAX_AGE = 14 * 24 * 60 * 60  # 14 days
+# Derived from the token lifetimes rather than restated, so changing a lifetime
+# in config cannot leave the browser holding a cookie that dies before (or
+# lingers long after) the token inside it.
+ACCESS_COOKIE_MAX_AGE = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+REFRESH_COOKIE_MAX_AGE = settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
 
 # "Keep me signed in" marker. The refresh endpoint re-issues both auth cookies,
 # so it has to know whether the user asked for a persistent session -- without
@@ -324,7 +327,7 @@ async def list_sessions(
     it "this device" and disable its revoke button.
     """
     sessions = await service.list_sessions(
-        db, current_user.id, current_token=request.cookies.get("refresh_token")
+        db, current_user.id, current_session_id=request.state.session_id
     )
     return [
         SessionOut(
@@ -352,7 +355,7 @@ async def revoke_session(
         db,
         current_user.id,
         session_id,
-        current_token=request.cookies.get("refresh_token"),
+        current_session_id=request.state.session_id,
     )
     append_audit(
         db,
@@ -375,7 +378,7 @@ async def revoke_other_sessions(
 ):
     """Sign out everywhere except the device making this call."""
     result = await service.revoke_other_sessions(
-        db, current_user.id, current_token=request.cookies.get("refresh_token")
+        db, current_user.id, current_session_id=request.state.session_id
     )
     append_audit(
         db,
@@ -395,6 +398,9 @@ async def revoke_other_sessions(
 # silently becoming an alarm.
 _EVENT_SEVERITY = {
     "SIGN_IN_FAILED": "critical",
+    # An old refresh token came back after rotation: someone else may hold a
+    # copy, and the session was ended because of it.
+    "SESSION_REUSE_DETECTED": "critical",
     "SESSION_REVOKED": "warning",
     "SESSIONS_REVOKED_OTHERS": "warning",
     "PASSWORD_RESET": "warning",
