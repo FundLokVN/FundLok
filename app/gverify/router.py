@@ -129,11 +129,7 @@ async def _run_verification(
             # Internal only (never shown to the user): tells a reviewer why
             # the attempt was parked.
             **(
-                {
-                    "review_cause": "MANUAL_VERIFICATION_MODE"
-                    if manual
-                    else "PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT"
-                }
+                {"review_cause": service.manual_review_cause(attempt, manual=manual)}
                 if attempt.status == STATUS_MANUAL_REVIEW
                 else {}
             ),
