@@ -876,7 +876,29 @@ async def complete_totp_login(
             detail="Invalid or expired two-factor challenge",
         )
 
+    # A six-digit code is only a second factor if it can't be guessed. Without
+    # a limit, whoever had the password could re-mint challenges and try codes
+    # until one landed (about 1 in 330,000 per guess, three codes being live
+    # at once). Counted per account, not per challenge, for that reason.
+    if await _recent_second_factor_failures(db, user.id) >= MAX_SECOND_FACTOR_FAILURES:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many incorrect codes. Try again in 15 minutes.",
+        )
+
     if not await _consume_second_factor(db, user, code):
+        # Committed before raising, or the rollback would take the count with
+        # it. AUTH, so it is on the owner's security screen: a wrong code here
+        # means someone got past their password.
+        append_audit(
+            db,
+            entity_type="AUTH",
+            entity_id=user.id,
+            action=SECOND_FACTOR_FAILED,
+            actor_id=user.id,
+            ip_address=ip_address,
+        )
+        await db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="That code is not valid",
@@ -902,6 +924,27 @@ async def complete_totp_login(
         )
 
     return user, tokens
+
+
+# Wrong codes allowed per account inside the window before /login/2fa stops
+# checking them. Five per 15 minutes means about one lucky guess per two years
+# of guessing around the clock, every miss on the owner's security screen as a
+# critical event, and costs a fumbling owner a short wait at worst.
+MAX_SECOND_FACTOR_FAILURES = 5
+SECOND_FACTOR_FAILURE_WINDOW = timedelta(minutes=15)
+SECOND_FACTOR_FAILED = "TWO_FACTOR_FAILED"
+
+
+async def _recent_second_factor_failures(db: AsyncSession, user_id: UUID) -> int:
+    since = datetime.now(timezone.utc) - SECOND_FACTOR_FAILURE_WINDOW
+    result = await db.execute(
+        select(func.count(AuditLog.id)).where(
+            AuditLog.entity_id == user_id,
+            AuditLog.action == SECOND_FACTOR_FAILED,
+            AuditLog.created_at >= since,
+        )
+    )
+    return result.scalar_one()
 
 
 async def _consume_second_factor(db: AsyncSession, user: User, code: str) -> bool:
