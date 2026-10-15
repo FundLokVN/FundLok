@@ -219,6 +219,11 @@ Temporary Items
 .env
 .env.local
 .env.shared
+# Any other env file or a backup of one (.env.bak, .env.prod, ...) holds real
+# secrets too; only the templates are tracked.
+.env.*
+!.env.example
+*.bak
 
 postgres_data/
 pgdata/
