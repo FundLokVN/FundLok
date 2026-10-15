@@ -10,9 +10,14 @@ carry an X-Error-Code header; `detail` stays a plain English string.
 """
 
 import base64
+import html
+import re
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from html.parser import HTMLParser
 from uuid import UUID
+
+from markupsafe import Markup
 
 from email_validator import EmailNotValidError, validate_email
 from fastapi import HTTPException, status
@@ -111,6 +116,9 @@ def _out(row: EmailSettings | None) -> EmailSettingsOut:
         has_app_password=has_password,
         last_verified_at=row.last_verified_at,
         updated_at=row.updated_at,
+        signature_name=row.signature_name,
+        signature_title=row.signature_title,
+        signature_phone=row.signature_phone,
     )
 
 
@@ -124,6 +132,9 @@ def _audit_state(row: EmailSettings | None) -> dict | None:
         "from_name": row.from_name,
         "enabled": row.enabled,
         "has_app_password": bool(row.app_password_encrypted),
+        "signature_name": row.signature_name,
+        "signature_title": row.signature_title,
+        "signature_phone": row.signature_phone,
     }
 
 
@@ -171,6 +182,9 @@ async def update_settings(
     row.gmail_address = body.gmail_address
     row.from_name = body.from_name
     row.enabled = body.enabled
+    row.signature_name = body.signature_name
+    row.signature_title = body.signature_title
+    row.signature_phone = body.signature_phone
     if encrypted is not None:
         row.app_password_encrypted = encrypted
     if credentials_changed:
@@ -287,13 +301,139 @@ def _preview_logo_src() -> str | None:
     return "data:image/png;base64," + base64.b64encode(logo).decode()
 
 
-def _render(content: EmailContent, *, for_preview: bool = False) -> tuple[str, str]:
-    """(html, text) for an admin's message."""
+_ALLOWED_EMAIL_TAGS = {"b", "strong", "i", "em", "u", "a", "p", "br", "ul", "ol", "li", "span", "div"}
+_EMAIL_LINK_STYLE = "color:#16a34a;text-decoration:underline;font-weight:600;"
+
+
+class _SafeEmailHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.output: list[str] = []
+        self.plain: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+        tag_lower = tag.lower()
+        if tag_lower in _ALLOWED_EMAIL_TAGS:
+            if tag_lower == "a":
+                href = ""
+                for k, v in attrs:
+                    if k.lower() == "href" and v and (
+                        v.startswith("http://") or v.startswith("https://") or v.startswith("mailto:")
+                    ):
+                        href = v
+                if href:
+                    safe_href = html.escape(href, quote=True)
+                    self.output.append(
+                        f'<a href="{safe_href}" target="_blank" rel="noopener noreferrer" style="{_EMAIL_LINK_STYLE}">'
+                    )
+                else:
+                    self.output.append("<span>")
+            elif tag_lower == "br":
+                self.output.append("<br/>")
+                self.plain.append("\n")
+            elif tag_lower == "div":
+                current_out = "".join(self.output)
+                if current_out and not current_out.endswith(("<br/>", "<br>", "</ul>", "</ol>")):
+                    self.output.append("<br/>")
+                    self.plain.append("\n")
+            elif tag_lower == "p":
+                current_out = "".join(self.output)
+                if current_out:
+                    if current_out.endswith("<br/>"):
+                        self.output.append("<br/>")
+                        self.plain.append("\n")
+                    elif not current_out.endswith(("<br/><br/>", "</ul>", "</ol>")):
+                        self.output.append("<br/><br/>")
+                        self.plain.append("\n\n")
+            elif tag_lower == "li":
+                self.output.append("<li>")
+                self.plain.append("• ")
+            elif tag_lower in ("ul", "ol"):
+                self.output.append(f"<{tag_lower}>")
+                if self.plain and not "".join(self.plain).endswith("\n"):
+                    self.plain.append("\n")
+            else:
+                self.output.append(f"<{tag_lower}>")
+        else:
+            # Escape disallowed start tag so raw tags (like <script>) stay visible as text
+            raw = self.get_starttag_text() or f"<{tag}>"
+            self.output.append(html.escape(raw))
+            self.plain.append(raw)
+
+    def handle_endtag(self, tag: str):
+        tag_lower = tag.lower()
+        if tag_lower in _ALLOWED_EMAIL_TAGS:
+            if tag_lower == "a":
+                self.output.append("</a>")
+            elif tag_lower in ("p", "br", "div"):
+                pass
+            elif tag_lower in ("ul", "ol"):
+                self.output.append(f"</{tag_lower}>")
+                if self.plain and not "".join(self.plain).endswith("\n"):
+                    self.plain.append("\n")
+            elif tag_lower in ("b", "strong", "i", "em", "u", "li", "span"):
+                self.output.append(f"</{tag_lower}>")
+                if tag_lower == "li":
+                    self.plain.append("\n")
+        else:
+            raw = f"</{tag}>"
+            self.output.append(html.escape(raw))
+            self.plain.append(raw)
+
+    def handle_data(self, data: str):
+        self.output.append(html.escape(data, quote=False))
+        self.plain.append(data)
+
+
+def sanitize_internal_email_body(body: str) -> tuple[Markup, str]:
+    """Sanitize rich text / HTML or markdown from the admin email composer.
+    Preserves safe formatting (bold, italic, links, lists) and styles links.
+    Disallowed tags are HTML-escaped.
+    Returns (safe_html_markup, plain_text_fallback).
+    """
+    if not body:
+        return Markup(""), ""
+
+    # Support markdown syntax if user typed markdown instead of HTML
+    processed = re.sub(
+        r"\[([^\]]+)\]\((https?://[^\s\)]+|mailto:[^\s\)]+)\)",
+        r'<a href="\g<2>">\g<1></a>',
+        body,
+    )
+    processed = re.sub(r"\*\*([^*]+)\*\*", r"<b>\g<1></b>", processed)
+    processed = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\g<1></i>", processed)
+
+    parser = _SafeEmailHTMLParser()
+    parser.feed(processed)
+    return Markup("".join(parser.output)), "".join(parser.plain)
+
+
+def _render(
+    content: EmailContent,
+    *,
+    signature_name: str | None = None,
+    signature_title: str | None = None,
+    signature_phone: str | None = None,
+    for_preview: bool = False,
+) -> tuple[str, str]:
+    """(html, text) for an admin's message.
+
+    The signature is appended only when the admin ticked "Include my email
+    signature" AND has set a signature name. A name with no title/phone
+    still shows; a ticked box with no name shows nothing (there is nothing to
+    sign with).
+    """
+    include_signature = content.include_signature and bool(signature_name)
+    safe_body_html, plain_body = sanitize_internal_email_body(content.body)
     context = {
         "heading": content.heading or "",
-        "body": content.body,
+        "body": safe_body_html,
         "button_label": content.button_label or "",
         "button_url": content.button_url or "",
+        "include_signature": include_signature,
+        "signature_name": signature_name or "",
+        "signature_title": signature_title or "",
+        "signature_phone": signature_phone or "",
     }
     if for_preview:
         logo_src = _preview_logo_src()
@@ -301,15 +441,38 @@ def _render(content: EmailContent, *, for_preview: bool = False) -> tuple[str, s
             context["logo_src"] = logo_src
     html = render_email(TEMPLATE_FILES[content.template], **context)
 
-    lines = [content.heading, content.body] if content.heading else [content.body]
+    lines = [content.heading, plain_body] if content.heading else [plain_body]
     if content.button_url:
         lines.append(f"{content.button_label}: {content.button_url}")
-    text = "\n\n".join(lines) + "\n\n--\nFundLok"
+    if include_signature:
+        sig = [signature_name]
+        if signature_title:
+            sig.append(signature_title)
+        if signature_phone:
+            sig.append(f"Mobile: {signature_phone}")
+        text = "\n\n".join(lines) + "\n\n" + "\n".join(sig)
+    else:
+        text = "\n\n".join(lines) + "\n\n--\nFundLok"
     return html, text
 
 
-def preview(content: EmailContent) -> EmailPreview:
-    html, _ = _render(content, for_preview=True)
+async def preview(db: AsyncSession, content: EmailContent, *, actor_id: UUID) -> EmailPreview:
+    """The rendered email, exactly as it would be sent. Sends nothing.
+
+    The signature comes from the admin's own settings (set under Email
+    settings), so the preview shows the same signature a send would.
+    """
+    row = await _row(db, actor_id)
+    signature_name = row.signature_name if row is not None else None
+    signature_title = row.signature_title if row is not None else None
+    signature_phone = row.signature_phone if row is not None else None
+    html, _ = _render(
+        content,
+        signature_name=signature_name,
+        signature_title=signature_title,
+        signature_phone=signature_phone,
+        for_preview=True,
+    )
     return EmailPreview(subject=content.subject, html=html)
 
 
@@ -573,7 +736,12 @@ async def send(
         )
     policy = await get_policy(db)
     recipients = _recipients(list(body.to), policy.allowed_domains)
-    html, text = _render(body)
+    html, text = _render(
+        body,
+        signature_name=account.signature_name,
+        signature_title=account.signature_title,
+        signature_phone=account.signature_phone,
+    )
     log = await _send_logged(
         db,
         account=account,
@@ -587,6 +755,7 @@ async def send(
             "body": body.body,
             "button_label": body.button_label,
             "button_url": body.button_url,
+            "include_signature": body.include_signature,
         },
         html=html,
         text=text,
@@ -596,11 +765,16 @@ async def send(
 
 
 async def list_messages(
-    db: AsyncSession, *, actor: User, limit: int
+    db: AsyncSession, *, actor: User, limit: int, offset: int = 0
 ) -> list[InternalEmailOut]:
     """An admin sees their own sends; a system admin sees everyone's, which is
     the oversight of what goes out under FundLok's name."""
-    query = select(InternalEmail).order_by(InternalEmail.created_at.desc()).limit(limit)
+    query = (
+        select(InternalEmail)
+        .order_by(InternalEmail.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     if actor.role != Role.SYSTEM_ADMIN.value:
         query = query.where(InternalEmail.sent_by == actor.id)
     rows = (await db.execute(query)).scalars()

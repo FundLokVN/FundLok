@@ -16,6 +16,8 @@
     "db:reset": "./scripts/reset_db.sh",
     "migrate": "./.venv/bin/alembic upgrade head",
     "db:migrate": "./.venv/bin/alembic upgrade head",
+    "db:copy": "bun scripts/db_copy.ts",
+    "db:copy:test": "DB_MIGRATE_TESTS=1 ./.venv/bin/pytest tests/tooling -q",
     "migrate:new": "./.venv/bin/alembic revision --autogenerate -m",
     "seed": "docker compose exec -T postgres psql -U fundlok -d fundlok_dev -v ON_ERROR_STOP=1 < scripts/seed_data.sql",
     "psql": "docker compose exec postgres psql -U fundlok -d fundlok_dev",
@@ -28,6 +30,7 @@
     "react-email": "bun run --cwd emails dev",
     "react-email:export": "bun run --cwd emails export",
     "email:dev": "bun run --cwd emails dev",
-    "email:export": "bun run --cwd emails export"
+    "email:export": "bun run --cwd emails export",
+    "db:studio": "docker compose up -d postgres pgweb && echo '\\n  Database studio ready at: http://localhost:8081\\n' && open http://localhost:8081"
   }
 }

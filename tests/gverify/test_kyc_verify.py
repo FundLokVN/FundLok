@@ -553,3 +553,72 @@ async def test_kyc_502_does_not_leak_the_provider_error(client, make_investor, m
     assert resp.status_code == 502
     assert "Errno" not in resp.text
     assert resp.json() == {"detail": "The verification provider could not process the request. Please try again."}
+
+
+# --------------------------------------------------------------------------- #
+# Rule 11: a portrait that is the card's own photo is parked, not approved
+# --------------------------------------------------------------------------- #
+#
+# vbsec [9]: with no liveness step, cropping the face off someone else's CCCD
+# and submitting it as the "selfie" matches the card perfectly and approved.
+
+
+async def test_kyc_portrait_scoring_as_the_card_photo_goes_to_manual_review(
+    client, make_investor, mock_gverify
+):
+    investor = await make_investor()
+    mock_gverify.face = _face_data(matching="99.6")
+
+    resp = await _verify(client, investor)
+
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    assert data["status"] == "MANUAL_REVIEW"
+    assert data["is_approved"] is False
+    # Neutral, like rule 9: it must not teach the trick.
+    assert data["rejection_reason"] == "Your verification needs a manual review"
+
+
+async def test_kyc_card_photo_threshold_is_inclusive(client, make_investor, mock_gverify):
+    investor = await make_investor()
+    mock_gverify.face = _face_data(matching="98.0")
+
+    assert (await _verify(client, investor)).json()["status"] == "MANUAL_REVIEW"
+
+
+async def test_kyc_ordinary_selfie_score_still_approves(client, make_investor, mock_gverify):
+    investor = await make_investor()
+    mock_gverify.face = _face_data(matching="97.9")
+
+    assert (await _verify(client, investor)).json()["status"] == "APPROVED"
+
+
+async def test_kyc_missing_similarity_does_not_block_approval(client, make_investor, mock_gverify):
+    investor = await make_investor()
+    face = _face_data()
+    del face["matching"]
+    mock_gverify.face = face
+
+    assert (await _verify(client, investor)).json()["status"] == "APPROVED"
+
+
+async def test_kyc_card_photo_review_audit_names_the_cause(
+    client, make_investor, mock_gverify, db_session
+):
+    from sqlalchemy import select
+
+    from app.lending.models import AuditLog
+
+    investor = await make_investor()
+    mock_gverify.face = _face_data(matching="100")
+    verification_id = (await _verify(client, investor)).json()["verification_id"]
+
+    row = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.entity_type == "GVERIFY_KYC_VERIFICATION",
+                AuditLog.entity_id == uuid.UUID(verification_id),
+            )
+        )
+    ).scalar_one()
+    assert row.after_state["review_cause"] == "PORTRAIT_IS_CARD_PHOTO"

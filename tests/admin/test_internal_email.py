@@ -952,3 +952,65 @@ async def test_recent_messages_are_listed(client, make_system_admin, gmail):
     assert items[0]["status"] == "SENT"
     assert items[0]["recipients"] == ["colleague@fundlok.com"]
     assert items[0]["sent_by"] == sysadmin["id"]
+
+
+async def test_rich_text_formatting_in_email(client, make_system_admin, gmail):
+    sysadmin = await make_system_admin()
+    await _connect(client, sysadmin)
+
+    resp = await client.post(
+        "/admin/email/send",
+        json=_message(
+            subject="Rich text announcement",
+            body="<b>Important:</b> Please review our <i>guidelines</i> at <a href=\"https://fundlok.com/docs\">our docs</a>.",
+        ),
+        headers=sysadmin["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+    html = _html_part(gmail.sent[0])
+    assert "<b>Important:</b>" in html
+    assert "<i>guidelines</i>" in html
+    assert '<a href="https://fundlok.com/docs"' in html
+    assert 'color:#16a34a' in html
+
+
+async def test_markdown_formatting_in_email_preview(client, make_system_admin):
+    sysadmin = await make_system_admin()
+    resp = await client.post(
+        "/admin/email/preview",
+        json={
+            "template": "general",
+            "subject": "Markdown test",
+            "heading": "Markdown heading",
+            "body": "Here is **bold text** and *italic text* with [FundLok Link](https://fundlok.com).",
+        },
+        headers=sysadmin["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+    preview = resp.json()
+    assert "<b>bold text</b>" in preview["html"]
+    assert "<i>italic text</i>" in preview["html"]
+    assert '<a href="https://fundlok.com"' in preview["html"]
+    assert "color:#16a34a" in preview["html"]
+
+
+async def test_html_formatting_in_email_preview(client, make_system_admin):
+    sysadmin = await make_system_admin()
+    resp = await client.post(
+        "/admin/email/preview",
+        json={
+            "template": "general",
+            "subject": "HTML rich text test",
+            "heading": "HTML heading",
+            "body": "<div>Hello <b>world</b></div><div>Line 2 with <a href=\"https://fundlok.com\">link</a></div><ul><li>Item 1</li><li>Item 2</li></ul>",
+        },
+        headers=sysadmin["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+    preview = resp.json()
+    assert "&lt;div&gt;" not in preview["html"]
+    assert "<b>world</b>" in preview["html"]
+    assert "Line 2" in preview["html"]
+    assert '<a href="https://fundlok.com"' in preview["html"]
+    assert "color:#16a34a" in preview["html"]
+    assert "<ul><li>Item 1</li><li>Item 2</li></ul>" in preview["html"]

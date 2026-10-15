@@ -11,7 +11,7 @@ HANDOFF-02 Fix A note: only the transport changed here (httpx.AsyncClient
 instead of TestClient, `async def` + `await`) -- none of the assertions
 changed, because this file doesn't touch refresh-token persistence.
 """
-from jose import jwt
+import jwt
 
 from app.core.config import settings
 

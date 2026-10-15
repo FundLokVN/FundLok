@@ -114,6 +114,20 @@ def _face_rejection_reason(data: dict) -> str | None:
     return None
 
 
+def _portrait_is_card_photo(data: dict) -> bool:
+    """True when the "selfie" scores as the card's own portrait, not a capture.
+
+    A real selfie and the photo printed on a CCCD are the same face years
+    apart, through different cameras, and score well short of 100. The card's
+    portrait cropped and resubmitted is the same image and scores at or near
+    100. This is not liveness: a crop that is re-photographed or retouched can
+    score lower and get through. It stops the plain crop, and a false hit only
+    costs a human review.
+    """
+    percent = _as_float(data.get("matching"))
+    return percent is not None and percent >= settings.GVERIFY_CARD_PHOTO_SIMILARITY
+
+
 async def latest_for_user(
     db: AsyncSession, user_id, verification_type: str = "KYC"
 ) -> GVerifyVerification | None:
@@ -212,6 +226,14 @@ async def run_kyc_verification(
     if reason is not None:
         attempt.status = STATUS_REJECTED
         attempt.rejection_reason = reason
+    elif _portrait_is_card_photo(face):
+        # Nothing here proves a person was in front of a camera (no liveness
+        # step yet), so a portrait that is the card's own photo cropped out
+        # would approve anyone holding pictures of someone else's ID. Parked,
+        # not rejected: a human can tell, and the reason stays neutral so it
+        # does not teach the trick.
+        attempt.status = STATUS_MANUAL_REVIEW
+        attempt.rejection_reason = MANUAL_REVIEW_REASON
     elif await person_number_approved_elsewhere(db, attempt.person_number, user.id):
         # One CCCD, one verified account. Face match alone can't tell a real
         # selfie from the card's own portrait cropped and resubmitted, so
@@ -230,6 +252,15 @@ async def run_kyc_verification(
 
 # Shown to the user; see run_kyc_verification for why it names no cause.
 MANUAL_REVIEW_REASON = "Your verification needs a manual review"
+
+
+def manual_review_cause(attempt: GVerifyVerification, *, manual: bool) -> str:
+    """Why an attempt was parked, for the audit row only (never the user)."""
+    if manual:
+        return "MANUAL_VERIFICATION_MODE"
+    if attempt.face_data and _portrait_is_card_photo(attempt.face_data):
+        return "PORTRAIT_IS_CARD_PHOTO"
+    return "PERSON_NUMBER_APPROVED_ON_ANOTHER_ACCOUNT"
 
 
 def provider_checked(attempt: GVerifyVerification) -> bool:

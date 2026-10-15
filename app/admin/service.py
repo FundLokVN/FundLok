@@ -31,6 +31,9 @@ from app.admin.schemas import (
     AdminScoreRunOut,
     AdminStats,
     AdminUserDetail,
+    AdminUserFullDetail,
+    AdminUserInvestmentSummary,
+    AdminUserProjectRef,
     AuditLogOut,
     OVERRIDE_NOTE_MIN_LENGTH,
     Page,
@@ -51,8 +54,10 @@ from app.gverify.models import (
 )
 from app.lending.models import (
     AuditLog,
+    Holding,
     LoanApplication,
     LoanApplicationDocument,
+    Order,
     Project,
     ProjectOwnership,
     ScoreRun,
@@ -67,7 +72,15 @@ from app.utils.email import send_admin_invite_email, send_application_updated_em
 from app.utils.jwt import create_password_reset_token
 from app.notifications.service import create_notification
 from app.projects.service import activate_project_if_approved
-from app.users.models import USER_STATUS_ACTIVE, Role, User
+from app.banking.models import LinkedAccount
+from app.users.models import (
+    USER_STATUS_ACTIVE,
+    RefreshToken,
+    Role,
+    TotpRecoveryCode,
+    User,
+    WebAuthnCredential,
+)
 from app.utils import r2
 from app.utils.audit import append_audit
 
@@ -140,6 +153,171 @@ async def list_users(
     if role:
         stmt = stmt.where(User.role == role)
     return await _paginate(db, stmt, page=page, page_size=page_size, row_model=UserRow, order_col=User.created_at)
+
+
+async def get_user_detail(db: AsyncSession, user_id: UUID) -> AdminUserFullDetail:
+    """One account: the whole profile plus what it is connected to — owned
+    projects, investor activity and security posture.
+
+    The user-side twin of get_project_detail. Read-only, admin-only, not
+    paginated: a user owns a handful of companies at most, and the investment
+    side is aggregated rather than listed.
+    """
+    user = await db.get(User, user_id, populate_existing=True)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    project_rows = (
+        await db.execute(
+            select(Project, ProjectOwnership.role)
+            .join(ProjectOwnership, ProjectOwnership.project_id == Project.id)
+            .where(ProjectOwnership.user_id == user_id)
+            .order_by(Project.created_at.desc())
+        )
+    ).all()
+
+    project_ids = [project.id for project, _ in project_rows]
+    app_stats: dict[UUID, tuple[int, int]] = {}
+    if project_ids:
+        app_stats_rows = (
+            await db.execute(
+                select(
+                    LoanApplication.project_id,
+                    func.count(LoanApplication.id),
+                    func.coalesce(func.sum(LoanApplication.requested_amount), 0),
+                )
+                .where(LoanApplication.project_id.in_(project_ids))
+                .group_by(LoanApplication.project_id)
+            )
+        ).all()
+        for pid, count, total in app_stats_rows:
+            app_stats[pid] = (count, int(total))
+
+    projects = [
+        AdminUserProjectRef(
+            id=project.id,
+            legal_name=project.legal_name,
+            tax_id=project.tax_id,
+            industry=project.industry,
+            status=project.status,
+            ownership_role=role,
+            employee_count=project.employee_count,
+            applications_count=app_stats.get(project.id, (0, 0))[0],
+            total_requested_amount=app_stats.get(project.id, (0, 0))[1],
+            created_at=project.created_at,
+            updated_at=project.updated_at,
+        )
+        for project, role in project_rows
+    ]
+
+    # Aggregated here rather than listed so the panel never needs a second
+    # call. COALESCE because SUM over no rows is NULL and the schema is int.
+    orders_count, orders_amount = (
+        await db.execute(
+            select(func.count(Order.id), func.coalesce(func.sum(Order.amount), 0))
+            .where(Order.investor_id == user_id)
+        )
+    ).one()
+    holdings_count, holdings_principal = (
+        await db.execute(
+            select(
+                func.count(Holding.id),
+                func.coalesce(func.sum(Holding.principal), 0),
+            ).where(Holding.investor_id == user_id)
+        )
+    ).one()
+
+    # Security & session insights
+    active_sessions_count = (
+        await db.execute(
+            select(func.count(RefreshToken.id)).where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.revoked_at.is_(None),
+                RefreshToken.expires_at > func.now(),
+            )
+        )
+    ).scalar() or 0
+
+    last_sign_in_at = (
+        await db.execute(
+            select(func.max(func.coalesce(RefreshToken.last_used_at, RefreshToken.created_at))).where(
+                RefreshToken.user_id == user_id
+            )
+        )
+    ).scalar()
+
+    passkeys_count = (
+        await db.execute(
+            select(func.count(WebAuthnCredential.id)).where(WebAuthnCredential.user_id == user_id)
+        )
+    ).scalar() or 0
+
+    unused_recovery_codes_count = (
+        await db.execute(
+            select(func.count(TotpRecoveryCode.id)).where(
+                TotpRecoveryCode.user_id == user_id,
+                TotpRecoveryCode.used_at.is_(None),
+            )
+        )
+    ).scalar() or 0
+
+    # Identity verification & banking insights
+    kyc_status = (
+        await db.execute(
+            select(GVerifyVerification.status)
+            .where(
+                GVerifyVerification.user_id == user_id,
+                GVerifyVerification.verification_type == "KYC",
+            )
+            .order_by(GVerifyVerification.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    linked_accounts_count = (
+        await db.execute(
+            select(func.count(LinkedAccount.id)).where(
+                LinkedAccount.user_id == user_id,
+                LinkedAccount.status == "ACTIVE",
+            )
+        )
+    ).scalar() or 0
+
+    return AdminUserFullDetail(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role,
+        status=user.status,
+        email_verified=user.email_verified,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        phone=user.phone,
+        bio=user.bio,
+        avatar_key=user.avatar_key,
+        email_signature=user.email_signature,
+        # Derived, not stored: Google-OAuth users and freshly invited admins
+        # have no password at all — worth knowing before suspending an account
+        # whose owner would then have no way back in.
+        has_password=user.password_hash is not None,
+        signin_alerts_enabled=user.signin_alerts_enabled,
+        totp_enabled=user.totp_enabled,
+        totp_confirmed_at=user.totp_confirmed_at,
+        onboarding_tour_completed_at=user.onboarding_tour_completed_at,
+        active_sessions_count=active_sessions_count,
+        last_sign_in_at=last_sign_in_at,
+        passkeys_count=passkeys_count,
+        unused_recovery_codes_count=unused_recovery_codes_count,
+        kyc_status=kyc_status,
+        linked_accounts_count=linked_accounts_count,
+        projects=projects,
+        investments=AdminUserInvestmentSummary(
+            orders_count=orders_count,
+            orders_amount=orders_amount,
+            holdings_count=holdings_count,
+            holdings_principal=holdings_principal,
+        ),
+    )
 
 
 async def list_projects(
@@ -817,13 +995,18 @@ async def invite_admin(
         await db.rollback()
         raise HTTPException(status_code=409, detail="An account with this email already exists") from exc
 
+    is_external = not email.strip().lower().endswith("@fundlok.com")
     append_audit(
         db,
         entity_type="USER",
         entity_id=user.id,
         action="ADMIN_INVITED",
         actor_id=actor.id,
-        after_state={"email": email, "role": Role.ADMIN.value},
+        after_state={
+            "email": email,
+            "role": Role.ADMIN.value,
+            "is_external_domain": is_external,
+        },
         ip_address=ip_address,
     )
     await db.commit()

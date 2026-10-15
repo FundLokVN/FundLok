@@ -45,7 +45,7 @@ pydantic[email]==2.13.4
 
 # ── Security (password hashing + JWT) ────────────────────────────────────────
 passlib[bcrypt]==1.7.4
-python-jose[cryptography]==3.5.0
+PyJWT==2.15.0         # replaces python-jose (unmaintained; CVE-2026-85394 has no fixed release). google-auth also resolves it, so the version pin is shared.
 argon2-cffi==25.1.0   # the active scheme; see app/utils/password.py (bcrypt 72-byte limit)
 pyotp==2.10.0         # TOTP second factor (app/auth/totp.py); RFC 6238, no network calls
 
@@ -56,6 +56,7 @@ email-validator==2.3.0
 google-cloud-storage==3.13.1
 boto3==1.43.67           # Cloudflare R2 (S3-compatible) presigned uploads
 pypdf==6.19.0            # CIC credit-report PDFs (app/uploads/parsers/cic.py)
+defusedxml==0.7.1        # safe XML parsing of uploaded XLSX / e-invoice files (app/uploads/parsers/xlsx.py, statements.py)
 PyYAML==6.0.3          # grading engine params loader (app/underwriting/grading/params.py)
 
 # ── Background jobs (ARQ worker, T2) ─────────────────────────────────────────
@@ -87,7 +88,6 @@ charset-normalizer==3.4.9
 click==8.4.2
 cryptography==50.0.1
 dnspython==2.8.0
-ecdsa==0.19.2
 google-api-core==2.34.0
 google-auth==2.56.3
 google-cloud-core==2.6.1
@@ -103,10 +103,9 @@ idna==3.18
 iniconfig==2.3.0
 Jinja2==3.1.6
 jmespath==1.1.0
-Mako==1.4.1
+Mako==1.4.2
 MarkupSafe==3.0.3
 packaging==26.3
-PyJWT==2.15.0
 pluggy==1.6.0
 proto-plus==1.28.3
 protobuf==7.35.1

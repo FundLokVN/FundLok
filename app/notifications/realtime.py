@@ -11,7 +11,7 @@ from typing import Iterable
 from uuid import UUID
 
 import httpx
-from jose import jwt
+import jwt
 
 from app.core.config import settings
 

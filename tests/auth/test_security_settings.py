@@ -6,10 +6,10 @@ that one only ever sets a FIRST password (overwriting an existing one from a
 borrowed session would be account takeover), so changing an existing password
 requires the current one as proof the session is not borrowed.
 """
-import pytest
 from sqlalchemy import select
 
-from app.users.models import RefreshToken, User
+from app.auth.service import hash_refresh_token
+from app.users.models import RefreshToken
 from conftest import auth_headers
 
 CHROME = (
@@ -86,7 +86,11 @@ async def test_change_password_revokes_every_other_session(
         headers=auth_headers(user),
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["sessions_revoked"] >= 2
+    # The other sign-in only. This used to revoke the session making the
+    # change as well (and assert >= 2), contradicting the name of this test
+    # and change_password's docstring; the user was then signed out of the
+    # device they had just secured.
+    assert resp.json()["sessions_revoked"] == len(live_before) - 1
 
     live_after = (
         await db_session.execute(
@@ -96,7 +100,9 @@ async def test_change_password_revokes_every_other_session(
             )
         )
     ).scalars().all()
-    assert live_after == []
+    assert [row.token_hash for row in live_after] == [
+        hash_refresh_token(user["refresh_token"])
+    ]
 
 
 async def test_change_password_rejects_reusing_the_same_password(client, make_user):
@@ -239,3 +245,60 @@ async def test_no_alert_when_the_preference_is_off(client, make_user, monkeypatc
         headers={"user-agent": EDGE_WINDOWS},
     )
     assert sent == [], "alerts are opt-in"
+
+
+# --- admin self-service -----------------------------------------------------
+
+
+async def test_admin_can_toggle_their_own_signin_alerts(client, make_admin):
+    """Admins are users: the security-settings endpoints have no role gate, so
+    the /admin/security tab (which reuses them) works for an admin's own
+    account exactly as /dashboard/security does for everyone else."""
+    admin = await make_admin()
+    resp = await client.get(
+        "/users/me/security-preferences", headers=auth_headers(admin)
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["signin_alerts_enabled"] is False
+
+    on = await client.patch(
+        "/users/me/security-preferences",
+        json={"signin_alerts_enabled": True},
+        headers=auth_headers(admin),
+    )
+    assert on.status_code == 200, on.text
+    assert on.json()["signin_alerts_enabled"] is True
+
+    events = (
+        await client.get("/auth/security-events", headers=auth_headers(admin))
+    ).json()
+    assert any(e["action"] == "SIGNIN_ALERTS_CHANGED" for e in events), events
+
+
+async def test_admin_sees_their_own_sessions_and_events(client, make_admin):
+    admin = await make_admin()
+    sessions = (
+        await client.get("/auth/sessions", headers=auth_headers(admin))
+    ).json()
+    assert len(sessions) >= 1, "the admin's own sign-in must appear"
+
+    events = (
+        await client.get("/auth/security-events", headers=auth_headers(admin))
+    ).json()
+    assert len(events) >= 1, "the admin's own security history must appear"
+
+
+async def test_security_events_pagination(client, make_admin):
+    admin = await make_admin()
+    resp_limit = await client.get(
+        "/auth/security-events?limit=1", headers=auth_headers(admin)
+    )
+    assert resp_limit.status_code == 200
+    assert len(resp_limit.json()) <= 1
+
+    resp_offset = await client.get(
+        "/auth/security-events?limit=1&offset=1000", headers=auth_headers(admin)
+    )
+    assert resp_offset.status_code == 200
+    assert len(resp_offset.json()) == 0
+

@@ -5,7 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from datetime import datetime, timezone
 
-from app.users.models import RefreshToken, Role, User
+from uuid import UUID
+
+from app.auth.service import revoke_other_sessions
+from app.users.models import Role, User
 from app.users.schemas import (
     ChangePasswordRequest,
     AVATAR_CONTENT_TYPE_EXTENSIONS,
@@ -44,6 +47,7 @@ def user_me_payload(user: User) -> dict:
         "status": user.status,
         "email_verified": user.email_verified,
         "bio": user.bio,
+        "email_signature": user.email_signature,
         "avatar_url": build_avatar_url(user),
         # Lets the profile page tell "change your password" from "set one for
         # the first time" (OAuth-only accounts have no hash). Never expose the
@@ -121,6 +125,9 @@ async def update_user_profile(db: AsyncSession, body: UserUpdateRequest, current
     if "bio" in data:
         current_user.bio = data["bio"]
 
+    if "email_signature" in data:
+        current_user.email_signature = data["email_signature"]
+
     db.add(current_user)
     await db.flush()
     return current_user
@@ -196,6 +203,8 @@ async def change_password(
     body: ChangePasswordRequest,
     current_user: User,
     background_tasks: BackgroundTasks,
+    *,
+    current_session_id: UUID | None = None,
 ) -> int:
     """Change an existing password, proving control with the current one.
 
@@ -233,18 +242,16 @@ async def change_password(
     current_user.password_hash = hash_password(body.new_password)
     db.add(current_user)
 
-    revoked = 0
-    result = await db.execute(
-        select(RefreshToken).where(
-            RefreshToken.user_id == current_user.id,
-            RefreshToken.revoked_at.is_(None),
+    # Spares the session making the change. It used to revoke every token
+    # including this one, which the docstring above never promised: the user
+    # was signed out of the device they had just secured, half an hour later
+    # when the refresh failed — and at once, now that access tokens die with
+    # their session.
+    revoked = (
+        await revoke_other_sessions(
+            db, current_user.id, current_session_id=current_session_id
         )
-    )
-    now = datetime.now(timezone.utc)
-    for row in result.scalars().all():
-        row.revoked_at = now
-        db.add(row)
-        revoked += 1
+    )["revoked"]
 
     await db.commit()
 

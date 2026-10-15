@@ -13,7 +13,9 @@ MAINTENANCE_KEY = "maintenance_mode"
 
 
 async def get_maintenance(db: AsyncSession) -> MaintenanceState:
-    row = await db.get(SystemSetting, MAINTENANCE_KEY)
+    # populate_existing: after set_maintenance commits, the cached row's
+    # server-set updated_at is expired and would otherwise lazy-load.
+    row = await db.get(SystemSetting, MAINTENANCE_KEY, populate_existing=True)
     if row is None:
         return MaintenanceState(enabled=False)
     value = row.value or {}

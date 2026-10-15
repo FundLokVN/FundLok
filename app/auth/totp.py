@@ -15,7 +15,8 @@ from datetime import timedelta
 
 import pyotp
 from fastapi import HTTPException, status
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 
 from app.core.config import settings
 from app.utils.jwt import create_access_token
@@ -119,7 +120,7 @@ def verify_challenge_token(token: str) -> str:
             algorithms=[settings.ALGORITHM],
             options={"verify_aud": False},
         )
-    except JWTError:
+    except InvalidTokenError:
         raise invalid
 
     # hmac.compare_digest rather than != : the purpose is attacker-supplied.

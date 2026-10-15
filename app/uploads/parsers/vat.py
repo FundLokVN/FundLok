@@ -145,6 +145,9 @@ def parse_declaration_zip(raw: bytes) -> VatDeclaration:
                 raise VatParseError(
                     f"Archive holds {len(names)} XML files; expected exactly one"
                 )
+            info = archive.getinfo(names[0])
+            if info.file_size > 10 * 1024 * 1024:
+                raise VatParseError("XML declaration exceeds 10MB limit")
             payload = archive.read(names[0])
     except zipfile.BadZipFile as exc:
         raise VatParseError("Not a readable zip archive") from exc

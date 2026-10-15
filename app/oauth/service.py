@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, status
-from jose import jwt
+import jwt
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, select, update
@@ -102,11 +102,14 @@ class OAuthProviderBase(ABC):
             discovery = self._fetch_json(self.discovery_url)
             jwks = self._fetch_json(discovery["jwks_uri"])
             header = jwt.get_unverified_header(id_token)
-            key = self._find_key(jwks["keys"], header.get("kid"))
+            jwk = self._find_key(jwks["keys"], header.get("kid"))
+            # PyJWT does not accept a raw JWK dict as the key: PyJWK parses it
+            # into a cryptography public key (kty RSA/EC -> RS/ES family).
+            key = jwt.PyJWK(jwk).key
             claims = jwt.decode(
                 id_token,
                 key,
-                algorithms=self._signing_algorithms(discovery, key),
+                algorithms=self._signing_algorithms(discovery, jwk),
                 audience=self.client_id,
                 options={"verify_iss": False},
             )
@@ -139,6 +142,15 @@ class OAuthProviderBase(ABC):
         raise NotImplementedError
 
     async def get_or_create_user(self, db: AsyncSession, user_info: OAuthUserInfo) -> User:
+        # Accounts are found by email, so an address the provider has not
+        # verified would sign its holder into whoever's account carries it (or
+        # create a verified-looking one in the owner's name). Refuse it here,
+        # whatever the provider, rather than trusting each map_claims to.
+        if not user_info.email_verified:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Your sign-in provider has not verified this email address",
+            )
         result = await db.execute(select(User).where(User.email == user_info.email))
         user = result.scalar_one_or_none()
         if user:
@@ -391,17 +403,33 @@ class MicrosoftOAuthProvider(OAuthProviderBase):
         return f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/v2.0/.well-known/openid-configuration"
 
     def map_claims(self, claims: dict) -> OAuthUserInfo:
+        # nOAuth. With MICROSOFT_TENANT_ID "common" any Entra tenant can sign
+        # in, and a tenant's admin can set a user's `mail` (sent as `email`)
+        # or UPN (`preferred_username`) to any address without proving it.
+        # Neither is evidence of who owns the address. Microsoft's answer is
+        # the `xms_edov` optional claim ("email domain owner verified"), so
+        # only `email` with xms_edov true counts as verified. The optional
+        # claim has to be added to the app registration before this provider
+        # is switched on, or every Microsoft sign-in is refused.
+        email = claims.get("email")
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Microsoft account does not provide an email address",
+            )
         return OAuthUserInfo(
             provider=self.provider,
             provider_subject=claims["sub"],
-            email=claims.get("preferred_username") or claims["email"],
+            email=email,
             full_name=claims.get("name"),
-            email_verified=True,
+            email_verified=claims.get("xms_edov") in (True, "true", "1", 1),
         )
 
     def _issuer_is_valid(self, issuer: str | None) -> bool:
         if not issuer:
             return False
+        if settings.MICROSOFT_TENANT_ID != "common":
+            return issuer == f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/v2.0"
         return issuer.startswith("https://login.microsoftonline.com/") and issuer.endswith("/v2.0")
 
 

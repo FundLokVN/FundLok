@@ -49,6 +49,7 @@ async def update_current_user(
         "full_name": current_user.full_name,
         "phone": current_user.phone,
         "bio": current_user.bio,
+        "email_signature": current_user.email_signature,
     }
     user = await update_user_profile(db, body, current_user)
     append_audit(
@@ -58,7 +59,12 @@ async def update_current_user(
         action="PROFILE_UPDATED",
         actor_id=user.id,
         before_state=before,
-        after_state={"full_name": user.full_name, "phone": user.phone, "bio": user.bio},
+        after_state={
+            "full_name": user.full_name,
+            "phone": user.phone,
+            "bio": user.bio,
+            "email_signature": user.email_signature,
+        },
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -171,7 +177,13 @@ async def change_current_user_password(
     requires the current password as proof the session is not borrowed. Every
     other session is revoked as part of the change -- see change_password.
     """
-    revoked = await change_password(db, body, current_user, background_tasks)
+    revoked = await change_password(
+        db,
+        body,
+        current_user,
+        background_tasks,
+        current_session_id=request.state.session_id,
+    )
     append_audit(
         db,
         entity_type="AUTH",

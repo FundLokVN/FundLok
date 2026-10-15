@@ -22,6 +22,7 @@ from app.admin.schemas import (
     AdminOverview,
     AdminProjectDetail,
     AdminUserDetail,
+    AdminUserFullDetail,
     AdminUserStatusRequest,
     AuditLogOut,
 )
@@ -248,6 +249,18 @@ async def get_document_url(
 ):
     """A 10-minute read URL for an uploaded application document. Admin-only."""
     return await service.get_document_url(db, document_id)
+
+
+@router.get("/users/{user_id}", response_model=AdminUserFullDetail)
+async def get_user_detail(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The admin user preview: one account's full profile plus the projects it
+    owns, its investor activity and its security posture. Admin-only and
+    read-only — changing what the account may do lives on the status route."""
+    return await service.get_user_detail(db, user_id)
 
 
 @router.patch("/users/{user_id}/status", response_model=AdminUserDetail)

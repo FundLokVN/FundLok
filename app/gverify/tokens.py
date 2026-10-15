@@ -8,7 +8,8 @@ KYC images. Mirrors the purpose-scoped token pattern in app/utils/jwt.py
 from datetime import timedelta
 
 from fastapi import HTTPException
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 
 from app.core.config import settings
 from app.utils.jwt import create_access_token
@@ -36,7 +37,7 @@ def verify_handoff_token(token: str) -> str:
             algorithms=[settings.ALGORITHM],
             options={"verify_aud": False},
         )
-    except JWTError:
+    except InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid or expired handoff token")
     if payload.get("purpose") != _PURPOSE:
         raise HTTPException(status_code=401, detail="Invalid or expired handoff token")

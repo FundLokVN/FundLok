@@ -18,7 +18,7 @@ An .xlsx is a zip of XML written by whoever uploaded it.
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 import zipfile
 from io import BytesIO
 

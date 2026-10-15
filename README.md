@@ -49,6 +49,7 @@ bun run dev      # start Postgres/Mailpit/MinIO, then uvicorn --reload on :8000
 | `bun run reset` | Drop + recreate the local DB → migrate → seed (login password `Password123!`) | 
 | `bun run migrate` | `alembic upgrade head` |
 | `bun run migrate:new "message"` | Autogenerate a new migration |
+| `bun run db:copy` | Copy a whole Postgres database onto another server (asks for both URLs, verifies row counts). See [scripts/README-db-migrate.md](scripts/README-db-migrate.md) |
 | `bun run seed` | Load `scripts/seed_data.sql` into the local DB |
 | `bun run psql` | Open a `psql` shell to `fundlok_dev` |
 | `bun run test` | Run `pytest -q` |

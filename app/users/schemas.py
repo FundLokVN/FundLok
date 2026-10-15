@@ -93,10 +93,19 @@ class UserUpdateRequest(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
     bio: Optional[str] = Field(default=None, max_length=1000)
+    email_signature: Optional[str] = Field(default=None, max_length=2000)
 
     @field_validator("bio")
     @classmethod
     def normalize_bio(cls, v):
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("email_signature")
+    @classmethod
+    def normalize_email_signature(cls, v):
         if v is None:
             return None
         v = v.strip()

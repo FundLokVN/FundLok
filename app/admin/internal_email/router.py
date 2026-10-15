@@ -77,10 +77,11 @@ async def send_test_email(
 @router.post("/preview", response_model=EmailPreview)
 async def preview_email(
     body: EmailContent,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """The rendered email, exactly as it would be sent. Sends nothing."""
-    return service.preview(body)
+    return await service.preview(db, body, actor_id=current_user.id)
 
 
 @router.post("/send", response_model=InternalEmailOut)
@@ -96,11 +97,12 @@ async def send_email(
 @router.get("/messages", response_model=list[InternalEmailOut])
 async def list_messages(
     limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """Your own sends; a system admin sees every admin's."""
-    return await service.list_messages(db, actor=current_user, limit=limit)
+    return await service.list_messages(db, actor=current_user, limit=limit, offset=offset)
 
 
 @router.get("/recipients", response_model=list[RecipientOut])

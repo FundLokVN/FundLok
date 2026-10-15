@@ -9,7 +9,6 @@ marker a remembered session would silently degrade to a session cookie on the
 first refresh — and the user would be logged out on the next browser restart
 despite ticking the box.
 """
-from conftest import auth_headers
 
 
 def _cookie_directives(response, name: str) -> str | None:

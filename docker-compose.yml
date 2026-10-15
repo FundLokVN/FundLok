@@ -89,6 +89,18 @@ services:
       redis:
         condition: service_healthy
 
+  pgweb:
+    image: sosedoff/pgweb:latest
+    container_name: pgweb
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      PGWEB_DATABASE_URL: postgres://fundlok:fundlok@postgres:5432/fundlok_dev?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   minio_data:

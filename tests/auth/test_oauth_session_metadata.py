@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from app.oauth.schema import OAuthProvider
 from app.oauth.service import GoogleOAuthProvider
-from app.users.models import RefreshToken, User
+from app.users.models import RefreshToken
 from conftest import auth_headers
 
 EDGE_WINDOWS = (
@@ -56,6 +56,10 @@ async def _oauth_login(client, *, user_agent: str = EDGE_WINDOWS):
     )
 
 
+def _oauth_headers(resp) -> dict:
+    return {"Authorization": f"Bearer {resp.cookies.get('access_token')}"}
+
+
 async def test_oauth_session_records_the_device(
     client, make_user, stub_google, db_session
 ):
@@ -83,10 +87,13 @@ async def test_oauth_session_is_legible_on_the_security_screen(
 ):
     user = await make_user()
     stub_google(user["email"])
-    await _oauth_login(client)
+    resp = await _oauth_login(client)
 
+    # Read with the Google sign-in's own token. The password session make_user
+    # opened was an unproven registrant's and the reclaim ended it, access
+    # token included (see oauth.service's reclaim docstring).
     sessions = (
-        await client.get("/auth/sessions", headers=auth_headers(user))
+        await client.get("/auth/sessions", headers=_oauth_headers(resp))
     ).json()
     oauth_session = [s for s in sessions if s["device"] == "Windows PC"]
     assert oauth_session, sessions
@@ -99,10 +106,10 @@ async def test_oauth_signin_appears_in_security_history(
 ):
     user = await make_user()
     stub_google(user["email"])
-    await _oauth_login(client)
+    resp = await _oauth_login(client)
 
     events = (
-        await client.get("/auth/security-events", headers=auth_headers(user))
+        await client.get("/auth/security-events", headers=_oauth_headers(resp))
     ).json()
     signins = [e for e in events if e["action"] == "SIGN_IN"]
     assert signins, events
