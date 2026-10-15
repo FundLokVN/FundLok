@@ -19,6 +19,9 @@ feeds into planned V2 work. Source: the HANDOFF-01 PR write-up.
   introduce the real gap: order stays `PENDING_PAYMENT` until the lender's inbound payment
   confirms via bank webhook, then → `FILLED`.
 - **Feeds into:** banking Open API integration (ADR-002/ADR-003) + the funding-flow spec.
+- **Partly mitigated (2026-10-15):** `place_order` now refuses investors whose email is unverified
+  or whose latest GVerify KYC attempt is not APPROVED, so an anonymous self-registered account can no
+  longer take a listing. The missing payment step itself is unchanged and still blocks go-live.
 
 ## Deferred (by design — not bugs)
 - No admin-provisioning endpoint — ADMIN is provisioned out-of-band (per CLAUDE.md).
