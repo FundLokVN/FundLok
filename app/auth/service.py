@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import jwt
 from jwt import InvalidTokenError
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import BackgroundTasks, HTTPException, status
@@ -20,7 +20,14 @@ from app.auth.schemas import (
     UserCreate,
 )
 from app.lending.models import AuditLog
-from app.users.models import USER_STATUS_SUSPENDED, RefreshToken, TotpRecoveryCode, User
+from app.users.models import (
+    USER_STATUS_SUSPENDED,
+    RefreshToken,
+    TotpRecoveryCode,
+    User,
+    WebAuthnChallenge,
+    WebAuthnCredential,
+)
 from app.utils.password import hash_password, verify_password
 from app.utils.jwt import (
     create_access_token,
@@ -525,6 +532,22 @@ async def revoke_other_sessions(
     return {"revoked": len(ended)}
 
 
+async def _remove_passkeys(db: AsyncSession, user_id: UUID) -> int:
+    """Delete every passkey (and any half-finished ceremony) on an account.
+    Returns how many passkeys were removed."""
+    result = await db.execute(delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user_id))
+    await db.execute(delete(WebAuthnChallenge).where(WebAuthnChallenge.user_id == user_id))
+    return result.rowcount or 0
+
+
+async def _clear_totp(db: AsyncSession, user: User) -> None:
+    """Turn 2FA off and drop its secret and recovery codes."""
+    user.totp_enabled = False
+    user.totp_secret = None
+    user.totp_confirmed_at = None
+    await db.execute(delete(TotpRecoveryCode).where(TotpRecoveryCode.user_id == user.id))
+
+
 async def register_user(
     db: AsyncSession, user_in: UserCreate, background_tasks: BackgroundTasks
 ) -> dict:
@@ -689,18 +712,39 @@ async def reset_password(
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
 
     user.password_hash = hash_password(body.new_password)
+    # The link was delivered to the address, so following it proves control of
+    # it, the same proof verify_email accepts.
+    was_verified = user.email_verified
+    user.email_verified = True
     # Sign out every session. A reset is what someone does when they think the
     # account is compromised; leaving existing sessions alive meant whoever was
     # already in stayed in with the new password set. Unlike change_password
     # there is no "current" session to spare: this request is unauthenticated.
     revoked = await revoke_other_sessions(db, user.id, current_session_id=None)
+    # Passkeys go too, for the same reason. A passkey is a sign-in of its own
+    # that never asks for the password, so one added by whoever was in (a
+    # stolen session, or a stranger who registered this address before its
+    # owner) would otherwise outlive the reset and keep them in.
+    passkeys_removed = await _remove_passkeys(db, user.id)
+    # On an account nobody had proven the address for, 2FA was enrolled by an
+    # unproven party too, and left in place it locks the real owner out behind
+    # a stranger's authenticator. Same rule as the OAuth reclaim. On a verified
+    # account 2FA stays: it is what stops a reset link alone taking it over.
+    totp_cleared = False
+    if not was_verified and (user.totp_enabled or user.totp_secret):
+        await _clear_totp(db, user)
+        totp_cleared = True
     append_audit(
         db,
         entity_type="AUTH",
         entity_id=user.id,
         action="PASSWORD_RESET",
         actor_id=user.id,
-        after_state={"sessions_revoked": revoked["revoked"]},
+        after_state={
+            "sessions_revoked": revoked["revoked"],
+            "passkeys_removed": passkeys_removed,
+            "totp_cleared": totp_cleared,
+        },
     )
     await db.commit()
 
