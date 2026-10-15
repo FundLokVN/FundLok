@@ -398,6 +398,8 @@ async def revoke_other_sessions(
 # silently becoming an alarm.
 _EVENT_SEVERITY = {
     "SIGN_IN_FAILED": "critical",
+    # The password was right and the second factor wrong: someone has it.
+    "TWO_FACTOR_FAILED": "critical",
     # An old refresh token came back after rotation: someone else may hold a
     # copy, and the session was ended because of it.
     "SESSION_REUSE_DETECTED": "critical",
