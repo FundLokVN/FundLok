@@ -6,8 +6,11 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.gverify.models import STATUS_APPROVED as KYC_APPROVED
+from app.gverify.service import latest_for_user
 from app.lending.kyc import project_has_verified_kyc
 from app.lending.models import Contract, Holding, Listing, LoanApplication, Order
+from app.users.models import User
 
 
 def _dec(value: object) -> Decimal:
@@ -73,6 +76,30 @@ async def create_listing(db: AsyncSession, contract_id: UUID, target_amount: Dec
     return lst
 
 
+async def _require_eligible_investor(db: AsyncSession, investor_id: UUID) -> None:
+    """Only a verified, identified investor may commit money to a listing.
+
+    The INVESTOR role is self-selected right after sign-up, before the email is
+    proven or any identity check has run, and an order fills on placement (see
+    GAP-2 in docs/backlog/known-gaps.md: there is no payment step yet). Without
+    this, an anonymous account could take a whole listing, lock real investors
+    out and be credited a share of every repayment. KYC is the same signal the
+    frontend gates on: the investor's latest GVerify KYC attempt is APPROVED.
+    """
+    user = (await db.execute(select(User).where(User.id == investor_id))).scalar_one_or_none()
+    if user is None or not user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Verify your email address before investing",
+        )
+    attempt = await latest_for_user(db, investor_id, "KYC")
+    if attempt is None or attempt.status != KYC_APPROVED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Complete identity verification before investing",
+        )
+
+
 async def place_order(
     db: AsyncSession,
     listing_id: UUID,
@@ -83,10 +110,19 @@ async def place_order(
 ) -> tuple[Order, bool]:
     if not ack_risk_disclosure:
         raise HTTPException(status_code=400, detail="Risk disclosure must be acknowledged")
+    await _require_eligible_investor(db, investor_id)
     if idempotency_key:
         result = await db.execute(select(Order).where(Order.idempotency_key == idempotency_key))
         existing = result.scalar_one_or_none()
         if existing:
+            # Keys are unique across all orders, so a replay is only a replay
+            # when it comes from the investor who placed the order. Anyone else
+            # gets a plain conflict, never that investor's order back.
+            if existing.investor_id != investor_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency-Key already used",
+                )
             if existing.listing_id != listing_id:
                 raise HTTPException(
                     status_code=409,

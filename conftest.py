@@ -564,9 +564,46 @@ def make_listing(client):
 
 
 @pytest.fixture
-def place_order(client):
+def make_eligible_investor(db_session):
+    """Bring an investor to where the market accepts their orders: email
+    verified and an APPROVED GVerify KYC attempt. Idempotent per investor."""
+
+    async def _make(investor: dict):
+        from app.gverify.models import STATUS_APPROVED, GVerifyVerification
+
+        user = (await db_session.execute(select(User).where(User.id == investor["id"]))).scalar_one()
+        user.email_verified = True
+        approved = (
+            await db_session.execute(
+                select(GVerifyVerification).where(
+                    GVerifyVerification.user_id == user.id,
+                    GVerifyVerification.status == STATUS_APPROVED,
+                )
+            )
+        ).scalar_one_or_none()
+        if approved is None:
+            db_session.add(
+                GVerifyVerification(
+                    user_id=user.id,
+                    verification_type="KYC",
+                    status=STATUS_APPROVED,
+                    person_number=uuid.uuid4().hex[:12],
+                )
+            )
+        await db_session.commit()
+        return investor
+
+    return _make
+
+
+@pytest.fixture
+def place_order(client, make_eligible_investor):
     async def _place(investor: dict, listing_id: str, amount: str = "1000.00", idempotency_key: str | None = None,
-                      ack_risk_disclosure: bool = True):
+                      ack_risk_disclosure: bool = True, eligible: bool = True):
+        # Most order tests are about the order, not the investor; pass
+        # eligible=False to place as an unverified, un-KYC'd account.
+        if eligible:
+            await make_eligible_investor(investor)
         headers = dict(auth_headers(investor))
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
