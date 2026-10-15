@@ -104,7 +104,7 @@ async def test_the_reset_audit_records_how_many_sessions_ended(
         await db_session.execute(select(AuditLog).where(AuditLog.action == "PASSWORD_RESET"))
     ).scalar_one()
     assert str(row.entity_id) == user["id"]
-    assert row.after_state == {"sessions_revoked": 2}
+    assert row.after_state == {"sessions_revoked": 2, "passkeys_removed": 0, "totp_cleared": False}
 
 
 # --- the link is single-use -------------------------------------------------------
