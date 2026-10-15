@@ -147,6 +147,11 @@ class Settings(BaseSettings):
     GVERIFY_PARTNER_CODE: str | None = None  # partner/subpartner "code" sent per request
     GVERIFY_OS_TYPE: str = "fundlok-backend"  # os-type header
     GVERIFY_MIN_OCR_CONFIDENCE: float = 0.85  # min person_number/full_name confidence
+    # Face similarity (the provider's `matching` %, 0-100) at or above which the
+    # portrait is taken to be the card's own photo resubmitted, not a capture of
+    # the person, and the attempt is parked for a human (spec §6 rule 11).
+    # A stopgap for the missing liveness step (spec Open Question 2).
+    GVERIFY_CARD_PHOTO_SIMILARITY: float = 98.0
     # KYB (business verification) — docs/specs/gverify/ekyb-kyb-verification.md
     GVERIFY_MIN_KYB_OCR_CONFIDENCE: float = 0.85  # min name/tax_code confidence
     # Require the SME's KYC-verified person_number to appear among the

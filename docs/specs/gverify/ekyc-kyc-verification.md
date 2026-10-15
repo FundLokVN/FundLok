@@ -233,6 +233,17 @@ PENDING ──[GVerify HTTP error / success=false]─► FAILED
    `REJECTED`, and only `APPROVED` attempts claim a number.
 10. While the latest attempt is `MANUAL_REVIEW`, a new submission is refused
     with 409 "KYC is under manual review" before any provider call.
+11. A portrait that scores as the card's own photo is parked, not approved
+    (v1.6, vbsec finding [9]). When the face match would approve but
+    `matching` ≥ `GVERIFY_CARD_PHOTO_SIMILARITY` (default 98.0), the attempt
+    ends `MANUAL_REVIEW` with the same neutral reason as rule 9 and audit
+    `review_cause: PORTRAIT_IS_CARD_PHOTO`. A live selfie and the photo printed
+    on a CCCD are the same face years apart through different cameras and
+    score well short of 100; the card portrait cropped and resubmitted scores
+    at or near 100. This is a stopgap, not liveness: a crop that is
+    re-photographed or retouched can score lower and pass. Liveness (Open
+    Question 2) is still required to close the gap. A missing or unparseable
+    `matching` does not trigger this rule.
 
 ---
 
@@ -270,6 +281,8 @@ outcome is in the body. Only provider failures surface as 5xx.
 - [ ] `test_kyc_verify_provider_error_returns_502_and_marks_failed` — client raises ⇒ 502, attempt FAILED
 - [ ] `test_kyc_status_returns_latest_attempt` — returns newest row
 - [ ] `test_kyc_status_not_found_when_never_attempted` — 404
+- [ ] `test_kyc_portrait_scoring_as_the_card_photo_goes_to_manual_review` — `matching` ≥ threshold ⇒ 201 MANUAL_REVIEW, neutral reason (rule 11)
+- [ ] `test_kyc_card_photo_review_audit_names_the_cause` — audit `review_cause: PORTRAIT_IS_CARD_PHOTO`
 
 ---
 
@@ -278,7 +291,7 @@ outcome is in the body. Only provider failures surface as 5xx.
 | # | Question | Owner | Resolution |
 |---|---|---|---|
 | 1 | Which provider wins long-term — does GVerify replace Didit for KYC, and does the cut-over rewire `/kyc/*` or keep `/gverify/kyc/*`? Needs an ADR. | Edward | — |
-| 2 | Do we require a liveness step (passive liveness = 2 portraits) before APPROVED, or is OCR + face match enough for the sandbox? | Edward | — Still open, and now the main gap: vbsec [9] showed a cropped card portrait passes face match. Rule 9 limits it to identities not yet verified on FundLok. |
+| 2 | Do we require a liveness step (passive liveness = 2 portraits) before APPROVED, or is OCR + face match enough for the sandbox? | Edward | — Still open, and now the main gap: vbsec [9] showed a cropped card portrait passes face match. Rule 9 limits it to identities not yet verified on FundLok; rule 11 (v1.6) parks an unmodified crop. A retouched crop still passes until liveness lands; until then, MANUAL verification mode is the only full mitigation. |
 | 3 | Real `GVERIFY_BASE_URL` + credentials and sandbox access from Datatrust/PATK. | Phat | — |
 | 4 | Should `person_number` be unique-per-approved-user (block one CCCD across accounts)? | Edward | Interim (v1.4): a duplicate is parked in `MANUAL_REVIEW`, not auto-approved (§6 rule 9). Open: the final policy, a KYC review endpoint to settle parked attempts, and a DB-level guard against two approvals racing. |
 | 5 | KYB via `/ekyb/api/*` (business registration OCR + tax code verify) — separate spec. | Edward | — |
@@ -295,3 +308,4 @@ outcome is in the body. Only provider failures surface as 5xx.
 | 1.3 | 2026-07-15 | Phat | Verdict = `is_matching` alone (live testing showed `match` is a binary mirror, `matching` the similarity %); dropped `GVERIFY_FACE_MATCH_THRESHOLD`; image order fixed to img1 = ID front, img2 = portrait |
 | 1.4 | 2026-09-29 | Phat | vbsec [9]: a `person_number` already approved on another account parks the attempt in `MANUAL_REVIEW` (rule 9); resubmission refused while in review (rule 10). Liveness (OQ2) still open |
 | 1.5 | 2026-09-29 | Phat | KYC endpoints (verify, handoff, handoff/verify, status) also open to SME for the KYB identity step; provider connection failures retried, 502s carry a generic message |
+| 1.6 | 2026-10-15 | Phat | Rule 11: a face match scoring ≥ `GVERIFY_CARD_PHOTO_SIMILARITY` (98.0) is parked in `MANUAL_REVIEW` as the card's own photo (stopgap for OQ2) |
