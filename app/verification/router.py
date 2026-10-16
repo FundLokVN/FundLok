@@ -163,7 +163,8 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
     trust is established by the signature, not a bearer token.
     """
     raw_body = await request.body()
-    if not service.verify_webhook(raw_body, dict(request.headers)):
+    signed = service.verify_webhook(raw_body, dict(request.headers))
+    if signed is None:
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     import json
@@ -177,7 +178,7 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
     if await service.already_processed(db, payload.get("event_id")):
         return {"received": True, "duplicate": True}
 
-    verification = await service.handle_webhook(db, payload)
+    verification = await service.handle_webhook(db, payload, signed=signed)
     if verification is not None:
         append_audit(
             db,
