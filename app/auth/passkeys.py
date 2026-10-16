@@ -59,6 +59,15 @@ PURPOSE_AUTHENTICATION = "authentication"
 # so a bug or a script cannot grow the row set without bound.
 MAX_CREDENTIALS_PER_USER = 20
 
+UV_REQUIRED_FOR_REGISTRATION = (
+    "Your account uses two-factor authentication, so a passkey must confirm "
+    "it's you with a PIN or biometric. This one did not."
+)
+UV_REQUIRED_FOR_SIGN_IN = (
+    "Your account uses two-factor authentication, so this passkey must confirm "
+    "it's you with a PIN or biometric. Sign in with your password instead."
+)
+
 
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -213,7 +222,15 @@ async def registration_options(db: AsyncSession, user: User) -> str:
             # Discoverable so sign-in can start from nothing but a tap — no
             # email typed first. That is the experience the feature is for.
             resident_key=ResidentKeyRequirement.PREFERRED,
-            user_verification=UserVerificationRequirement.PREFERRED,
+            # With 2FA on, sign-in refuses a passkey that skipped the PIN or
+            # biometric (see verify_authentication). Asking for it here makes the
+            # authenticator perform it, rather than letting the user add a
+            # passkey that can never sign them in.
+            user_verification=(
+                UserVerificationRequirement.REQUIRED
+                if user.totp_enabled
+                else UserVerificationRequirement.PREFERRED
+            ),
         ),
     )
 
@@ -250,6 +267,11 @@ async def verify_registration(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="That passkey could not be verified.",
         ) from exc
+    if user.totp_enabled and not verified.user_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=UV_REQUIRED_FOR_REGISTRATION,
+        )
 
     credential_id = _b64(verified.credential_id)
     clash = (
@@ -293,6 +315,11 @@ async def authentication_options(db: AsyncSession) -> str:
     this RP and tells us who it is afterwards. Sending a list would require
     knowing the account first, which would both defeat the point and let an
     unauthenticated caller enumerate which emails have passkeys.
+
+    PREFERRED rather than REQUIRED for the same reason: the account, and so
+    whether it has 2FA, is unknown until the assertion comes back. Platform
+    authenticators verify the user whenever they can under PREFERRED; the hard
+    requirement for 2FA accounts is applied to the assertion itself.
     """
     options = generate_authentication_options(
         rp_id=settings.webauthn_rp_id,
@@ -354,6 +381,16 @@ async def verify_authentication(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="That passkey was not recognised.",
+        )
+    if user.totp_enabled and not verified.user_verified:
+        # Passkey sign-in never asks for the TOTP code: the passkey stands in
+        # for both factors, the device held and the PIN or biometric that
+        # unlocked it. Without user verification it proves possession only,
+        # one factor, and an account that enrolled 2FA asked for two. Checked
+        # after the signature, so only the passkey's holder learns why.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=UV_REQUIRED_FOR_SIGN_IN,
         )
 
     stored.sign_count = verified.new_sign_count

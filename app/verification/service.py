@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import time
 from typing import Any
 
@@ -34,9 +35,17 @@ from app.users.models import User
 from app.verification import client
 from app.verification.models import Verification, VerificationWebhookEvent
 
+logger = logging.getLogger(__name__)
+
 # Reject webhooks whose timestamp is more than this many seconds from now
 # (replay-attack defense, per Didit docs).
 _WEBHOOK_MAX_SKEW_SECONDS = 300
+
+# How much of a delivery its signature covers; verify_webhook returns one.
+# A body signature covers every field. The simple signature covers only
+# session_id, status and webhook_type, so the rest of that body is unsigned.
+SIGNED_BODY = "body"
+SIGNED_ENVELOPE = "envelope"
 
 
 def _callback_url() -> str | None:
@@ -182,7 +191,7 @@ def _canonical_v2(parsed) -> str:
     )
 
 
-def verify_webhook(raw_body: bytes, headers: dict[str, str]) -> bool:
+def verify_webhook(raw_body: bytes, headers: dict[str, str]) -> str | None:
     """Verify a Didit webhook delivery (HMAC-SHA256, constant-time compare).
 
     Didit ships three signature headers; we accept the delivery if any supported
@@ -192,11 +201,14 @@ def verify_webhook(raw_body: bytes, headers: dict[str, str]) -> bool:
       - X-Signature-V2     : HMAC over canonical JSON (recommended; primary here)
       - X-Signature        : HMAC over the exact raw request bytes
       - X-Signature-Simple : HMAC over "{timestamp}:{session_id}:{status}:{webhook_type}"
+
+    Returns None if nothing matched, else SIGNED_BODY or SIGNED_ENVELOPE to say
+    how much of the payload the matching signature vouches for.
     """
     secret = _webhook_secret()
     if not secret:
         # Fail closed: without a configured secret we cannot trust the caller.
-        return False
+        return None
 
     # Header lookups are case-insensitive.
     lower = {k.lower(): v for k, v in headers.items()}
@@ -207,12 +219,12 @@ def verify_webhook(raw_body: bytes, headers: dict[str, str]) -> bool:
 
     # Replay protection — required.
     if timestamp is None:
-        return False
+        return None
     try:
         if abs(int(time.time()) - int(timestamp)) > _WEBHOOK_MAX_SKEW_SECONDS:
-            return False
+            return None
     except (TypeError, ValueError):
-        return False
+        return None
 
     secret_bytes = secret.encode("utf-8")
 
@@ -227,13 +239,13 @@ def verify_webhook(raw_body: bytes, headers: dict[str, str]) -> bool:
             secret_bytes, _canonical_v2(payload).encode("utf-8"), hashlib.sha256
         ).hexdigest()
         if hmac.compare_digest(signature_v2, expected):
-            return True
+            return SIGNED_BODY
 
     # Variant 2: HMAC over the exact raw body bytes.
     if signature:
         expected = hmac.new(secret_bytes, raw_body, hashlib.sha256).hexdigest()
         if hmac.compare_digest(signature, expected):
-            return True
+            return SIGNED_BODY
 
     # Variant 3: envelope-only fallback (does NOT authenticate `decision`).
     if signature_simple and payload is not None:
@@ -245,9 +257,9 @@ def verify_webhook(raw_body: bytes, headers: dict[str, str]) -> bool:
             secret_bytes, canonical.encode("utf-8"), hashlib.sha256
         ).hexdigest()
         if hmac.compare_digest(signature_simple, expected):
-            return True
+            return SIGNED_ENVELOPE
 
-    return False
+    return None
 
 
 async def already_processed(db: AsyncSession, event_id: str | None) -> bool:
@@ -266,12 +278,17 @@ async def already_processed(db: AsyncSession, event_id: str | None) -> bool:
     return result.scalar_one_or_none() is not None
 
 
-async def handle_webhook(db: AsyncSession, payload: dict[str, Any]) -> Verification | None:
+async def handle_webhook(
+    db: AsyncSession, payload: dict[str, Any], *, signed: str
+) -> Verification | None:
     """Apply a verified webhook payload to the matching verification row.
 
     The webhook is treated as a trigger: we persist the envelope status and
     any embedded decision. (Media URLs in the decision are short-lived, so
     consumers that need fresh links should re-sync.)
+
+    `signed` is verify_webhook's result. The embedded decision is stored only
+    from a SIGNED_BODY delivery; see below for SIGNED_ENVELOPE.
     """
     session_id = str(payload.get("session_id")) if payload.get("session_id") else None
     if not session_id:
@@ -293,7 +310,23 @@ async def handle_webhook(db: AsyncSession, payload: dict[str, Any]) -> Verificat
         verification.status = status
     decision = payload.get("decision")
     if decision is not None:
-        verification.decision = decision
+        if signed == SIGNED_BODY:
+            verification.decision = decision
+        else:
+            # The simple signature leaves `decision` unsigned: a delivery
+            # captured in flight can be replayed inside the 300s window with a
+            # decision of the sender's choosing. Fetch Didit's own copy
+            # instead. That call blocks (see the module docstring), but only on
+            # this fallback path, which a genuine delivery reaches only when
+            # neither body signature matched.
+            try:
+                await sync_verification(db, verification)
+            except client.DiditError as exc:
+                # Keep the signed status and let the decision catch up on the
+                # next /sync; raising would throw the status away with it.
+                logger.warning(
+                    "Didit decision re-sync failed for session %s: %s", session_id, exc
+                )
     db.add(verification)
     await db.flush()
     return verification
