@@ -9,6 +9,8 @@ differ only by the workflow run, the stored verification_type, and the role
 allowed to start them. The Didit webhook is not type-specific (keyed by
 session_id), so a single /kyc/webhook endpoint handles both.
 """
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +21,13 @@ from app.utils.rbac import require_roles
 from app.verification import service
 from app.verification.client import DiditError
 from app.verification.schemas import StartRequest, StartResponse, StatusResponse
+
+logger = logging.getLogger(__name__)
+
+# Returned with every 502. A DiditError carries Didit's response body or the
+# resolver error ("Could not reach Didit: [Errno 8] ..."), neither of which
+# belongs in front of a user.
+PROVIDER_FAILED_DETAIL = "The verification provider could not process the request. Please try again."
 
 
 def _to_status(v) -> StatusResponse:
@@ -67,8 +76,11 @@ def build_verification_router(
                 language=body.language if body else None,
             )
         except DiditError as exc:
+            # Didit's own error body and httpx/DNS details go to the log,
+            # never to the client (same rule as the GVerify router).
+            logger.warning("Didit %s start failed for user %s: %s", verification_type, current_user.id, exc)
             raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=PROVIDER_FAILED_DETAIL
             )
 
         append_audit(
@@ -119,8 +131,9 @@ def build_verification_router(
         try:
             verification = await service.sync_verification(db, verification)
         except DiditError as exc:
+            logger.warning("Didit %s sync failed for user %s: %s", verification_type, current_user.id, exc)
             raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=PROVIDER_FAILED_DETAIL
             )
         await db.commit()
         await db.refresh(verification)

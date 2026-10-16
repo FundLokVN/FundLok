@@ -38,7 +38,13 @@ from app.gverify.schemas import (
     KycVerifyResponse,
 )
 from app.gverify.service import ImageValidationError
-from app.gverify.tokens import HANDOFF_TTL, create_handoff_token, verify_handoff_token
+from app.gverify.tokens import (
+    HANDOFF_TTL,
+    INVALID_HANDOFF_DETAIL,
+    HandoffClaims,
+    create_handoff_token,
+    verify_handoff_token,
+)
 from app.users.models import USER_STATUS_SUSPENDED, Role, User
 from app.utils.audit import append_audit
 from app.utils.rbac import require_roles
@@ -51,6 +57,17 @@ PROVIDER_FAILED_DETAIL = "The verification provider could not process the reques
 # Manual verification mode, when the documents could not be stored: nothing
 # would be left for an admin to review, so the submission is not accepted.
 STORAGE_UNAVAILABLE_DETAIL = "Verification is temporarily unavailable. Please try again later."
+ATTEMPT_LIMIT_DETAIL = (
+    "Too many verification attempts in the last 24 hours. "
+    "Please try again tomorrow or contact support."
+)
+
+
+async def _enforce_attempt_limit(db: AsyncSession, user_id, kind: str) -> None:
+    """429 once the user has used today's attempts. Caller holds the per-user lock."""
+    if await service.attempts_in_last_day(db, user_id, kind) >= settings.GVERIFY_MAX_ATTEMPTS_PER_DAY:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=ATTEMPT_LIMIT_DETAIL)
+
 
 router = APIRouter(prefix="/gverify/kyc", tags=["gverify-kyc"])
 
@@ -69,15 +86,22 @@ async def _run_verification(
     body: KycVerifyRequest,
     db: AsyncSession,
     user: User,
+    handoff: HandoffClaims | None = None,
 ) -> KycVerifyResponse:
     await service.lock_user_verification(db, user.id, "KYC")
     latest = await service.latest_for_user(db, user.id)
+    # A handoff token is spent once any attempt has been made since it was
+    # minted. Checked under the lock, so two submissions racing on one token
+    # cannot both find it unspent.
+    if handoff is not None and handoff.previous_attempt_id != (str(latest.id) if latest else ""):
+        raise HTTPException(status_code=401, detail=INVALID_HANDOFF_DETAIL)
     if latest is not None and latest.is_approved:
         raise HTTPException(status_code=409, detail="KYC is already approved")
     # A parked attempt waits for a person. Resubmitting would only park again,
     # and every attempt is two billable provider calls.
     if latest is not None and latest.status == STATUS_MANUAL_REVIEW:
         raise HTTPException(status_code=409, detail="KYC is under manual review")
+    await _enforce_attempt_limit(db, user.id, "KYC")
 
     # Read per submission, uncached: a switch to MANUAL must stop provider
     # calls from the very next request.
@@ -177,11 +201,13 @@ async def create_handoff(
 
     The frontend encodes it in a QR; the phone submits the images to
     /gverify/kyc/handoff/verify with `Authorization: Bearer <token>`. The
-    token authorizes ONLY that submission and expires after 10 minutes.
+    token authorizes ONLY that submission, ONE attempt (a retry after a
+    rejection needs a new QR), and expires after 10 minutes.
     """
     current_mode_state = await system_service.get_verification_mode(db)
+    latest = await service.latest_for_user(db, current_user.id)
     return HandoffResponse(
-        token=create_handoff_token(current_user.id),
+        token=create_handoff_token(current_user.id, latest.id if latest else None),
         expires_in_seconds=int(HANDOFF_TTL.total_seconds()),
         mode=current_mode_state.mode,
     )
@@ -201,12 +227,12 @@ async def verify_via_handoff(
     """
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing handoff token")
-    user_id = verify_handoff_token(authorization.split(" ", 1)[1].strip())
+    handoff = verify_handoff_token(authorization.split(" ", 1)[1].strip())
 
-    result = await db.execute(select(User).where(User.id == UUID(user_id)))
+    result = await db.execute(select(User).where(User.id == UUID(handoff.user_id)))
     user = result.scalar_one_or_none()
     if user is None or user.role not in (Role.INVESTOR.value, Role.SME.value):
-        raise HTTPException(status_code=401, detail="Invalid or expired handoff token")
+        raise HTTPException(status_code=401, detail=INVALID_HANDOFF_DETAIL)
     # This route authenticates by handoff token, so it never passes through
     # get_current_user and does NOT inherit the suspension check from there.
     # Without this, a suspended investor's phone could still submit a
@@ -214,7 +240,7 @@ async def verify_via_handoff(
     if user.status == USER_STATUS_SUSPENDED:
         raise HTTPException(status_code=403, detail="This account has been suspended")
 
-    return await _run_verification(request, body, db, user)
+    return await _run_verification(request, body, db, user, handoff=handoff)
 
 
 @router.get("/status", response_model=KycStatusResponse)
@@ -264,6 +290,7 @@ async def kyb_verify(
     # resubmission would add another row to the admin queue.
     if latest is not None and latest.status == STATUS_MANUAL_REVIEW:
         raise HTTPException(status_code=409, detail="KYB is under manual review")
+    await _enforce_attempt_limit(db, current_user.id, "KYB")
     # Rule 7 needs the SME's own verified identity. Refuse up front rather than
     # after the (billable) certificate OCR, which could only end in rejection.
     if settings.GVERIFY_KYB_REQUIRE_REP_MATCH and not await kyb_service.approved_kyc_person_number(

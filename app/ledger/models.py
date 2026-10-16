@@ -110,12 +110,18 @@ class LedgerAccount(Base):
     custodial_account = relationship("CustodialAccount", back_populates="ledger_accounts")
 
     __table_args__ = (
+        # NULLS NOT DISTINCT (PostgreSQL 15+): the platform-level accounts
+        # (OMNIBUS_CASH, FL_REVENUE) have owner_user_id and contract_id NULL,
+        # and under the default rule NULLs never collide, so the constraint
+        # did not stop a second OMNIBUS_CASH row. get_or_create_account's
+        # ON CONFLICT relies on this constraint as its arbiter.
         UniqueConstraint(
             "account_type",
             "custodial_account_id",
             "owner_user_id",
             "contract_id",
             name="uq_ledger_accounts_role_party_contract",
+            postgresql_nulls_not_distinct=True,
         ),
     )
 

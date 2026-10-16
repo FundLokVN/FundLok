@@ -84,6 +84,7 @@ GVERIFY_API_KEY               str|None   x-api-key header value
 GVERIFY_PARTNER_CODE          str|None   partner/subpartner "code" sent per request
 GVERIFY_OS_TYPE               str        default "fundlok-backend" (os-type header)
 GVERIFY_MIN_OCR_CONFIDENCE    float      default 0.85 — min person_number/full_name confidence
+GVERIFY_MAX_ATTEMPTS_PER_DAY  int        default 5 — submissions per user per rolling 24h (rule 12; KYB counted separately)
 ```
 
 ---
@@ -132,7 +133,11 @@ JSON-only, no multipart).
 | 403 | role is not INVESTOR |
 | 409 | latest attempt is already APPROVED |
 | 422 | Pydantic validation failure (missing field) |
+| 429 | `GVERIFY_MAX_ATTEMPTS_PER_DAY` attempts already made in the last 24h (rule 12) |
 | 502 | GVerify unreachable / returned success=false envelope — attempt persisted as FAILED |
+
+`POST /gverify/kyc/handoff/verify` returns the same, plus 401 when the handoff
+token is invalid, expired, or already spent (rule 13).
 
 ### `GET /gverify/kyc/status`
 
@@ -244,6 +249,25 @@ PENDING ──[GVerify HTTP error / success=false]─► FAILED
     re-photographed or retouched can score lower and pass. Liveness (Open
     Question 2) is still required to close the gap. A missing or unparseable
     `matching` does not trigger this rule.
+12. Attempts are capped per user (v1.7, vbsec 2026-10-16). Once a user has made
+    `GVERIFY_MAX_ATTEMPTS_PER_DAY` (default 5) KYC attempts in the last 24
+    hours, a new submission is refused with 429 before any provider call.
+    Every attempt counts, whatever it ended as: each automatic one was billed
+    (OCR, plus face match unless OCR failed), and a manual-mode one adds to the
+    review queue. Counted under the per-user lock, so parallel submissions
+    cannot all pass. KYB keeps its own count (eKYB spec).
+13. A phone handoff token authorises one attempt (v1.7, vbsec 2026-10-16). The
+    token names the user's latest attempt when it was minted and is accepted
+    only while that is still the latest, so the first attempt made after it
+    (from the phone or the desktop) spends it; 401 after that. A submission
+    that creates no attempt (400 bad image, 409 mode change) leaves it usable.
+    A retry after a rejection needs a new QR; the phone page already shows its
+    "link expired, make a new QR code" message on that 401.
+14. The duplicate check in rule 9 runs under an advisory lock on the ID number
+    (`lock_id_number`), held until the attempt commits (v1.7, vbsec
+    2026-10-16). The per-user lock alone let two accounts submitting the same
+    card at once each see no committed approval and both be approved. The
+    admin approval takes the same lock.
 
 ---
 
@@ -260,6 +284,8 @@ PENDING ──[GVerify HTTP error / success=false]─► FAILED
 | Face `is_matching=false` or score < threshold | Attempt REJECTED, OCR fields still persisted | 201 with `status: REJECTED` |
 | SME/ADMIN calls the endpoint | — | 403 |
 | `GET /status` with no attempts | — | 404 |
+| Daily attempt cap reached | No row created, no provider call | 429 |
+| Handoff token already spent by an attempt | No row created, no provider call | 401 |
 
 Note: a *rejection* is a successful API call (201) — the verification business
 outcome is in the body. Only provider failures surface as 5xx.
@@ -293,7 +319,7 @@ outcome is in the body. Only provider failures surface as 5xx.
 | 1 | Which provider wins long-term — does GVerify replace Didit for KYC, and does the cut-over rewire `/kyc/*` or keep `/gverify/kyc/*`? Needs an ADR. | Edward | — |
 | 2 | Do we require a liveness step (passive liveness = 2 portraits) before APPROVED, or is OCR + face match enough for the sandbox? | Edward | — Still open, and now the main gap: vbsec [9] showed a cropped card portrait passes face match. Rule 9 limits it to identities not yet verified on FundLok; rule 11 (v1.6) parks an unmodified crop. A retouched crop still passes until liveness lands; until then, MANUAL verification mode is the only full mitigation. |
 | 3 | Real `GVERIFY_BASE_URL` + credentials and sandbox access from Datatrust/PATK. | Phat | — |
-| 4 | Should `person_number` be unique-per-approved-user (block one CCCD across accounts)? | Edward | Interim (v1.4): a duplicate is parked in `MANUAL_REVIEW`, not auto-approved (§6 rule 9). Open: the final policy, a KYC review endpoint to settle parked attempts, and a DB-level guard against two approvals racing. |
+| 4 | Should `person_number` be unique-per-approved-user (block one CCCD across accounts)? | Edward | Interim (v1.4): a duplicate is parked in `MANUAL_REVIEW`, not auto-approved (§6 rule 9). Open: the final policy and a KYC review endpoint to settle parked attempts. The race between two approvals is closed by rule 14 (v1.7). |
 | 5 | KYB via `/ekyb/api/*` (business registration OCR + tax code verify) — separate spec. | Edward | — |
 
 ---
@@ -309,3 +335,4 @@ outcome is in the body. Only provider failures surface as 5xx.
 | 1.4 | 2026-09-29 | Phat | vbsec [9]: a `person_number` already approved on another account parks the attempt in `MANUAL_REVIEW` (rule 9); resubmission refused while in review (rule 10). Liveness (OQ2) still open |
 | 1.5 | 2026-09-29 | Phat | KYC endpoints (verify, handoff, handoff/verify, status) also open to SME for the KYB identity step; provider connection failures retried, 502s carry a generic message |
 | 1.6 | 2026-10-15 | Phat | Rule 11: a face match scoring ≥ `GVERIFY_CARD_PHOTO_SIMILARITY` (98.0) is parked in `MANUAL_REVIEW` as the card's own photo (stopgap for OQ2) |
+| 1.7 | 2026-10-16 | Phat | vbsec 2026-10-16: daily attempt cap (rule 12, 429), single-use handoff tokens (rule 13), duplicate-ID check serialised on the ID number (rule 14) |
