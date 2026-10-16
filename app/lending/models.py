@@ -406,3 +406,10 @@ class AuditLog(Base):
     after_state = Column(JSONB)
     ip_address = Column(String)  # store as string; INET optional in raw DDL
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        # The auth throttles (failed sign-ins, failed 2FA codes, verification
+        # resends) count one action's rows over a recent window, on every
+        # request they guard. Without this each count scanned the whole log.
+        Index("ix_audit_logs_action_created_at", "action", "created_at"),
+    )

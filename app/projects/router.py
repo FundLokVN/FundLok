@@ -5,6 +5,8 @@ from uuid import UUID
 from app.core.database import get_db
 from app.utils.jwt import get_current_user
 from app.projects.schemas import (
+    MarketplaceLoanApplicationOut,
+    MarketplaceProjectOut,
     ProjectCreate,
     ProjectLoanApplicationOut,
     ProjectOut,
@@ -53,20 +55,23 @@ async def list_my_projects(
     return results
 
 
-@router.get("/public", response_model=List[ProjectWithApplicationOut])
+@router.get("/public", response_model=List[MarketplaceProjectOut])
 async def list_projects(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Marketplace listing. Carries the DRAFT loan application alongside the
     company so an investor can see the deal terms on the card itself, rather
-    than opening every project to find the asking amount."""
+    than opening every project to find the asking amount.
+
+    The investor schema, not the applicant's: no operator decision_note, no
+    documents (see MarketplaceLoanApplicationOut)."""
     projects = await display_projects(db, current_user)
     results = []
     for project in projects:
-        out = ProjectWithApplicationOut.model_validate(project)
+        out = MarketplaceProjectOut.model_validate(project)
         if project.loan_applications:
-            out.loan_application = ProjectLoanApplicationOut.model_validate(
+            out.loan_application = MarketplaceLoanApplicationOut.model_validate(
                 project.loan_applications[0]
             )
         results.append(out)

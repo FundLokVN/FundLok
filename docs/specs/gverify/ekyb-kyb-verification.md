@@ -141,6 +141,7 @@ cross-check, return the verdict synchronously.
 | 403 | role is not SME |
 | 409 | latest attempt already APPROVED |
 | 422 | Pydantic validation failure |
+| 429 | `GVERIFY_MAX_ATTEMPTS_PER_DAY` KYB attempts already made in the last 24h (rule 11) |
 | 502 | GVerify unreachable / success=false — attempt persisted FAILED |
 
 ### `GET /gverify/kyb/status`
@@ -223,6 +224,11 @@ Retry = new row; latest APPROVED ⇒ 409 on further attempts.
 10. Provider-side invalid messages (anti-spoofing etc.) surface verbatim in
     `rejection_reason` — never masked by a generic message (lesson from the
     KYC face-check bug, live incident 2026-07-13).
+11. Attempts are capped per user (v1.5, vbsec 2026-10-16): after
+    `GVERIFY_MAX_ATTEMPTS_PER_DAY` (default 5) KYB attempts in the last 24
+    hours a new submission gets 429 before any provider call. Each attempt
+    bills OCR X and, unless OCR failed, the tax registry. Counted separately
+    from KYC, so an SME's identity step does not use up its KYB attempts.
 
 ---
 
@@ -239,6 +245,7 @@ Retry = new row; latest APPROVED ⇒ 409 on further attempts.
 | Rep-match enabled and no KYC-verified representative | Row REJECTED | 201 REJECTED |
 | Tax Verify unreachable after OCR succeeded | Row FAILED (OCR fields still stored) | 502 |
 | Non-SME caller | — | 403 |
+| Daily attempt cap reached | No row, no provider call | 429 |
 
 ---
 
@@ -304,3 +311,4 @@ Retry = new row; latest APPROVED ⇒ 409 on further attempts.
 | 1.2 | 2026-07-15 | Phat | Aligned to the provider integration guide: dropped HOUSEHOLD; added MANUAL_REVIEW outcome (low OCR confidence, registry cross-check mismatches/incomplete data); added tax-code echo and legal-representative cross-checks |
 | 1.3 | 2026-07-20 | Phat | Tax-verify uses the VERIFIED working contract (lowercase `id` + required `license_code`, KYB plan §7.3), fixing ERROR_01; added `license_code` column, declared-fallback, cross-check, and a request contract test; ERROR_23 → REJECTED not 502 |
 | 1.4 | 2026-09-29 | Phat | Identity (KYC) step inside the KYB flow; KYC endpoints open to SME; flag-on submission without approved KYC → 409 KYC_REQUIRED before any provider call; `rejection_code` NOT_A_REPRESENTATIVE |
+| 1.5 | 2026-10-16 | Phat | vbsec 2026-10-16: daily attempt cap per user (rule 11, 429) |

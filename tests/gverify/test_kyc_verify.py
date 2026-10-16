@@ -622,3 +622,237 @@ async def test_kyc_card_photo_review_audit_names_the_cause(
         )
     ).scalar_one()
     assert row.after_state["review_cause"] == "PORTRAIT_IS_CARD_PHOTO"
+
+
+# --------------------------------------------------------------------------- #
+# vbsec 2026-10-16: the CCCD check under concurrency, the daily attempt cap,
+# and single-use handoff tokens.
+# --------------------------------------------------------------------------- #
+
+
+async def test_kyc_same_id_submitted_at_once_approves_only_one_account(
+    client, make_investor, mock_gverify, db_session
+):
+    # The duplicate check ran under the per-user lock only, so two accounts
+    # submitting the same card at once each saw no committed approval and both
+    # were APPROVED. Straight at the service, each in its own session (the
+    # test client shares one session, so it cannot race), committing like the
+    # router does.
+    import asyncio
+
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.gverify import service
+    from app.gverify.models import GVerifyVerification
+    from app.users.models import User
+
+    accounts = [await make_investor() for _ in range(3)]
+
+    async def submit(account) -> None:
+        async with SessionLocal() as session:
+            user = await session.get(User, uuid.UUID(account["id"]))
+            await service.run_kyc_verification(
+                session,
+                user,
+                id_front_b64=_body()["id_front_b64"],
+                id_back_b64=_body()["id_back_b64"],
+                portrait_b64=_body()["portrait_b64"],
+            )
+            await session.commit()
+
+    await asyncio.gather(*[submit(a) for a in accounts])
+
+    statuses = sorted(
+        (await db_session.execute(select(GVerifyVerification.status))).scalars().all()
+    )
+    assert statuses == ["APPROVED", "MANUAL_REVIEW", "MANUAL_REVIEW"]
+
+
+async def test_kyc_attempts_are_capped_per_day(client, make_investor, mock_gverify, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "GVERIFY_MAX_ATTEMPTS_PER_DAY", 2)
+    investor = await make_investor()
+    mock_gverify.face = _face_data(is_matching=False)
+    for _ in range(2):
+        assert (await _verify(client, investor)).json()["status"] == "REJECTED"
+
+    resp = await _verify(client, investor)
+
+    assert resp.status_code == 429
+    assert "24 hours" in resp.json()["detail"]
+    # Refused before the provider is called: the cap exists to stop billing.
+    assert mock_gverify.ocr_calls == 2
+
+
+async def test_kyc_cap_counts_failed_attempts(client, make_investor, mock_gverify, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "GVERIFY_MAX_ATTEMPTS_PER_DAY", 1)
+    investor = await make_investor()
+    mock_gverify.ocr = GVerifyError("provider down")
+    assert (await _verify(client, investor)).status_code == 502
+
+    assert (await _verify(client, investor)).status_code == 429
+
+
+async def test_kyc_cap_is_a_rolling_day(
+    client, make_investor, mock_gverify, monkeypatch, db_session
+):
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from app.core.config import settings
+    from app.gverify.models import GVerifyVerification
+
+    monkeypatch.setattr(settings, "GVERIFY_MAX_ATTEMPTS_PER_DAY", 1)
+    investor = await make_investor()
+    mock_gverify.face = _face_data(is_matching=False)
+    await _verify(client, investor)
+    await db_session.execute(
+        update(GVerifyVerification).values(
+            created_at=GVerifyVerification.created_at - timedelta(days=1, seconds=1)
+        )
+    )
+    await db_session.commit()
+    mock_gverify.face = _face_data()
+
+    resp = await _verify(client, investor)
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["status"] == "APPROVED"
+
+
+async def test_kyc_cap_is_per_user(client, make_investor, mock_gverify, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "GVERIFY_MAX_ATTEMPTS_PER_DAY", 1)
+    first, second = await make_investor(), await make_investor()
+    mock_gverify.face = _face_data(is_matching=False)
+    await _verify(client, first)
+
+    assert (await _verify(client, second)).status_code == 201
+
+
+async def _handoff_token(client, user) -> str:
+    resp = await client.post("/gverify/kyc/handoff", headers=user["headers"])
+    assert resp.status_code == 201, resp.text
+    return resp.json()["token"]
+
+
+async def _phone(client, token: str, **body):
+    return await client.post(
+        "/gverify/kyc/handoff/verify",
+        json=_body(**body),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+async def test_kyc_handoff_token_is_spent_by_its_first_attempt(
+    client, make_investor, mock_gverify
+):
+    investor = await make_investor()
+    token = await _handoff_token(client, investor)
+    mock_gverify.face = _face_data(is_matching=False)
+    assert (await _phone(client, token)).json()["status"] == "REJECTED"
+
+    again = await _phone(client, token)
+
+    assert again.status_code == 401
+    assert again.json() == {"detail": "Invalid or expired handoff token"}
+    assert mock_gverify.ocr_calls == 1
+
+
+async def test_kyc_handoff_token_survives_a_submission_that_made_no_attempt(
+    client, make_investor, mock_gverify
+):
+    # A bad image is refused before any attempt exists, so the phone can
+    # retake the photo without a new QR.
+    investor = await make_investor()
+    token = await _handoff_token(client, investor)
+    assert (await _phone(client, token, portrait_b64="!!!not-base64!!!")).status_code == 400
+
+    resp = await _phone(client, token)
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["status"] == "APPROVED"
+
+
+async def test_kyc_handoff_token_is_spent_by_a_desktop_attempt_too(
+    client, make_investor, mock_gverify
+):
+    investor = await make_investor()
+    token = await _handoff_token(client, investor)
+    mock_gverify.face = _face_data(is_matching=False)
+    await _verify(client, investor)
+
+    assert (await _phone(client, token)).status_code == 401
+
+
+async def test_kyc_new_handoff_token_after_a_rejection_works(client, make_investor, mock_gverify):
+    investor = await make_investor()
+    mock_gverify.face = _face_data(is_matching=False)
+    await _phone(client, await _handoff_token(client, investor))
+    mock_gverify.face = _face_data()
+
+    resp = await _phone(client, await _handoff_token(client, investor))
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["status"] == "APPROVED"
+
+
+async def test_kyc_handoff_token_used_twice_at_once_makes_one_attempt(
+    client, make_investor, mock_gverify
+):
+    # Straight at the router's shared path, each in its own session, so the
+    # two submissions really race for the per-user lock.
+    import asyncio
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from app.core.database import SessionLocal
+    from app.gverify.router import _run_verification
+    from app.gverify.schemas import KycVerifyRequest
+    from app.gverify.tokens import verify_handoff_token
+    from app.users.models import User
+
+    investor = await make_investor()
+    claims = verify_handoff_token(await _handoff_token(client, investor))
+    request = Request({"type": "http", "client": ("127.0.0.1", 0), "headers": []})
+
+    async def submit() -> int:
+        async with SessionLocal() as session:
+            user = await session.get(User, uuid.UUID(investor["id"]))
+            try:
+                await _run_verification(
+                    request, KycVerifyRequest(**_body()), session, user, handoff=claims
+                )
+            except HTTPException as exc:
+                return exc.status_code
+            return 201
+
+    codes = sorted(await asyncio.gather(submit(), submit()))
+
+    assert codes == [201, 401]
+    assert mock_gverify.ocr_calls == 1
+
+
+async def test_kyc_handoff_token_without_the_single_use_claim_is_refused(
+    client, make_investor, mock_gverify
+):
+    # Shaped like a token minted before single use existed.
+    from datetime import timedelta
+
+    from app.utils.jwt import create_access_token
+
+    investor = await make_investor()
+    legacy = create_access_token(
+        data={"sub": investor["id"], "purpose": "gverify_kyc_handoff"},
+        expires_delta=timedelta(minutes=10),
+    )
+
+    assert (await _phone(client, legacy)).status_code == 401
+    assert mock_gverify.ocr_calls == 0

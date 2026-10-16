@@ -122,3 +122,35 @@ async def test_a_miss_is_on_the_owners_security_screen(client, make_user, db_ses
     assert events.status_code == 200, events.text
     [event] = [e for e in events.json() if e["action"] == "TWO_FACTOR_FAILED"]
     assert event["severity"] == "critical"
+
+
+async def test_the_limit_holds_under_parallel_guesses(client, make_user):
+    # vbsec 2026-10-16: the count was read before the code was checked and
+    # written after, with nothing in between, so a burst of parallel requests
+    # all read a count under the limit and each got a guess. Straight at the
+    # service, each guess in its own session (the test client shares one
+    # session, so it cannot race).
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.auth import service
+    from app.core.database import SessionLocal
+
+    user = await make_user()
+    secret, _ = await enrol(client, user)
+    challenge = await _challenge(client, user)
+    extra = 3
+
+    async def one_guess() -> int:
+        async with SessionLocal() as session:
+            try:
+                await service.complete_totp_login(session, challenge, _wrong(secret))
+            except HTTPException as exc:
+                return exc.status_code
+            return 200
+
+    codes = await asyncio.gather(*[one_guess() for _ in range(MAX_SECOND_FACTOR_FAILURES + extra)])
+
+    assert codes.count(401) == MAX_SECOND_FACTOR_FAILURES, codes
+    assert codes.count(429) == extra, codes

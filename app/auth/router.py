@@ -252,8 +252,18 @@ async def verify_email(token: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/resend-verification")
-async def resend_verification(body: ResendVerificationRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
-    return await service.resend_verification(db, body.email, background_tasks)
+async def resend_verification(
+    request: Request,
+    body: ResendVerificationRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    return await service.resend_verification(
+        db,
+        body,
+        background_tasks,
+        ip_address=request.client.host if request.client else None,
+    )
 
 
 @router.post("/refresh", response_model=Token)

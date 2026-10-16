@@ -145,3 +145,30 @@ class ProjectLoanApplicationOut(BaseModel):
 
 class ProjectWithApplicationOut(ProjectOut):
     loan_application: ProjectLoanApplicationOut | None = None
+
+
+class MarketplaceLoanApplicationOut(BaseModel):
+    """The deal terms an investor sees on a marketplace card.
+
+    Deliberately not ProjectLoanApplicationOut, which is the applicant's own
+    view: it carries the operator's decision_note (written for the SME) and
+    the document list with storage keys and original filenames. A field
+    added there must not reach every investor by default, so this one lists
+    what the card shows and nothing else.
+    """
+
+    id: UUID
+    project_id: UUID
+    requested_amount: int
+    duration_months: int | None = None
+    purpose: str | None
+    repayment_preference: str | None
+    status: str
+    submitted_at: datetime | None
+    created_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class MarketplaceProjectOut(ProjectOut):
+    loan_application: MarketplaceLoanApplicationOut | None = None

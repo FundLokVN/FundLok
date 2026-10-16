@@ -415,3 +415,61 @@ async def test_cross_contract_transaction_rejected(db_session, funded_contract):
         select(LedgerTransaction).where(LedgerTransaction.event_type == "CROSS_CONTRACT_ATTEMPT")
     )
     assert result.scalar_one_or_none() is None
+
+
+# --------------------------------------------------------------------------- #
+# vbsec 2026-10-16: platform-level accounts are unique too. Their
+# owner_user_id and contract_id are NULL, and the unique constraint treated
+# NULLs as distinct, so it never stopped a second OMNIBUS_CASH row.
+# --------------------------------------------------------------------------- #
+
+
+async def _platform_custodial_id(db_session) -> uuid.UUID:
+    return (
+        await db_session.execute(select(CustodialAccount.id).where(CustodialAccount.scope == "PLATFORM"))
+    ).scalar_one()
+
+
+async def test_a_second_platform_account_of_one_type_is_refused(db_session):
+    custodial_id = await _platform_custodial_id(db_session)
+    db_session.add(LedgerAccount(account_type="FL_REVENUE", custodial_account_id=custodial_id))
+    db_session.add(LedgerAccount(account_type="FL_REVENUE", custodial_account_id=custodial_id))
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
+
+
+async def test_get_or_create_account_returns_the_existing_platform_account(db_session):
+    custodial_id = await _platform_custodial_id(db_session)
+
+    first = await get_or_create_account(db_session, account_type="FL_REVENUE", custodial_account_id=custodial_id)
+    second = await get_or_create_account(db_session, account_type="FL_REVENUE", custodial_account_id=custodial_id)
+
+    assert first.id == second.id
+
+
+async def test_concurrent_first_postings_create_one_platform_account(db_session):
+    # Straight at the service, each in its own session so the inserts really
+    # race. Before, every one of them inserted, and every later lookup then
+    # failed with MultipleResultsFound.
+    import asyncio
+
+    from app.core.database import SessionLocal
+
+    custodial_id = await _platform_custodial_id(db_session)
+
+    async def first_posting() -> uuid.UUID:
+        async with SessionLocal() as session:
+            account = await get_or_create_account(
+                session, account_type="OMNIBUS_CASH", custodial_account_id=custodial_id
+            )
+            await session.commit()
+            return account.id
+
+    ids = await asyncio.gather(*[first_posting() for _ in range(6)])
+
+    assert len(set(ids)) == 1
+    rows = (
+        await db_session.execute(select(LedgerAccount).where(LedgerAccount.account_type == "OMNIBUS_CASH"))
+    ).scalars().all()
+    assert [r.id for r in rows] == [ids[0]]

@@ -94,6 +94,9 @@ class TokenData(BaseModel):
 
 class ResendVerificationRequest(BaseModel):
     email: EmailStr
+    # Public endpoint that sends mail, so it carries the same captcha as
+    # register and forgot-password.
+    turnstile_token: str | None = None
 
 
 class ForgotPasswordRequest(BaseModel):

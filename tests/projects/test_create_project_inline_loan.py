@@ -132,7 +132,53 @@ async def test_public_listing_carries_the_loan_terms(client, make_user, db_sessi
     # NUMERIC and come back as e.g. Decimal('8E+8') for a round amount like
     # this one, which `int` sidesteps entirely (see app/projects/schemas.py).
     assert match["loan_application"]["requested_amount"] == 80000000
-    assert match["loan_application"]["documents"] == []
+
+
+async def test_public_listing_hides_the_applicant_only_fields(client, make_user, db_session):
+    """vbsec 2026-10-16: the listing reused the applicant's own schema, so every
+    investor read each SME's operator decision_note and its document metadata
+    (storage key, original filename)."""
+    from sqlalchemy import select
+
+    from app.lending.models import LoanApplication, Project
+
+    sme = await make_user(role="SME")
+    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    assert created.status_code == 201, created.text
+    project_id = created.json()["id"]
+    project = (
+        await db_session.execute(select(Project).where(Project.id == project_id))
+    ).scalar_one()
+    project.status = "ACTIVE"
+    application = (
+        await db_session.execute(
+            select(LoanApplication).where(LoanApplication.project_id == project_id)
+        )
+    ).scalar_one()
+    application.decision_note = "Internal: director has a prior default"
+    await db_session.commit()
+
+    investor = await make_user(role="INVESTOR")
+    listed = await client.get("/projects/public", headers=auth_headers(investor))
+    assert listed.status_code == 200, listed.text
+    match = next(p for p in listed.json() if p["id"] == project_id)
+
+    assert set(match["loan_application"]) == {
+        "id",
+        "project_id",
+        "requested_amount",
+        "duration_months",
+        "purpose",
+        "repayment_preference",
+        "status",
+        "submitted_at",
+        "created_at",
+    }
+    assert "prior default" not in listed.text
+
+    # The applicant still sees their own note.
+    own = await client.get("/projects", headers=auth_headers(sme))
+    assert own.json()[0]["loan_application"]["decision_note"] == application.decision_note
 
 
 async def test_public_listing_without_an_application_returns_null(

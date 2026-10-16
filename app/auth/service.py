@@ -16,6 +16,7 @@ from app.utils.email import send_new_device_signin_alert
 from app.auth.schemas import (
     ForgotPasswordRequest,
     LoginRequest,
+    ResendVerificationRequest,
     ResetPasswordRequest,
     UserCreate,
 )
@@ -43,7 +44,8 @@ from app.utils.email import (
     send_verification_email,
 )
 from app.utils.audit import append_audit
-from app.utils.captcha import verify_turnstile_token
+from app.utils.captcha import verify_turnstile_token, verify_turnstile_token_async
+from app.utils.locks import advisory_xact_lock
 from app.core.config import settings
 
 
@@ -358,8 +360,23 @@ async def login(
 ) -> tuple[User, dict]:
     verify_turnstile_token(login_data.turnstile_token)
 
+    # Checked before the password, so a locked account answers the same way
+    # whether or not the guess was right. The lock makes count, verify and
+    # record one step: without it a burst of parallel guesses all read the
+    # count before any failure is written.
+    login_key = _login_throttle_key(login_data.email)
+    await advisory_xact_lock(db, f"auth-login:{login_key}")
+    if await _recent_failed_logins(db, login_key) >= MAX_FAILED_LOGINS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed sign-in attempts. Try again in 15 minutes.",
+        )
+
     user = await authenticate_user(db, login_data.email, login_data.password)
     if not user:
+        await _record_failed_login(db, login_data.email, login_key, ip_address)
+        # Committed before raising, or the rollback would take the count with it.
+        await db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -407,6 +424,59 @@ async def login(
         )
 
     return user, tokens
+
+
+# Wrong passwords allowed per email address inside the window before /login
+# stops checking them. Per address, not per IP: until TRUSTED_PROXY_HOPS is
+# set, every request behind the load balancer shares one peer address, so a
+# per-IP counter would be a single global one. Keyed by address rather than
+# account so an unknown address locks the same way a real one does; locking
+# only real accounts would tell a caller which addresses are registered.
+MAX_FAILED_LOGINS = 10
+FAILED_LOGIN_WINDOW = timedelta(minutes=15)
+SIGN_IN_FAILED = "SIGN_IN_FAILED"
+
+
+def _login_throttle_key(email: str) -> str:
+    """A keyed digest of the normalised address, so audit rows for unknown
+    addresses do not store whatever a caller typed."""
+    return hmac.new(
+        settings.SECRET_KEY.encode(),
+        f"login:{email.strip().lower()}".encode(),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+
+
+async def _recent_failed_logins(db: AsyncSession, login_key: str) -> int:
+    since = datetime.now(timezone.utc) - FAILED_LOGIN_WINDOW
+    result = await db.execute(
+        select(func.count(AuditLog.id)).where(
+            AuditLog.action == SIGN_IN_FAILED,
+            AuditLog.after_state["login_key"].astext == login_key,
+            AuditLog.created_at >= since,
+        )
+    )
+    return result.scalar_one()
+
+
+async def _record_failed_login(
+    db: AsyncSession, email: str, login_key: str, ip_address: str | None
+) -> None:
+    # When the address has an account, the row is on the owner's security
+    # history (actor = the account, as for TWO_FACTOR_FAILED), so a stream of
+    # wrong passwords is something they can see.
+    owner_id = (
+        await db.execute(select(User.id).where(User.email == email))
+    ).scalar_one_or_none()
+    append_audit(
+        db,
+        entity_type="AUTH",
+        entity_id=owner_id,
+        action=SIGN_IN_FAILED,
+        actor_id=owner_id,
+        after_state={"login_key": login_key},
+        ip_address=ip_address,
+    )
 
 
 async def is_unseen_device(
@@ -638,19 +708,77 @@ async def verify_email(db: AsyncSession, token: str) -> dict:
     return {"status": "success", "message": "Email verified successfully"}
 
 
-async def resend_verification(db: AsyncSession, email: str, background_tasks: BackgroundTasks) -> dict:
-    result = await db.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
-    if not user:
-        # Avoid user enumeration by returning a success-like message even if user doesn't exist.
-        return {"status": "success", "message": "If the email exists, a verification link has been sent."}
+# Resend is public and every call that reaches an unverified account mails it,
+# so without a limit it is a mail bomb aimed at any address registered once.
+# Per account: one email per cooldown, and a ceiling per day. Counted from
+# audit_logs, like the 2FA limit.
+VERIFICATION_RESEND_COOLDOWN = timedelta(minutes=2)
+MAX_VERIFICATION_EMAILS_PER_DAY = 5
+VERIFICATION_EMAIL_SENT = "VERIFICATION_EMAIL_SENT"
 
-    if user.email_verified:
-        return {"status": "success", "message": "Email already verified"}
+# The one answer resend gives, whatever happened.
+RESEND_VERIFICATION_ACK = {
+    "status": "success",
+    "message": "If this email is registered and not yet verified, a verification link has been sent.",
+}
+
+
+async def resend_verification(
+    db: AsyncSession,
+    body: ResendVerificationRequest,
+    background_tasks: BackgroundTasks,
+    *,
+    ip_address: str | None = None,
+) -> dict:
+    """Mail a fresh verification link, at most once per cooldown per account.
+
+    Unknown, already verified, throttled and sent all return the same
+    message. Distinct answers told a caller which addresses have accounts
+    (register and forgot-password already refuse to), and a throttled answer
+    would tell them the same thing.
+    """
+    await verify_turnstile_token_async(body.turnstile_token)
+
+    result = await db.execute(select(User).where(User.email == body.email))
+    user = result.scalar_one_or_none()
+    if user is None or user.email_verified:
+        return dict(RESEND_VERIFICATION_ACK)
+
+    # Count-then-send: without the lock a burst of parallel calls all read
+    # the same count and each sends.
+    await advisory_xact_lock(db, f"auth-resend-verification:{user.id}")
+    now = datetime.now(timezone.utc)
+    sent_today, last_sent = (
+        await db.execute(
+            select(func.count(AuditLog.id), func.max(AuditLog.created_at)).where(
+                AuditLog.entity_id == user.id,
+                AuditLog.action == VERIFICATION_EMAIL_SENT,
+                AuditLog.created_at >= now - timedelta(days=1),
+            )
+        )
+    ).one()
+    if sent_today >= MAX_VERIFICATION_EMAILS_PER_DAY or (
+        last_sent is not None and now - last_sent < VERIFICATION_RESEND_COOLDOWN
+    ):
+        # Nothing to write; ends the transaction so the lock goes with it.
+        await db.commit()
+        return dict(RESEND_VERIFICATION_ACK)
+
+    # No actor: the caller is anonymous, and this is not something the owner
+    # did, so it stays off their security history.
+    append_audit(
+        db,
+        entity_type="AUTH",
+        entity_id=user.id,
+        action=VERIFICATION_EMAIL_SENT,
+        actor_id=None,
+        ip_address=ip_address,
+    )
+    await db.commit()
 
     token = create_verification_token(user.id)
     background_tasks.add_task(send_verification_email, to_email=user.email, token=token)
-    return {"status": "success", "message": "Verification link has been sent."}
+    return dict(RESEND_VERIFICATION_ACK)
 
 
 async def forgot_password(db: AsyncSession, body: ForgotPasswordRequest, background_tasks: BackgroundTasks) -> dict:
@@ -924,6 +1052,11 @@ async def complete_totp_login(
     # a limit, whoever had the password could re-mint challenges and try codes
     # until one landed (about 1 in 330,000 per guess, three codes being live
     # at once). Counted per account, not per challenge, for that reason.
+    #
+    # Locked so that count, verify and record are one step per account.
+    # Without it, parallel requests all read the count before any failure is
+    # written, and a burst of hundreds got hundreds of guesses.
+    await advisory_xact_lock(db, f"auth-2fa:{user.id}")
     if await _recent_second_factor_failures(db, user.id) >= MAX_SECOND_FACTOR_FAILURES:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

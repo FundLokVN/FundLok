@@ -669,3 +669,42 @@ async def test_kyc_verify_rejects_oversized_b64(client, make_user):
     )
     assert resp.status_code == 422
 
+
+
+async def test_kyb_attempts_are_capped_per_day(client, make_sme, mock_gverify_kyb, monkeypatch):
+    # vbsec 2026-10-16: every KYB attempt bills OCR plus the tax registry, and
+    # resubmission after a rejection was unlimited.
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "GVERIFY_MAX_ATTEMPTS_PER_DAY", 2)
+    sme = await make_sme()
+    mock_gverify_kyb.tax = _tax_data(is_valid=False)
+    for _ in range(2):
+        resp = await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
+        assert resp.json()["status"] == "REJECTED"
+
+    resp = await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
+
+    assert resp.status_code == 429
+    assert mock_gverify_kyb.ocr_calls == 2
+
+
+async def test_kyb_cap_does_not_count_kyc_attempts(
+    client, make_sme, mock_gverify_kyb, monkeypatch, db_session
+):
+    # Counted per flow: an SME's KYC step must not use up its KYB attempts.
+    import uuid as _uuid
+
+    from app.core.config import settings
+    from app.gverify.models import GVerifyVerification
+
+    monkeypatch.setattr(settings, "GVERIFY_MAX_ATTEMPTS_PER_DAY", 1)
+    sme = await make_sme()
+    db_session.add(
+        GVerifyVerification(user_id=_uuid.UUID(sme["id"]), status="REJECTED", verification_type="KYC")
+    )
+    await db_session.commit()
+
+    resp = await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
+
+    assert resp.status_code == 201, resp.text

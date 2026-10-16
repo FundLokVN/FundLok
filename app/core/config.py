@@ -157,6 +157,10 @@ class Settings(BaseSettings):
     # Require the SME's KYC-verified person_number to appear among the
     # certificate's legal representatives (spec Rule 7, default off pending review).
     GVERIFY_KYB_REQUIRE_REP_MATCH: bool = False
+    # Submissions allowed per user per rolling 24 hours, counted separately for
+    # KYC and KYB. Every automatic attempt is billable provider calls (OCR plus
+    # face match, or OCR plus the tax registry), and a rejection invites a retry.
+    GVERIFY_MAX_ATTEMPTS_PER_DAY: int = 5
 
     # ARQ worker (T2 -- HANDOFF-03). The daily repayment batch and ML scoring
     # run through ARQ, never BackgroundTasks (CLAUDE.md). Points at the

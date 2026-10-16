@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +29,7 @@ from app.gverify.models import (
     STATUS_MANUAL_REVIEW,
     STATUS_PENDING,
     STATUS_REJECTED,
+    GVerifyKybVerification,
     GVerifyVerification,
 )
 from app.users.models import User
@@ -234,7 +236,7 @@ async def run_kyc_verification(
         # does not teach the trick.
         attempt.status = STATUS_MANUAL_REVIEW
         attempt.rejection_reason = MANUAL_REVIEW_REASON
-    elif await person_number_approved_elsewhere(db, attempt.person_number, user.id):
+    elif await _approved_elsewhere_locked(db, attempt.person_number, user.id):
         # One CCCD, one verified account. Face match alone can't tell a real
         # selfie from the card's own portrait cropped and resubmitted, so
         # anyone holding a photo of someone else's ID could otherwise verify
@@ -331,6 +333,44 @@ async def person_number_approved_elsewhere(
 ) -> bool:
     """True if another account already holds an APPROVED KYC with this ID number."""
     return bool(await approved_elsewhere(db, person_number, user_id))
+
+
+async def _approved_elsewhere_locked(
+    db: AsyncSession, person_number: str | None, user_id
+) -> bool:
+    """person_number_approved_elsewhere, serialised on the ID number.
+
+    The per-user lock does not cover this: two accounts submitting the same
+    card at once each hold their own, each saw no committed approval, and
+    both were approved. Held until the caller commits, so the second waits
+    and then sees the first one's verdict. The admin approval takes the same
+    lock (resolve_kyc_verification).
+    """
+    await lock_id_number(db, person_number)
+    return await person_number_approved_elsewhere(db, person_number, user_id)
+
+
+async def attempts_in_last_day(db: AsyncSession, user_id, kind: str) -> int:
+    """How many KYC or KYB attempts the user has made in the last 24 hours.
+
+    Every attempt counts, whatever it ended as: each one the provider saw was
+    billed, and a manual-mode one adds to the review queue. The caller must
+    hold lock_user_verification, or parallel submissions all read the same
+    count.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    if kind == "KYB":
+        query = select(func.count(GVerifyKybVerification.id)).where(
+            GVerifyKybVerification.user_id == user_id,
+            GVerifyKybVerification.created_at >= since,
+        )
+    else:
+        query = select(func.count(GVerifyVerification.id)).where(
+            GVerifyVerification.user_id == user_id,
+            GVerifyVerification.verification_type == kind,
+            GVerifyVerification.created_at >= since,
+        )
+    return (await db.execute(query)).scalar_one()
 
 
 def face_match_score(attempt: GVerifyVerification) -> float | None:

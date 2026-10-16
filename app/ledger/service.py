@@ -33,9 +33,10 @@ from __future__ import annotations
 import dataclasses
 from decimal import Decimal
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ledger.models import CustodialAccount, LedgerAccount, LedgerEntry, LedgerTransaction
@@ -128,28 +129,35 @@ async def get_or_create_account(
     """Fetch the (account_type, custodial_account_id, owner_user_id,
     contract_id) account, creating it on first use. This is the only
     construction path for LedgerAccount rows -- callers never build one
-    directly, so the uniqueness key stays enforced in one place."""
-    result = await db.execute(
-        select(LedgerAccount).where(
-            LedgerAccount.account_type == account_type,
-            LedgerAccount.custodial_account_id == custodial_account_id,
-            LedgerAccount.owner_user_id == owner_user_id,
-            LedgerAccount.contract_id == contract_id,
-        )
+    directly, so the uniqueness key stays enforced in one place.
+
+    Safe under concurrency: two first postings racing on the same key both
+    INSERT ... ON CONFLICT DO NOTHING, the loser waits for the winner's
+    commit and inserts nothing, and both then read the one row. Before, both
+    inserted (the constraint treated the platform accounts' NULLs as
+    distinct), and every later lookup failed with MultipleResultsFound."""
+    lookup = select(LedgerAccount).where(
+        LedgerAccount.account_type == account_type,
+        LedgerAccount.custodial_account_id == custodial_account_id,
+        LedgerAccount.owner_user_id == owner_user_id,
+        LedgerAccount.contract_id == contract_id,
     )
-    account = result.scalar_one_or_none()
+    account = (await db.execute(lookup)).scalar_one_or_none()
     if account is not None:
         return account
 
-    account = LedgerAccount(
-        account_type=account_type,
-        custodial_account_id=custodial_account_id,
-        owner_user_id=owner_user_id,
-        contract_id=contract_id,
+    await db.execute(
+        pg_insert(LedgerAccount)
+        .values(
+            id=uuid4(),
+            account_type=account_type,
+            custodial_account_id=custodial_account_id,
+            owner_user_id=owner_user_id,
+            contract_id=contract_id,
+        )
+        .on_conflict_do_nothing(constraint="uq_ledger_accounts_role_party_contract")
     )
-    db.add(account)
-    await db.flush()
-    return account
+    return (await db.execute(lookup)).scalar_one()
 
 
 async def get_account_balance(db: AsyncSession, account_id: UUID) -> Decimal:

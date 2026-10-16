@@ -129,15 +129,12 @@ async def display_projects(db: AsyncSession, current_user: User):
     # The investor marketplace card shows the deal terms (asking amount), not
     # just the company, so the application rides along. Eager-loaded for the
     # same reason as get_my_projects: a lazy load during response serialisation
-    # raises MissingGreenlet on an AsyncSession.
+    # raises MissingGreenlet on an AsyncSession. Documents are not loaded: the
+    # investor schema does not carry them.
     result = await db.execute(
         select(Project)
         .where(Project.status == "ACTIVE")
-        .options(
-            selectinload(Project.loan_applications).selectinload(
-                LoanApplication.documents
-            )
-        )
+        .options(selectinload(Project.loan_applications))
     )
     return result.scalars().all()
 
