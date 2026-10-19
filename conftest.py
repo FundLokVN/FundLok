@@ -362,7 +362,7 @@ def make_admin(make_user, db_session):
         row = result.scalar_one()
         row.role = "ADMIN"
         await db_session.commit()
-        return user
+        return await _second_factor_session(db_session, user)
 
     return _make
 
@@ -377,9 +377,28 @@ def make_system_admin(make_user, db_session):
         row = result.scalar_one()
         row.role = "SYSTEM_ADMIN"
         await db_session.commit()
-        return user
+        return await _second_factor_session(db_session, user)
 
     return _make
+
+
+async def _second_factor_session(db_session, user: dict) -> dict:
+    """Swap the admin's password-only tokens for a session opened with a
+    second factor, which admin endpoints require (app/utils/jwt.get_current_user).
+
+    Minted through the service as a TOTP sign-in would mint it. Enrolling TOTP
+    over the API instead would leave 2FA state and audit rows behind that the
+    tests built on these fixtures do not expect. tests/auth/test_admin_second_factor.py
+    covers the real sign-in paths.
+    """
+    from app.auth.service import create_token_pair
+
+    tokens = await create_token_pair(db_session, user["id"], second_factor="otp")
+    await db_session.commit()
+    user["access_token"] = tokens["access_token"]
+    user["refresh_token"] = tokens["refresh_token"]
+    user["headers"] = {"Authorization": f"Bearer {tokens['access_token']}"}
+    return user
 
 
 @pytest.fixture

@@ -11,10 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.auth.schemas import TokenData
-from app.users.models import USER_STATUS_SUSPENDED, RefreshToken, User
+from app.users.models import USER_STATUS_SUSPENDED, RefreshToken, Role, User, WebAuthnCredential
 
 # HTTPBearer parses Authorization: Bearer <token> reliably for API clients (curl, Postman).
 http_bearer = HTTPBearer(auto_error=False)
+
+# Roles whose sessions must have used a second factor (see get_current_user).
+SECOND_FACTOR_ROLES = frozenset({Role.ADMIN.value, Role.SYSTEM_ADMIN.value})
+SECOND_FACTOR_REQUIRED_DETAIL = (
+    "Admin accounts must sign in with a second factor. Set up an authenticator "
+    "app or a passkey, then sign in again with it."
+)
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
@@ -40,11 +47,81 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     return encoded_jwt
 
 
+def _second_factor_required() -> HTTPException:
+    # 403, not 401: the session is valid, so a 401 would only send the client
+    # into a refresh loop that can never add the missing factor.
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=SECOND_FACTOR_REQUIRED_DETAIL,
+        headers={"X-Error-Code": "MFA_REQUIRED"},
+    )
+
+
 async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
     db: AsyncSession = Depends(get_db),
 ):
+    """The signed-in user, for every authenticated endpoint.
+
+    An ADMIN or SYSTEM_ADMIN session must have been opened with a second
+    factor: a TOTP or recovery code, or a passkey with user verification. The
+    session records which in its `mfa` claim (create_token_pair), and refresh
+    carries it forward. Checked here rather than in require_roles because some
+    admin access is decided inside services on the role alone (document
+    downloads in app/uploads/service.py), and those would slip past a check
+    that lived only on admin routes.
+    """
+    user, payload = await _session_user(request, credentials, db)
+    if user.role in SECOND_FACTOR_ROLES and not payload.get("mfa"):
+        raise _second_factor_required()
+    return user
+
+
+async def get_current_user_without_second_factor(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
+    db: AsyncSession = Depends(get_db),
+):
+    """get_current_user without the admin second-factor check.
+
+    Only for read-only views of the caller's own account that an admin needs
+    before a second factor exists: the profile, 2FA status, the passkey list.
+    """
+    user, _ = await _session_user(request, credentials, db)
+    return user
+
+
+async def get_current_user_for_second_factor_enrolment(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
+    db: AsyncSession = Depends(get_db),
+):
+    """For the endpoints that add a TOTP secret or a passkey.
+
+    An admin on a password-only session may enrol a first factor, since there
+    is no other way to get one. Once any factor exists, adding another needs a
+    session that used it. Otherwise the password alone could enrol an
+    attacker's authenticator next to a passkey-only admin's real one, and then
+    sign in with it.
+    """
+    user, payload = await _session_user(request, credentials, db)
+    if user.role in SECOND_FACTOR_ROLES and not payload.get("mfa"):
+        if user.totp_enabled:
+            raise _second_factor_required()
+        has_passkey = await db.execute(
+            select(WebAuthnCredential.id).where(WebAuthnCredential.user_id == user.id).limit(1)
+        )
+        if has_passkey.scalar_one_or_none() is not None:
+            raise _second_factor_required()
+    return user
+
+
+async def _session_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None,
+    db: AsyncSession,
+) -> tuple[User, dict]:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -158,7 +235,7 @@ async def get_current_user(
     # sign out other devices). Works for Bearer clients too, unlike reading the
     # refresh cookie.
     request.state.session_id = session_id
-    return user
+    return user, payload
 
 
 def create_verification_token(user_id: str) -> str:

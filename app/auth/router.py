@@ -34,7 +34,11 @@ from app.auth import service
 from app.auth.user_agent import describe_browser, describe_device
 from app.users.models import User
 from app.utils.audit import append_audit
-from app.utils.jwt import get_current_user
+from app.utils.jwt import (
+    get_current_user,
+    get_current_user_for_second_factor_enrolment,
+    get_current_user_without_second_factor,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -178,7 +182,7 @@ async def complete_two_factor_login(
 @router.get("/2fa", response_model=TotpStatusOut)
 async def two_factor_status(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_without_second_factor),
 ):
     return TotpStatusOut(
         enabled=bool(current_user.totp_enabled),
@@ -192,7 +196,7 @@ async def two_factor_status(
 @router.post("/2fa/setup", response_model=TotpSetupOut, status_code=status.HTTP_201_CREATED)
 async def start_two_factor_setup(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_for_second_factor_enrolment),
 ):
     secret, uri = await service.start_totp_setup(db, current_user)
     await db.commit()
@@ -204,7 +208,7 @@ async def enable_two_factor(
     request: Request,
     body: TotpEnableRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_for_second_factor_enrolment),
 ):
     codes = await service.enable_totp(db, current_user, body.code)
     append_audit(
@@ -457,7 +461,7 @@ async def list_security_events(
 @router.get("/passkeys", response_model=List[PasskeyOut])
 async def list_passkeys(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_without_second_factor),
 ):
     return await passkeys.credentials_for_user(db, current_user.id)
 
@@ -465,7 +469,7 @@ async def list_passkeys(
 @router.post("/passkeys/register/options")
 async def passkey_registration_options(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_for_second_factor_enrolment),
 ):
     """Options for creating a passkey. Returns the spec's JSON verbatim."""
     return Response(
@@ -479,7 +483,7 @@ async def passkey_registration_verify(
     body: PasskeyRegisterVerifyRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_for_second_factor_enrolment),
 ):
     credential = await passkeys.verify_registration(
         db, current_user, body.credential, body.name
@@ -543,9 +547,11 @@ async def passkey_login_verify(
     user_agent = request.headers.get("user-agent")
     ip_address = request.client.host if request.client else None
 
-    user, credential = await passkeys.verify_authentication(db, body.credential)
+    user, credential, user_verified = await passkeys.verify_authentication(db, body.credential)
+    # A user-verified passkey is two factors: the device and its PIN or biometric.
     tokens = await service.create_token_pair(
-        db, user.id, user_agent=user_agent, ip_address=ip_address
+        db, user.id, user_agent=user_agent, ip_address=ip_address,
+        second_factor="passkey" if user_verified else None,
     )
     append_audit(
         db,

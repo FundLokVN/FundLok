@@ -618,14 +618,9 @@ async def test_admin_inquiries_filtering_and_pagination(client, make_admin):
     assert page1.json()["total"] >= 3
 
 
-async def test_system_admin_role_can_access_inquiries(client, make_user, db_session):
-    user = await make_user(role=None)
-    from app.users.models import User
-
-    result = await db_session.execute(select(User).where(User.id == user["id"]))
-    row = result.scalar_one()
-    row.role = "SYSTEM_ADMIN"
-    await db_session.commit()
+async def test_system_admin_role_can_access_inquiries(client, make_system_admin):
+    # make_system_admin, not a hand promotion: admin sessions need a second factor.
+    user = await make_system_admin()
 
     resp = await client.get("/api/v1/rates/inquiries", headers=auth_headers(user))
     assert resp.status_code == 200

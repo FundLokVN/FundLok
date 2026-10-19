@@ -28,13 +28,15 @@ from app.users.service import (
     user_me_payload,
 )
 from app.utils.audit import append_audit
-from app.utils.jwt import get_current_user
+from app.utils.jwt import get_current_user, get_current_user_without_second_factor
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 
 @router.get("/me")
-def read_current_user(current_user: User = Depends(get_current_user)):
+def read_current_user(current_user: User = Depends(get_current_user_without_second_factor)):
+    # Readable without the admin second-factor check, so the frontend can load
+    # an admin who still has to set one up and show them where to do it.
     return user_me_payload(current_user)
 
 

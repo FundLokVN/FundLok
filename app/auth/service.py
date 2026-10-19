@@ -82,6 +82,7 @@ async def create_token_pair(db: AsyncSession, user_id: UUID | str,
     session_deadline: datetime | None = None,
     user_agent: str | None = None,
     ip_address: str | None = None,
+    second_factor: str | None = None,
 ) -> dict:
     """Issue an access/refresh JWT pair and persist the refresh token (hashed)
     in `refresh_tokens` so it can be looked up, revoked, and rotated.
@@ -90,6 +91,10 @@ async def create_token_pair(db: AsyncSession, user_id: UUID | str,
     existing sign-in; a fresh sign-in leaves both unset and starts a new
     session whose deadline is SESSION_MAX_LIFETIME_DAYS from now. The refresh
     token never outlives that deadline, however often it is rotated.
+
+    `second_factor` ("otp" or "passkey") is set only by a sign-in that proved
+    one. It goes into both tokens as the `mfa` claim, and refresh carries it
+    forward, so admin sessions keep it for their whole life (get_current_user).
 
     Only stages the RefreshToken row via db.add(); the caller controls the
     transaction boundary (commit), matching the rest of this module.
@@ -105,13 +110,14 @@ async def create_token_pair(db: AsyncSession, user_id: UUID | str,
     # once the session has no live refresh token, so logging out ends it
     # immediately instead of when it expires.
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    mfa_claim = {"mfa": second_factor} if second_factor else {}
     access_token = create_access_token(
-        data={"sub": str(uid), "sid": str(sid)}, expires_delta=access_token_expires
+        data={"sub": str(uid), "sid": str(sid), **mfa_claim}, expires_delta=access_token_expires
     )
 
     expires_at = min(now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS), deadline)
     refresh_token = create_access_token(
-        data={"sub": str(uid), "typ": "refresh"},
+        data={"sub": str(uid), "typ": "refresh", **mfa_claim},
         expires_delta=expires_at - now,
     )
     db.add(
@@ -316,6 +322,8 @@ async def refresh_token_pair(
         session_deadline=deadline,
         user_agent=user_agent or stored.user_agent,
         ip_address=ip_address or stored.ip_address,
+        # The presented token is signed, so its claim is the sign-in's own.
+        second_factor=payload.get("mfa"),
     )
 
 
@@ -1087,7 +1095,7 @@ async def complete_totp_login(
     is_new_device = await is_unseen_device(db, user.id, user_agent)
 
     tokens = await create_token_pair(
-        db, user.id, user_agent=user_agent, ip_address=ip_address
+        db, user.id, user_agent=user_agent, ip_address=ip_address, second_factor="otp"
     )
     await db.commit()
 

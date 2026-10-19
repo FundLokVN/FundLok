@@ -47,6 +47,7 @@ from webauthn.helpers.structs import (
 
 from app.core.config import settings
 from app.users.models import User, WebAuthnChallenge, WebAuthnCredential
+from app.utils.jwt import SECOND_FACTOR_ROLES
 
 # Long enough to pick a device and present a finger; short enough that a
 # challenge captured from a log is dead before it can be used.
@@ -67,6 +68,21 @@ UV_REQUIRED_FOR_SIGN_IN = (
     "Your account uses two-factor authentication, so this passkey must confirm "
     "it's you with a PIN or biometric. Sign in with your password instead."
 )
+UV_REQUIRED_FOR_ADMIN = (
+    "Admin accounts need a passkey that confirms it's you with a PIN or "
+    "biometric. This one did not."
+)
+
+
+def _needs_user_verification(user: User) -> bool:
+    """A passkey stands in for two factors only when it verified the user.
+    Accounts with 2FA enrolled, and admin accounts, which must have it, accept
+    nothing less."""
+    return bool(user.totp_enabled) or user.role in SECOND_FACTOR_ROLES
+
+
+def _uv_refusal(user: User, totp_message: str) -> str:
+    return totp_message if user.totp_enabled else UV_REQUIRED_FOR_ADMIN
 
 
 def _b64(raw: bytes) -> str:
@@ -228,7 +244,7 @@ async def registration_options(db: AsyncSession, user: User) -> str:
             # passkey that can never sign them in.
             user_verification=(
                 UserVerificationRequirement.REQUIRED
-                if user.totp_enabled
+                if _needs_user_verification(user)
                 else UserVerificationRequirement.PREFERRED
             ),
         ),
@@ -267,10 +283,10 @@ async def verify_registration(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="That passkey could not be verified.",
         ) from exc
-    if user.totp_enabled and not verified.user_verified:
+    if _needs_user_verification(user) and not verified.user_verified:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=UV_REQUIRED_FOR_REGISTRATION,
+            detail=_uv_refusal(user, UV_REQUIRED_FOR_REGISTRATION),
         )
 
     credential_id = _b64(verified.credential_id)
@@ -333,7 +349,8 @@ async def authentication_options(db: AsyncSession) -> str:
 
 async def verify_authentication(
     db: AsyncSession, credential: dict
-) -> tuple[User, WebAuthnCredential]:
+) -> tuple[User, WebAuthnCredential, bool]:
+    """(user, credential, whether the authenticator verified the user)."""
     challenge_b64 = _expected_challenge(credential)
     await _consume_challenge(
         db, challenge_b64=challenge_b64, purpose=PURPOSE_AUTHENTICATION
@@ -382,22 +399,23 @@ async def verify_authentication(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="That passkey was not recognised.",
         )
-    if user.totp_enabled and not verified.user_verified:
+    if _needs_user_verification(user) and not verified.user_verified:
         # Passkey sign-in never asks for the TOTP code: the passkey stands in
         # for both factors, the device held and the PIN or biometric that
         # unlocked it. Without user verification it proves possession only,
-        # one factor, and an account that enrolled 2FA asked for two. Checked
-        # after the signature, so only the passkey's holder learns why.
+        # one factor, and an account that enrolled 2FA asked for two. Admin
+        # accounts must always have two. Checked after the signature, so only
+        # the passkey's holder learns why.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=UV_REQUIRED_FOR_SIGN_IN,
+            detail=_uv_refusal(user, UV_REQUIRED_FOR_SIGN_IN),
         )
 
     stored.sign_count = verified.new_sign_count
     stored.last_used_at = datetime.now(timezone.utc)
     db.add(stored)
     await db.commit()
-    return user, stored
+    return user, stored, bool(verified.user_verified)
 
 
 def _normalise(raw_id: str) -> str:
