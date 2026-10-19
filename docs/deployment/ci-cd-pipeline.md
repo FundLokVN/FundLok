@@ -83,7 +83,7 @@ Local infra is defined in `docker-compose.yml`; app config comes from `.env`
 |---|---|---|---|
 | `postgres` | `postgres:16-alpine` | **5433** → 5432 | Dev database `fundlok_dev` (user/pass `fundlok`/`fundlok`); init script enables `pgcrypto` |
 | `mailpit` | `axllent/mailpit` | 8025 (UI), 1025 (SMTP) | Local SMTP catcher for email flows |
-| `minio` | `minio/minio` | 9000 (S3 API), 9001 (console) | Local stand-in for Cloudflare R2 (creds `minioadmin`/`minioadmin`) |
+| `minio` | `pgsty/minio` (community fork; official images discontinued) | 9000 (S3 API), 9001 (console) | Local stand-in for Cloudflare R2 (creds `minioadmin`/`minioadmin`) |
 | `api` (optional) | built from `Dockerfile` | 8000 → 8080 | Prod-like containerized run (`bun run docker:up`); overrides `DATABASE_URL`/`SMTP_HOST` to resolve on the compose network |
 
 ### Local env vars (`.env`, from `.env.example`)

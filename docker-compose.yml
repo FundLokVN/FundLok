@@ -36,7 +36,10 @@ services:
       retries: 10
 
   minio:
-    image: quay.io/minio/minio:latest
+    # MinIO stopped publishing official images (quay.io/minio/minio and
+    # docker.io/minio/minio now return 401/denied). pgsty/minio is a
+    # community-maintained drop-in fork with the same CLI and console.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     container_name: minio
     ports:
       - "9000:9000"   # S3 API port
