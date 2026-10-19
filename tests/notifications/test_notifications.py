@@ -22,7 +22,7 @@ def make_submitted_application(
         sme = await make_user(role="SME")
         project = await make_project(sme)
         application = await make_loan_application(
-            sme, project["id"], requested_amount="500000000"
+            sme, project["id"], requested_amount="50000000"
         )
         resp = await submit_loan_application(sme, application["id"])
         assert resp.status_code == 200, resp.text
@@ -56,7 +56,7 @@ async def test_a_decision_notifies_the_applicant(
     # The copy is rendered client-side from the event code, so the row carries
     # placeholders and no sentence -- a stored sentence would be frozen in one
     # language.
-    assert row.data == {"amount_vnd": 500000000}
+    assert row.data == {"amount_vnd": 50000000}
 
 
 async def test_the_applicant_reads_their_own_notifications(

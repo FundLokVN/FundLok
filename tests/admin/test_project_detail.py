@@ -13,8 +13,8 @@ async def test_returns_the_company_and_its_applications(
 ):
     sme = await make_user(role="SME")
     project = await make_project(sme, legal_name="CÔNG TY CỔ PHẦN FUNDLOK")
-    first = await make_loan_application(sme, project["id"], requested_amount="200000000")
-    second = await make_loan_application(sme, project["id"], requested_amount="500000000")
+    first = await make_loan_application(sme, project["id"], requested_amount="30000000")
+    second = await make_loan_application(sme, project["id"], requested_amount="50000000")
     admin = await make_admin()
 
     resp = await client.get(
@@ -28,7 +28,7 @@ async def test_returns_the_company_and_its_applications(
     # Integer VND, never a float — the column is Numeric(20, 0) and whole dong
     # start disappearing above 2^53 if this is ever serialised as a float.
     amounts = {a["requested_amount"] for a in data["applications"]}
-    assert amounts == {200000000, 500000000}
+    assert amounts == {30000000, 50000000}
     assert all(isinstance(a["requested_amount"], int) for a in data["applications"])
 
 
@@ -38,8 +38,8 @@ async def test_applications_are_newest_first(
     """An admin opening the preview is looking at the latest request."""
     sme = await make_user(role="SME")
     project = await make_project(sme)
-    older = await make_loan_application(sme, project["id"], requested_amount="200000000")
-    newer = await make_loan_application(sme, project["id"], requested_amount="300000000")
+    older = await make_loan_application(sme, project["id"], requested_amount="30000000")
+    newer = await make_loan_application(sme, project["id"], requested_amount="60000000")
     admin = await make_admin()
 
     resp = await client.get(
@@ -75,8 +75,8 @@ async def test_only_that_company_s_applications_are_returned(
     sme = await make_user(role="SME")
     mine = await make_project(sme)
     theirs = await make_project(sme)
-    ours = await make_loan_application(sme, mine["id"], requested_amount="200000000")
-    await make_loan_application(sme, theirs["id"], requested_amount="400000000")
+    ours = await make_loan_application(sme, mine["id"], requested_amount="30000000")
+    await make_loan_application(sme, theirs["id"], requested_amount="40000000")
     admin = await make_admin()
 
     resp = await client.get(f"/admin/projects/{mine['id']}", headers=admin["headers"])
@@ -143,7 +143,7 @@ async def test_applications_carry_the_uploaded_documents(
     sme = await make_user(role="SME")
     project = await make_project(sme)
     application = await make_loan_application(
-        sme, project["id"], requested_amount="500000000"
+        sme, project["id"], requested_amount="50000000"
     )
     db_session.add(
         LoanApplicationDocument(
@@ -178,7 +178,7 @@ async def test_an_application_with_no_uploads_has_an_empty_document_list(
     as a missing key the panel would have to guard against."""
     sme = await make_user(role="SME")
     project = await make_project(sme)
-    await make_loan_application(sme, project["id"], requested_amount="500000000")
+    await make_loan_application(sme, project["id"], requested_amount="50000000")
     admin = await make_admin()
 
     resp = await client.get(
@@ -202,7 +202,7 @@ async def test_document_url_is_short_lived(
     sme = await make_user(role="SME")
     project = await make_project(sme)
     application = await make_loan_application(
-        sme, project["id"], requested_amount="500000000"
+        sme, project["id"], requested_amount="50000000"
     )
     doc = LoanApplicationDocument(
         loan_application_id=uuid.UUID(application["id"]),
@@ -245,7 +245,7 @@ async def test_document_url_refuses_an_unconfirmed_upload(
     sme = await make_user(role="SME")
     project = await make_project(sme)
     application = await make_loan_application(
-        sme, project["id"], requested_amount="500000000"
+        sme, project["id"], requested_amount="50000000"
     )
     doc = LoanApplicationDocument(
         loan_application_id=uuid.UUID(application["id"]),
@@ -283,7 +283,7 @@ async def test_document_url_rejects_a_non_admin(
     sme = await make_user(role="SME")
     project = await make_project(sme)
     application = await make_loan_application(
-        sme, project["id"], requested_amount="500000000"
+        sme, project["id"], requested_amount="50000000"
     )
     doc = LoanApplicationDocument(
         loan_application_id=uuid.UUID(application["id"]),
@@ -318,7 +318,7 @@ async def test_preview_carries_the_latest_score_run(
     sme = await make_user(role="SME")
     project = await make_project(sme)
     application = await make_loan_application(
-        sme, project["id"], requested_amount="500000000"
+        sme, project["id"], requested_amount="50000000"
     )
     await submit_loan_application(sme, application["id"])
     admin = await make_admin()
@@ -345,7 +345,7 @@ async def test_score_run_is_null_before_the_engine_has_run(
     """Null, not an invented zero — no run means no opinion."""
     sme = await make_user(role="SME")
     project = await make_project(sme)
-    await make_loan_application(sme, project["id"], requested_amount="500000000")
+    await make_loan_application(sme, project["id"], requested_amount="50000000")
     admin = await make_admin()
 
     resp = await client.get(

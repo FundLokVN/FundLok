@@ -145,7 +145,7 @@ async def test_project_passes_kyc_check_and_can_be_listed_after_real_approval(
 
     assert await project_has_verified_kyc(db_session, project["id"]) is True
 
-    application = await make_loan_application(sme, project["id"], requested_amount="10000000")
+    application = await make_loan_application(sme, project["id"], requested_amount="20000000")
     submit_resp = await submit_loan_application(sme, application["id"])
     assert submit_resp.status_code == 200, submit_resp.text
     score_run_id = await run_and_lock_score(admin, application["id"])

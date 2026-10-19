@@ -204,8 +204,8 @@ async def test_user_detail_includes_project_application_aggregates(
 ):
     sme = await make_user(role="SME")
     project = await make_project(sme, legal_name="CÔNG TY CỔ PHẦN INSIGHT", tax_id="0109999999")
-    await make_loan_application(sme, project["id"], requested_amount="200000000")
-    await make_loan_application(sme, project["id"], requested_amount="500000000")
+    await make_loan_application(sme, project["id"], requested_amount="30000000")
+    await make_loan_application(sme, project["id"], requested_amount="50000000")
     admin = await make_admin()
 
     resp = await client.get(f"/admin/users/{sme['id']}", headers=admin["headers"])
@@ -217,5 +217,5 @@ async def test_user_detail_includes_project_application_aggregates(
     assert proj["legal_name"] == "CÔNG TY CỔ PHẦN INSIGHT"
     assert proj["tax_id"] == "0109999999"
     assert proj["applications_count"] == 2
-    assert proj["total_requested_amount"] == 700000000
+    assert proj["total_requested_amount"] == 80000000
     assert isinstance(proj["total_requested_amount"], int)

@@ -65,8 +65,6 @@ def validate_industry(value: Optional[str]) -> Optional[str]:
 
 def validate_loan_size(value: int) -> int:
     constraints = params().loan_constraints
-    # VND is integer everywhere (T1, HANDOFF-03); the bounds come from YAML as
-    # plain numbers, so int() is exact here -- no Decimal round-trip needed to
     # compare or to render the error message.
     minimum = int(constraints["min_vnd"])
     maximum = int(constraints["max_vnd"])

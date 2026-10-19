@@ -31,7 +31,7 @@ def make_submitted_application(
         sme = await make_user(role="SME")
         project = await make_project(sme)
         application = await make_loan_application(
-            sme, project["id"], requested_amount="500000000"
+            sme, project["id"], requested_amount="50000000"
         )
         resp = await submit_loan_application(sme, application["id"])
         assert resp.status_code == 200, resp.text
@@ -466,7 +466,7 @@ async def test_project_detail_shows_both_halves_of_the_gate(
     without leaving the panel."""
     sme = await make_user(role="SME")
     project = await make_project(sme)
-    await make_loan_application(sme, project["id"], requested_amount="500000000")
+    await make_loan_application(sme, project["id"], requested_amount="50000000")
     await make_kyb_attempt(sme["id"])
     admin = await make_admin()
 
@@ -490,7 +490,7 @@ def make_incomplete_application(make_user, make_project, make_loan_application, 
     async def _make():
         sme = await make_user(role="SME")
         project = await make_project(sme)
-        application = await make_loan_application(sme, project["id"], requested_amount="500000000")
+        application = await make_loan_application(sme, project["id"], requested_amount="50000000")
         assert (await submit_loan_application(sme, application["id"])).status_code == 200
         return sme, project, application
 

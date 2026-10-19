@@ -14,6 +14,11 @@ class LoanApplicationCreate(BaseModel):
     purpose: str | None = None
     repayment_preference: str | None = None
 
+    @field_validator("requested_amount")
+    @classmethod
+    def _amount_within_engine_bounds(cls, value: int) -> int:
+        return engine_constraints.validate_loan_size(value)
+
 
 class LoanApplicationOut(BaseModel):
     id: UUID

@@ -400,7 +400,7 @@ def make_project(client):
 
 @pytest.fixture
 def make_loan_application(client):
-    async def _make(sme: dict, project_id: str, requested_amount: str = "100000.00"):
+    async def _make(sme: dict, project_id: str, requested_amount: str = "80000000"):
         resp = await client.post(
             "/loans/applications",
             json={"business_id": project_id, "requested_amount": requested_amount},
@@ -630,7 +630,10 @@ def open_listing(make_user, make_admin, make_project, make_loan_application, sub
         sme = await make_user(role="SME")
         admin = await make_admin()
         project = await make_project(sme)
-        application = await make_loan_application(sme, project["id"], requested_amount=target_amount)
+        # The application keeps make_loan_application's in-range default: its
+        # amount must sit inside the engine's loan bounds, while the order and
+        # ledger tests built on this fixture size the listing in small units.
+        application = await make_loan_application(sme, project["id"])
         submit_resp = await submit_loan_application(sme, application["id"])
         assert submit_resp.status_code == 200, submit_resp.text
         score_run_id = await run_and_lock_score(admin, application["id"])
