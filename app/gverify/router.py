@@ -248,10 +248,15 @@ async def get_status(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(_authorized),
 ):
-    """Return the caller's latest GVerify KYC attempt, if any."""
+    """Return the caller's latest GVerify KYC attempt, or NOT_STARTED if none exists."""
     attempt = await service.latest_for_user(db, current_user.id)
     if attempt is None:
-        raise HTTPException(status_code=404, detail="No GVerify KYC verification found")
+        return KycStatusResponse(
+            verification_id=None,
+            status="NOT_STARTED",
+            is_terminal=False,
+            is_approved=False,
+        )
     return KycStatusResponse(
         verification_id=attempt.id,
         status=attempt.status,
@@ -419,10 +424,15 @@ async def kyb_status(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(_sme_authorized),
 ):
-    """Return the caller's latest GVerify KYB attempt, if any."""
+    """Return the caller's latest GVerify KYB attempt, or NOT_STARTED if none exists."""
     attempt = await kyb_service.latest_for_user(db, current_user.id)
     if attempt is None:
-        raise HTTPException(status_code=404, detail="No GVerify KYB verification found")
+        return KybStatusResponse(
+            verification_id=None,
+            status="NOT_STARTED",
+            is_terminal=False,
+            is_approved=False,
+        )
     return KybStatusResponse(
         verification_id=attempt.id,
         status=attempt.status,

@@ -393,10 +393,16 @@ async def test_kyc_status_returns_latest_attempt(client, make_investor, mock_gve
     assert data["is_approved"] is True
 
 
-async def test_kyc_status_not_found_when_never_attempted(client, make_investor):
+async def test_kyc_status_not_started_when_never_attempted(client, make_investor):
     investor = await make_investor()
     resp = await client.get("/gverify/kyc/status", headers=investor["headers"])
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["verification_id"] is None
+    assert data["status"] == "NOT_STARTED"
+    assert data["is_terminal"] is False
+    assert data["is_approved"] is False
+
 
 
 # --------------------------------------------------------------------------- #

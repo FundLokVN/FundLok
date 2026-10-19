@@ -302,3 +302,19 @@ async def test_security_events_pagination(client, make_admin):
     assert resp_offset.status_code == 200
     assert len(resp_offset.json()) == 0
 
+
+async def test_security_overview_consolidates_security_screen_reads(client, make_user):
+    user = await make_user()
+    resp = await client.get("/auth/security-overview?limit=5", headers=auth_headers(user))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["second_factor_required"] is False
+    assert data["two_factor"]["enabled"] is False
+    assert data["passkeys"] == []
+    assert len(data["sessions"]) >= 1
+    assert any(s["current"] for s in data["sessions"])
+    assert len(data["security_events"]) >= 1
+    assert len(data["security_events"]) <= 5
+    assert data["security_preferences"] == {"signin_alerts_enabled": False}
+
+

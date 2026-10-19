@@ -469,10 +469,16 @@ async def test_kyb_status_address_fields_null_when_ocr_omits_them(
     assert "date_of_establishment" in data and data["date_of_establishment"] is None
 
 
-async def test_kyb_status_not_found_when_never_attempted(client, make_sme):
+async def test_kyb_status_not_started_when_never_attempted(client, make_sme):
     sme = await make_sme()
     resp = await client.get("/gverify/kyb/status", headers=sme["headers"])
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["verification_id"] is None
+    assert data["status"] == "NOT_STARTED"
+    assert data["is_terminal"] is False
+    assert data["is_approved"] is False
+
 
 
 # --------------------------------------------------------------------------- #

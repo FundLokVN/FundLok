@@ -235,6 +235,9 @@ async def _session_user(
     # sign out other devices). Works for Bearer clients too, unlike reading the
     # refresh cookie.
     request.state.session_id = session_id
+    request.state.second_factor_required = (
+        user.role in SECOND_FACTOR_ROLES and not payload.get("mfa")
+    )
     return user, payload
 
 

@@ -47,7 +47,7 @@ class HandoffResponse(BaseModel):
 class KycStatusResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    verification_id: UUID
+    verification_id: UUID | None = None
     status: str
     is_terminal: bool
     is_approved: bool
@@ -115,7 +115,7 @@ class KybVerifyResponse(BaseModel):
 class KybStatusResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    verification_id: UUID
+    verification_id: UUID | None = None
     status: str
     is_terminal: bool
     is_approved: bool

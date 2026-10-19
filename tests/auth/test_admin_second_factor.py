@@ -85,6 +85,17 @@ async def test_admin_without_second_factor_can_read_own_profile_and_2fa_status(
         resp = await client.get(path, headers=admin["headers"])
         assert resp.status_code == 200, f"{path}: {resp.text}"
 
+    overview = await client.get("/auth/security-overview", headers=admin["headers"])
+    assert overview.status_code == 200, overview.text
+    body = overview.json()
+    assert body["second_factor_required"] is True
+    assert body["two_factor"]["enabled"] is False
+    assert body["passkeys"] == []
+    assert body["sessions"] == []
+    assert body["security_events"] == []
+    assert body["security_preferences"] is None
+
+
 
 async def test_admin_enrols_totp_then_signs_in_with_it_to_reach_admin_routes(
     client, make_user, db_session

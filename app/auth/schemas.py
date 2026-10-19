@@ -235,3 +235,27 @@ class PasskeyOut(BaseModel):
     last_used_at: datetime | None = None
 
     model_config = {"from_attributes": True}
+
+
+class SecurityPreferencesSnapshot(BaseModel):
+    signin_alerts_enabled: bool
+
+
+class SecurityOverviewOut(BaseModel):
+    """Aggregated payload for the Security Settings screen.
+
+    Consolidates 2FA status, passkeys, active sessions, recent security events,
+    and sign-in alert preferences into a single round-trip and single session
+    lookup. When an admin session lacks a second factor
+    (`second_factor_required=True`), only `two_factor` and `passkeys` are
+    populated so the admin can enrol their first factor without exposing
+    sessions, events, or preferences.
+    """
+
+    two_factor: TotpStatusOut
+    passkeys: list[PasskeyOut]
+    sessions: list[SessionOut]
+    security_events: list[SecurityEventOut]
+    security_preferences: SecurityPreferencesSnapshot | None = None
+    second_factor_required: bool = False
+

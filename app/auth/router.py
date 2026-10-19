@@ -25,6 +25,8 @@ from app.auth.schemas import (
     RegisterResponse,
     ResetPasswordRequest,
     SecurityEventOut,
+    SecurityOverviewOut,
+    SecurityPreferencesSnapshot,
     SessionOut,
     Token,
     UserCreate,
@@ -450,6 +452,85 @@ async def list_security_events(
         )
         for row in rows
     ]
+
+
+@router.get("/security-overview", response_model=SecurityOverviewOut)
+async def get_security_overview(
+    request: Request,
+    limit: int = 7,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_without_second_factor),
+):
+    """Aggregated read for the Security Settings screen.
+
+    Authenticates the session once and returns 2FA status, passkeys, active
+    sessions, security history, and sign-in alert preferences in a single
+    round trip. For a password-only admin session (`second_factor_required=True`),
+    only 2FA status and passkeys are returned so the admin can enrol their
+    first factor while sessions, events, and preferences remain withheld.
+    """
+    second_factor_required = bool(
+        getattr(request.state, "second_factor_required", False)
+    )
+    two_factor = TotpStatusOut(
+        enabled=bool(current_user.totp_enabled),
+        confirmed_at=current_user.totp_confirmed_at,
+        recovery_codes_remaining=await service.count_unused_recovery_codes(
+            db, current_user.id
+        ),
+    )
+    user_passkeys = await passkeys.credentials_for_user(db, current_user.id)
+
+    if second_factor_required:
+        return SecurityOverviewOut(
+            two_factor=two_factor,
+            passkeys=user_passkeys,
+            sessions=[],
+            security_events=[],
+            security_preferences=None,
+            second_factor_required=True,
+        )
+
+    raw_sessions = await service.list_sessions(
+        db, current_user.id, current_session_id=request.state.session_id
+    )
+    sessions = [
+        SessionOut(
+            session_id=item["session_id"],
+            device=describe_device(item["user_agent"]),
+            browser=describe_browser(item["user_agent"]),
+            ip_address=item["ip_address"],
+            created_at=item["created_at"],
+            last_used_at=item["last_used_at"],
+            current=item["current"],
+        )
+        for item in raw_sessions
+    ]
+    event_rows = await service.list_security_events(
+        db, current_user.id, limit=min(max(limit, 1), 100), offset=0
+    )
+    security_events = [
+        SecurityEventOut(
+            id=row.id,
+            action=row.action,
+            entity_type=row.entity_type,
+            severity=_EVENT_SEVERITY.get(row.action, "info"),
+            ip_address=row.ip_address,
+            created_at=row.created_at,
+        )
+        for row in event_rows
+    ]
+    return SecurityOverviewOut(
+        two_factor=two_factor,
+        passkeys=user_passkeys,
+        sessions=sessions,
+        security_events=security_events,
+        security_preferences=SecurityPreferencesSnapshot(
+            signin_alerts_enabled=bool(current_user.signin_alerts_enabled)
+        ),
+        second_factor_required=False,
+    )
+
 
 
 # --- Passkeys / WebAuthn ---------------------------------------------------- #
