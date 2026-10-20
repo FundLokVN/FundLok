@@ -72,18 +72,20 @@ if not settings.CLOUDFLARE_TURNSTILE_SECRET_KEY:
             "CAPTCHA_REQUIRED is off and no Turnstile secret is set: captcha "
             "verification is DISABLED on every protected endpoint."
         )
-# With TRUSTED_PROXY_HOPS at 0 behind a proxy, every client IP is the proxy's
-# address: audit rows record it, and a per-IP limit treats all visitors as one.
-if settings.TRUSTED_PROXY_HOPS == 0 and not settings.DEBUG:
+# With neither BACKEND_SECRET_KEY nor TRUSTED_PROXY_HOPS set, behind a proxy
+# every client IP is the proxy's address: audit rows record it, and a per-IP
+# limit treats all visitors as one. See app/utils/client_ip.py.
+if not settings.BACKEND_SECRET_KEY and settings.TRUSTED_PROXY_HOPS == 0 and not settings.DEBUG:
     if settings.RATE_LIMIT_ENABLED:
         logging.getLogger("app.rate_limit").error(
-            "RATE_LIMIT_ENABLED with TRUSTED_PROXY_HOPS=0: behind a proxy the "
-            "per-IP limit applies to all visitors together."
+            "RATE_LIMIT_ENABLED with no BACKEND_SECRET_KEY and TRUSTED_PROXY_HOPS=0: "
+            "behind a proxy the per-IP limit applies to all visitors together."
         )
     else:
         logging.getLogger("app.client_ip").warning(
-            "TRUSTED_PROXY_HOPS is 0: behind a proxy every client IP is the "
-            "proxy's address. Set it to this deployment's real proxy count."
+            "No BACKEND_SECRET_KEY and TRUSTED_PROXY_HOPS is 0: behind a proxy "
+            "every client IP is the proxy's address. Set BACKEND_SECRET_KEY to "
+            "the frontend's value."
         )
 
 

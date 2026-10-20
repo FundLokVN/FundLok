@@ -59,5 +59,5 @@ export DATABASE_URL="$ASYNC_URL"
 # one wins because it runs first -- so app-level code that carefully declines to
 # read X-Forwarded-For still ends up with an XFF-derived address and no way to
 # tell. Turning it off leaves request.client as the real socket peer, and
-# TRUSTED_PROXY_HOPS in app/core/config.py is the single control point.
+# app/utils/client_ip.py is the single control point.
 exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8080}" --no-proxy-headers

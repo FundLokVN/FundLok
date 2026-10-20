@@ -17,10 +17,11 @@ Cloud Run instances. If Redis is unreachable the counter falls back to this
 instance's memory and retries Redis after REDIS_RETRY_SECONDS: a weaker limit
 beats none, and a Redis outage must not take the API down.
 
-It is off unless RATE_LIMIT_ENABLED is set, and should only be set once
-TRUSTED_PROXY_HOPS matches the deployment. The key is the client address
-from app/utils/client_ip.py. With hops at 0 behind a proxy that address is
-the proxy's, and the limit would throttle every visitor as one caller.
+It is off unless RATE_LIMIT_ENABLED is set, and should only be set once the
+audit log shows real visitor addresses: BACKEND_SECRET_KEY set and the
+frontend sending X-Client-IP. The key is the client address from
+app/utils/client_ip.py. Without those, behind a proxy that address is the
+proxy's, and the limit would throttle every visitor as one caller.
 """
 from __future__ import annotations
 

@@ -67,15 +67,30 @@ class Settings(BaseSettings):
     # stops meaning anything.
     TRUSTED_PROXY_HOPS: int = 0
 
+    # The frontend's shared secret: the SAME value as BACKEND_SECRET_KEY on
+    # Vercel, which every Next → FastAPI call sends as X-Backend-Secret. A
+    # request carrying it came from our own Next server, so the X-Client-IP it
+    # also carries is trusted as the visitor's address and TRUSTED_PROXY_HOPS
+    # is not consulted (app/utils/client_ip.py).
+    #
+    # Needed because the hop rule cannot see visitors at all: the API's caller
+    # is Vercel, so XFF ends in a Vercel egress address, and the server-side
+    # session checks Next makes on every page load carry no visitor address in
+    # it. Unset (the default) disables the header entirely and leaves the hop
+    # rule as the only one.
+    BACKEND_SECRET_KEY: str | None = None
+
     # --- Abuse controls (compliance audit SEC-08) ---
     # Captcha is required unless turned off here. Required with no
     # CLOUDFLARE_TURNSTILE_SECRET_KEY means the protected endpoints refuse
     # (503) rather than accept every request. The safe value is the default,
     # as with COOKIE_SECURE; local dev and the tests opt out.
     CAPTCHA_REQUIRED: bool = True
-    # Per-IP limits, app/core/rate_limit.py. Off until a deployment sets
-    # TRUSTED_PROXY_HOPS to its real proxy count: keyed on a proxy's
-    # address, a per-IP limit throttles every visitor as one caller.
+    # Per-IP limits, app/core/rate_limit.py. Off until the deployment sees
+    # real visitor addresses: BACKEND_SECRET_KEY set and the frontend sending
+    # X-Client-IP, checked in the audit log (docs/deployment/
+    # ci-cd-pipeline.md, "Client IP"). Keyed on a proxy's address, a per-IP
+    # limit throttles every visitor as one caller.
     RATE_LIMIT_ENABLED: bool = False
     RATE_LIMIT_PER_MINUTE: int = 600
     RATE_LIMIT_SENSITIVE_PER_MINUTE: int = 20
