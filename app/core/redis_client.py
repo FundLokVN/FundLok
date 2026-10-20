@@ -35,15 +35,9 @@ from app.core.config import settings
 def create_redis(url: str) -> Redis:
     return Redis.from_url(
         url,
-        # Replies come back as str, not bytes -- what cache/rate-limit code wants.
         decode_responses=True,
-        # Fail a request after 5s instead of hanging it forever if Redis is
-        # down or unreachable (redis-py's default is no timeout).
         socket_connect_timeout=5,
         socket_timeout=5,
-        # PING a pooled connection that has sat idle for 30s before reusing
-        # it, so a connection the server or a NAT dropped while idle is
-        # replaced instead of failing the first command after a quiet spell.
         health_check_interval=30,
     )
 

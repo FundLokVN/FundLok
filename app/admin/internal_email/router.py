@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin.access_log import audit_admin_read
 from app.admin.internal_email import service
 from app.admin.internal_email.schemas import (
     EmailContent,
@@ -94,7 +95,11 @@ async def send_email(
     return await service.send(db, body, actor=current_user, ip_address=_ip(request))
 
 
-@router.get("/messages", response_model=list[InternalEmailOut])
+@router.get(
+    "/messages",
+    response_model=list[InternalEmailOut],
+    dependencies=[Depends(audit_admin_read("INTERNAL_EMAIL"))],
+)
 async def list_messages(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
@@ -105,7 +110,11 @@ async def list_messages(
     return await service.list_messages(db, actor=current_user, limit=limit, offset=offset)
 
 
-@router.get("/recipients", response_model=list[RecipientOut])
+@router.get(
+    "/recipients",
+    response_model=list[RecipientOut],
+    dependencies=[Depends(audit_admin_read("USER"))],
+)
 async def list_recipients(
     q: str | None = Query(None, max_length=100),
     fundlok_only: bool = False,

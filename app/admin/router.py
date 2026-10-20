@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin import service
+from app.admin.access_log import audit_admin_read
 from app.admin.schemas import (
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
@@ -39,7 +40,11 @@ require_admin = require_roles(Role.ADMIN, Role.SYSTEM_ADMIN)
 require_system_admin = require_roles(Role.SYSTEM_ADMIN)
 
 
-@router.get("/overview", response_model=AdminOverview)
+@router.get(
+    "/overview",
+    response_model=AdminOverview,
+    dependencies=[Depends(audit_admin_read("ADMIN_OVERVIEW"))],
+)
 async def get_overview(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
@@ -63,7 +68,11 @@ async def get_overview(
     )
 
 
-@router.get("/projects/{project_id}", response_model=AdminProjectDetail)
+@router.get(
+    "/projects/{project_id}",
+    response_model=AdminProjectDetail,
+    dependencies=[Depends(audit_admin_read("PROJECT", id_param="project_id"))],
+)
 async def get_project_detail(
     project_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -102,7 +111,11 @@ async def resolve_kyb_verification(
     )
 
 
-@router.get("/kyb-verifications", response_model=list[AdminKybReviewOut])
+@router.get(
+    "/kyb-verifications",
+    response_model=list[AdminKybReviewOut],
+    dependencies=[Depends(audit_admin_read("GVERIFY_KYB_VERIFICATION"))],
+)
 async def list_kyb_verifications(
     status: Literal["MANUAL_REVIEW", "APPROVED", "REJECTED", "FAILED"] = "MANUAL_REVIEW",
     db: AsyncSession = Depends(get_db),
@@ -113,7 +126,11 @@ async def list_kyb_verifications(
     return await service.list_kyb_verifications(db, status=status)
 
 
-@router.get("/kyb-verifications/{verification_id}", response_model=AdminKybReviewOut)
+@router.get(
+    "/kyb-verifications/{verification_id}",
+    response_model=AdminKybReviewOut,
+    dependencies=[Depends(audit_admin_read("GVERIFY_KYB_VERIFICATION", id_param="verification_id"))],
+)
 async def get_kyb_verification(
     verification_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -126,6 +143,7 @@ async def get_kyb_verification(
 @router.get(
     "/kyb-verifications/{verification_id}/certificate",
     response_model=AdminKybCertificateUrlResponse,
+    dependencies=[Depends(audit_admin_read("GVERIFY_KYB_VERIFICATION", id_param="verification_id"))],
 )
 async def get_kyb_certificate_url(
     verification_id: UUID,
@@ -142,7 +160,11 @@ async def get_kyb_certificate_url(
     )
 
 
-@router.get("/kyc-verifications", response_model=list[AdminKycVerificationOut])
+@router.get(
+    "/kyc-verifications",
+    response_model=list[AdminKycVerificationOut],
+    dependencies=[Depends(audit_admin_read("GVERIFY_KYC_VERIFICATION"))],
+)
 async def list_kyc_verifications(
     status: Literal["MANUAL_REVIEW", "APPROVED", "REJECTED", "FAILED"] = "MANUAL_REVIEW",
     db: AsyncSession = Depends(get_db),
@@ -153,7 +175,11 @@ async def list_kyc_verifications(
     return await service.list_kyc_verifications(db, status=status)
 
 
-@router.get("/kyc-verifications/{verification_id}", response_model=AdminKycVerificationOut)
+@router.get(
+    "/kyc-verifications/{verification_id}",
+    response_model=AdminKycVerificationOut,
+    dependencies=[Depends(audit_admin_read("GVERIFY_KYC_VERIFICATION", id_param="verification_id"))],
+)
 async def get_kyc_verification(
     verification_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -166,6 +192,7 @@ async def get_kyc_verification(
 @router.get(
     "/kyc-verifications/{verification_id}/images/{name}",
     response_model=AdminKycImageUrlResponse,
+    dependencies=[Depends(audit_admin_read("GVERIFY_KYC_VERIFICATION", id_param="verification_id"))],
 )
 async def get_kyc_image_url(
     verification_id: UUID,
@@ -241,7 +268,11 @@ async def decide_application(
     )
 
 
-@router.get("/documents/{document_id}/url", response_model=AdminDocumentUrlResponse)
+@router.get(
+    "/documents/{document_id}/url",
+    response_model=AdminDocumentUrlResponse,
+    dependencies=[Depends(audit_admin_read("LOAN_APPLICATION_DOCUMENT", id_param="document_id"))],
+)
 async def get_document_url(
     document_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -251,7 +282,11 @@ async def get_document_url(
     return await service.get_document_url(db, document_id)
 
 
-@router.get("/users/{user_id}", response_model=AdminUserFullDetail)
+@router.get(
+    "/users/{user_id}",
+    response_model=AdminUserFullDetail,
+    dependencies=[Depends(audit_admin_read("USER", id_param="user_id"))],
+)
 async def get_user_detail(
     user_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -313,7 +348,11 @@ async def invite_admin(
     )
 
 
-@router.get("/applications/{application_id}/grading-inputs", response_model=GradingInputsOut)
+@router.get(
+    "/applications/{application_id}/grading-inputs",
+    response_model=GradingInputsOut,
+    dependencies=[Depends(audit_admin_read("LOAN_APPLICATION", id_param="application_id"))],
+)
 async def get_grading_inputs(
     application_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -325,7 +364,11 @@ async def get_grading_inputs(
     return await grading_inputs.assemble(db, application_id)
 
 
-@router.get("/audit-logs", response_model=list[AuditLogOut])
+@router.get(
+    "/audit-logs",
+    response_model=list[AuditLogOut],
+    dependencies=[Depends(audit_admin_read("AUDIT_LOG"))],
+)
 async def get_audit_logs(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),

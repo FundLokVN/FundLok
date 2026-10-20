@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin.access_log import audit_admin_read
 from app.core.database import get_db
 from app.rates import investor_service
 from app.rates.schemas import (
@@ -31,6 +32,11 @@ from app.utils.rbac import require_roles
 
 router = APIRouter(prefix="/api/v1/rates", tags=["rates"])
 admin_rates_router = APIRouter(prefix="/admin/rates", tags=["admin-rates"])
+
+# Inquiries carry the enquirer's name, email and phone, so every admin read
+# is audited (SEC-02, app/admin/access_log.py) on both mount points.
+audit_inquiry_list = Depends(audit_admin_read("RATE_INQUIRY"))
+audit_inquiry_read = Depends(audit_admin_read("RATE_INQUIRY", id_param="inquiry_id"))
 
 require_admin = require_roles(Role.ADMIN, Role.SYSTEM_ADMIN)
 
@@ -92,8 +98,16 @@ async def calculate_rate(
     )
 
 
-@router.get("/inquiries", response_model=RateInquiriesAdminListResponse)
-@admin_rates_router.get("/inquiries", response_model=RateInquiriesAdminListResponse)
+@router.get(
+    "/inquiries",
+    response_model=RateInquiriesAdminListResponse,
+    dependencies=[audit_inquiry_list],
+)
+@admin_rates_router.get(
+    "/inquiries",
+    response_model=RateInquiriesAdminListResponse,
+    dependencies=[audit_inquiry_list],
+)
 async def list_rate_inquiries(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
@@ -115,8 +129,16 @@ async def list_rate_inquiries(
     )
 
 
-@router.get("/inquiries/{inquiry_id}", response_model=RateInquiryAdminItem)
-@admin_rates_router.get("/inquiries/{inquiry_id}", response_model=RateInquiryAdminItem)
+@router.get(
+    "/inquiries/{inquiry_id}",
+    response_model=RateInquiryAdminItem,
+    dependencies=[audit_inquiry_read],
+)
+@admin_rates_router.get(
+    "/inquiries/{inquiry_id}",
+    response_model=RateInquiryAdminItem,
+    dependencies=[audit_inquiry_read],
+)
 async def get_rate_inquiry_detail(
     inquiry_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -187,7 +209,11 @@ async def sign_up_investor_lead(
 
 # Admin only, and only under /admin: these rows hold names, emails and phone
 # numbers, so unlike the SME inquiry routes there is no /api/v1 alias.
-@admin_rates_router.get("/investor-leads", response_model=InvestorLeadsAdminListResponse)
+@admin_rates_router.get(
+    "/investor-leads",
+    response_model=InvestorLeadsAdminListResponse,
+    dependencies=[Depends(audit_admin_read("INVESTOR_LEAD"))],
+)
 async def list_investor_leads(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
@@ -202,7 +228,11 @@ async def list_investor_leads(
     )
 
 
-@admin_rates_router.get("/investor-leads/{lead_id}", response_model=InvestorLeadAdminItem)
+@admin_rates_router.get(
+    "/investor-leads/{lead_id}",
+    response_model=InvestorLeadAdminItem,
+    dependencies=[Depends(audit_admin_read("INVESTOR_LEAD", id_param="lead_id"))],
+)
 async def get_investor_lead(
     lead_id: UUID,
     db: AsyncSession = Depends(get_db),
