@@ -1,0 +1,14 @@
+# Test and development tools: CI's test job, scripts/docker_test.sh and
+# `bun run setup` install this file. The production image installs only
+# requirements.txt (compliance audit SEC-07). Pinned exactly, like that file;
+# see its header for how to upgrade.
+-r requirements.txt
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+
+# Transitive, needed only by the tools above.
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.20.0
