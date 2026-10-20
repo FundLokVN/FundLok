@@ -328,6 +328,23 @@ async def create_file_presign(
     return doc, upload_url
 
 
+async def _check_document_owner(db: AsyncSession, doc: Document, current_user: User) -> None:
+    """Who may act on a generic document (compliance audit SEC-05).
+
+    Only PROJECT documents have an owner rule: an admin, or an SME who owns
+    the project. Every document the app creates is one (create_file_presign).
+    Any other entity type has no rule to check, so it is refused for
+    everyone. Until SEC-05 it was open to every SME and admin account.
+    """
+    if doc.entity_type != "PROJECT":
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.role == Role.ADMIN.value:
+        return
+    if current_user.role == Role.SME.value and await user_owns_project(db, current_user.id, doc.entity_id):
+        return
+    raise HTTPException(status_code=403, detail="Not authorized")
+
+
 async def commit_file(
     db: AsyncSession,
     file_id: UUID,
@@ -338,16 +355,7 @@ async def commit_file(
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="File not found")
-    if doc.entity_type == "PROJECT":
-        if current_user.role == Role.SME.value and not await user_owns_project(
-            db, current_user.id, doc.entity_id
-        ):
-            raise HTTPException(status_code=403, detail="Not authorized")
-        elif current_user.role not in (Role.SME.value, Role.ADMIN.value):
-            raise HTTPException(status_code=403, detail="Not authorized")
-    else:
-        if current_user.role not in (Role.SME.value, Role.ADMIN.value):
-            raise HTTPException(status_code=403, detail="Not authorized")
+    await _check_document_owner(db, doc, current_user)
 
     if doc.status in ("APPROVED", "UPLOADED", "SCANNING") and doc.checksum_sha256 == body.checksum:
         return doc
