@@ -50,7 +50,7 @@ docker run --rm --network "$NETWORK" \
   -e SECRET_KEY=dummy_secret_key_for_testing \
   -e DEBUG=True \
   python:3.11 bash -c "
-    pip install -q -r requirements.txt &&
+    pip install -q -r requirements-dev.txt &&
     DATABASE_URL='$PG_URL_SYNC' alembic upgrade head &&
     DATABASE_URL='$PG_URL_ASYNC' python -m pytest ${PYTEST_ARGS[*]}
   "

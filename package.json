@@ -4,7 +4,7 @@
   "private": true,
   "description": "Task shortcuts for the FundLok FastAPI backend. Run with `bun run <script>`.",
   "scripts": {
-    "setup": "python3 -m venv .venv && ./.venv/bin/pip install --upgrade pip && ./.venv/bin/pip install -r requirements.txt",
+    "setup": "python3 -m venv .venv && ./.venv/bin/pip install --upgrade pip && ./.venv/bin/pip install -r requirements-dev.txt",
     "up": "docker compose up -d postgres mailpit minio redis",
     "down": "docker compose down",
     "stop": "docker compose stop",
