@@ -44,6 +44,23 @@ services:
       timeout: 5s
       retries: 10
 
+  # Local stand-in for Upstash's REST API (UPSTASH_REDIS_REST_URL / _TOKEN):
+  # SRH speaks Upstash's HTTP protocol in front of the `redis` service above,
+  # so REST and TCP clients see the same data, as they do on Upstash. The
+  # token is a local-only value; the real one is in the Upstash console.
+  srh:
+    image: hiett/serverless-redis-http:latest
+    restart: unless-stopped
+    ports:
+      - "8079:80"
+    environment:
+      SRH_MODE: env
+      SRH_TOKEN: local_upstash_token
+      SRH_CONNECTION_STRING: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
   minio:
     # MinIO stopped publishing official images (quay.io/minio/minio and
     # docker.io/minio/minio now return 401/denied). pgsty/minio is a
