@@ -122,9 +122,12 @@ def scan_chunks(chunks: Iterable[bytes]) -> ScanResult:
                     if chunk:
                         sock.sendall(struct.pack("!I", len(chunk)) + chunk)
                 sock.sendall(struct.pack("!I", 0))
-            except BrokenPipeError:
+            except (BrokenPipeError, ConnectionResetError):
                 # clamd hangs up mid-stream once a file passes StreamMaxLength;
-                # its reason is still waiting to be read.
+                # its reason is still waiting to be read. Closing with our
+                # unread data in its buffer makes the kernel send a reset, so
+                # on Linux (CI, Cloud Run) the send usually fails with
+                # ECONNRESET rather than EPIPE.
                 pass
             return _verdict(_read_reply(sock))
     except OSError as exc:
