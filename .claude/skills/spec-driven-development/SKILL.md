@@ -1,204 +1,151 @@
 ---
 name: spec-driven-development
-description: Creates specs before coding. Use when starting a new project, feature, or significant change and no specification exists yet. Use when requirements are unclear, ambiguous, or only exist as a vague idea.
+description: >-
+  Write, update or review a FundLok feature spec in
+  `docs/specs/MODULE/FEATURE.md` from `docs/specs/_TEMPLATE.md` (the nine
+  sections, Status DRAFT→REVIEW→ACCEPTED→IMPLEMENTED, owner/implementer,
+  acceptance criteria that become pytest names) before any implementation
+  starts. Use this whenever a new feature, endpoint, table, column, state
+  transition, money flow or significant behaviour change in the backend has
+  no ACCEPTED spec yet; when the user says "spec", "design doc", "write it
+  up", "handoff for Phat/Edward" or "what should the API look like"; when
+  requirements are vague; or when implementation shows an existing spec is
+  wrong. Use it even if the user says "just build it" for something with no
+  spec. Not for typo fixes, pure refactors, or bug fixes that restore
+  already-specified behaviour.
 ---
 
-# Spec-Driven Development
+# Spec-Driven Development — FundLok
 
-## Overview
+At FundLok the spec is the **handoff document between two engineers and
+between AI sessions**. Edward writes backend specs, Phat implements the
+frontend against them (and the reverse for frontend specs), and neither Claude
+nor any other agent remembers anything between sessions. If a decision isn't
+in `docs/specs/` or `docs/adr/`, it doesn't exist. The test for a finished
+spec: the other engineer could implement their side **with zero chat or
+verbal context**. If they'd need to ask, the spec is incomplete. Fix the spec,
+not the conversation.
 
-Write a structured specification before writing any code. The spec is the shared source of truth between you and the human engineer — it defines what we're building, why, and how we'll know it's done. Code without a spec is guessing.
-
-## When to Use
-
-- Starting a new project or feature
-- Requirements are ambiguous or incomplete
-- The change touches multiple files or modules
-- You're about to make an architectural decision
-- The task would take more than 30 minutes to implement
-
-**When NOT to use:** Single-line fixes, typo corrections, or changes where requirements are unambiguous and self-contained.
-
-## The Gated Workflow
-
-Spec-driven development has four phases. Do not advance to the next phase until the current one is validated.
+## The sequence
 
 ```
-SPECIFY ──→ PLAN ──→ TASKS ──→ IMPLEMENT
-   │          │        │          │
-   ▼          ▼        ▼          ▼
- Human      Human    Human      Human
- reviews    reviews  reviews    reviews
+1. SPEC      docs/specs/<module>/<feature>.md, from _TEMPLATE.md  (Status: DRAFT)
+2. REVIEW    the other engineer reviews via PR comments            (Status: REVIEW)
+3. CONTRACT  request/response types agreed, Open Questions closed  (Status: ACCEPTED, spec PR merged)
+4. BUILD     backend and frontend implement in parallel, in a separate PR that links the spec
+5. TEST      each acceptance criterion becomes a pytest function of the same name
+6. ADR       if an architectural decision was made → docs/adr/NNN-<slug>.md
+             (once shipped: Status: IMPLEMENTED)
 ```
 
-### Phase 1: Specify
+Implementation code waits for step 3. Code written against a DRAFT spec
+usually gets rewritten when review changes the contract, and the frontend may
+already be building against the old shape. If the human wants to prototype
+early, that's their call. Label it a spike and don't merge it.
 
-Start with a high-level vision. Ask the human clarifying questions until requirements are concrete.
+## Before writing: look for what exists
 
-**Surface assumptions immediately.** Before writing any spec content, list what you're assuming:
+1. Use `search_fl_docs` (the fl-knowledge MCP) or `ls docs/specs/<module>/` and
+   `grep -ril "<topic>" docs/` for an existing or overlapping spec. Many areas
+   already have one: ledger, repayment_schedule (v1.3 **and** v1.4, so check
+   which is current), payments/funding-flow, banking, gverify, underwriting.
+   Extending a spec (bump Version, add a Changelog row) beats writing a parallel
+   one that contradicts it.
+2. Read the `fundlok-domain` skill if the feature touches money, rates,
+   grading, schedules, repayment, the ledger, disclosure or audit. Business
+   Rules must agree with its invariants. Cite them instead of re-deriving.
+3. Check `CLAUDE.md` → "Current Phase / MVP scope". If the feature is
+   explicitly out of MVP scope (e.g. arrears, late-rate interest, the D27
+   extension fee), say so before writing a spec for it.
+4. If anything is still ambiguous, list your assumptions and ask. A short
+   "I'm assuming X, Y, Z, correct me now" costs one message, while a wrong
+   assumption baked into an ACCEPTED spec costs two PRs.
 
-```
-ASSUMPTIONS I'M MAKING:
-1. This is a web application (not native mobile)
-2. Authentication uses session-based cookies (not JWT)
-3. The database is PostgreSQL (based on existing Prisma schema)
-4. We're targeting modern browsers only (no IE11)
-→ Correct me now or I'll proceed with these.
-```
+## Writing the nine sections
 
-Don't silently fill in ambiguous requirements. The spec's entire purpose is to surface misunderstandings *before* code gets written — assumptions are the most dangerous form of misunderstanding.
+Copy `docs/specs/_TEMPLATE.md`, fill in the header table (Status `DRAFT`,
+Owner = whoever is accountable, Implementer(s), Module, Version `1.0`,
+today's date, Related ADR, Depends on), then the sections below.
+`references/section-guide.md` has a filled-in example for each section.
 
-**Write a spec document covering these six core areas:**
+1. **Context & Goal**: 2–4 sentences on why, plus the business or regulatory
+   driver (Decree 94, Circular 64, handbook section). End with a one-sentence
+   **Goal**.
+2. **Out of Scope**: as important as the scope. Name what a future spec must
+   handle so nobody "helpfully" builds it now.
+3. **Data Model**: typed pseudocode, not prose. FundLok rules:
+   - UUID primary keys and `TIMESTAMPTZ` timestamps.
+   - **Money is integer VND**: `Numeric(20,0)` / `BIGINT`, Python `int`, no
+     floats and no 2-dp decimals (accepted spec
+     `docs/specs/ledger/money-integer-vnd.md`). The template's
+     `DECIMAL(15,2)` example predates that spec. Follow the spec, and mention
+     the template drift to the human rather than editing the template
+     yourself.
+   - The migration gets an Alembic **hash** revision ID at implementation time.
+     Write "new Alembic revision (hash assigned on generation)", not
+     `XXXX_…`/`0002_…`. Existing migrations are frozen.
+   - Anything touching `ledger_entries`/`ledger_transactions` is append-only.
+     Model corrections as reversing entries, never as UPDATE/DELETE.
+4. **API Contract**: every endpoint with method/path, auth roles (`SME`,
+   `INVESTOR`, `ADMIN`, public), typed request and response (no
+   `object`/`any`), and errors as `{"detail": "<message>"}`. Any endpoint that
+   creates a financial record takes an `Idempotency-Key` header and says what a
+   replay returns. Responses are Pydantic models, so name them. This section is
+   what lets Phat build the UI in parallel. Make it precise enough to generate
+   TypeScript types from.
+5. **State Machine** (if a status field is added or changed): states,
+   triggers, who may trigger each, and the error for an invalid transition.
+   Reconcile with the core machines in `CLAUDE.md` (LoanApplication, ScoreRun,
+   Contract, Listing, Order) and the MVP repayment machine.
+6. **Business Rules**: numbered, each one testable, citing the handbook
+   (`fundlok-domain`) or regulation where it comes from.
+7. **Error Cases**: table of scenario / system behaviour / what the caller
+   sees. Always cover duplicate delivery (idempotency), wrong role, wrong
+   state, not found, and for anything external (bank feed, Didit, email) the
+   partner being down or replying twice.
+8. **Acceptance Criteria**: checkboxes whose text *is* a pytest name, e.g.
+   `test_funding_order_idempotent_replay_returns_existing`. Each must be
+   binary. `test-driven-development` turns these into failing tests first,
+   which only works if they're precise.
+9. **Open Questions**: table with an **Owner (Edward / Phat)** for every
+   question. A spec can't move to ACCEPTED with open rows, because each one is
+   a decision the implementer would otherwise make silently.
 
-1. **Objective** — What are we building and why? Who is the user? What does success look like?
+Remove the template's `<!-- INSTRUCTIONS -->` block before review, and add a
+Changelog row.
 
-2. **Commands** — Full executable commands with flags, not just tool names.
-   ```
-   Build: npm run build
-   Test: npm test -- --coverage
-   Lint: npm run lint --fix
-   Dev: npm run dev
-   ```
+## Ownership and the spec PR
 
-3. **Project Structure** — Where source code lives, where tests go, where docs belong.
-   ```
-   src/           → Application source code
-   src/components → React components
-   src/lib        → Shared utilities
-   tests/         → Unit and integration tests
-   e2e/           → End-to-end tests
-   docs/          → Documentation
-   ```
+- Backend behaviour → Edward owns the spec. Frontend behaviour → Phat. If the
+  current user is writing a spec in the other person's area, mark it DRAFT,
+  set Owner correctly, and flag that the owner has to review it.
+- Anything changing `app/auth/`, the shared ORM models or the OpenAPI contract
+  needs both to agree. List both as reviewers in the Open Questions.
+- The spec ships alone on a `docs/<module>/<desc>` branch (see
+  `git-workflow-and-versioning`) and is merged before the implementation PR
+  is opened.
 
-4. **Code Style** — One real code snippet showing your style beats three paragraphs describing it. Include naming conventions, formatting rules, and examples of good output.
+## When the spec is wrong mid-build
 
-5. **Testing Strategy** — What framework, where tests live, coverage expectations, which test levels for which concerns.
+Stop and update the spec first: edit the section, bump the Version (1.0 →
+1.1), add a Changelog row saying what changed and why, and tell the human the
+contract moved. If the API contract changed, the other engineer needs to know
+before they ship against the old one. Code that quietly diverges from an
+ACCEPTED spec is the failure this whole process exists to prevent.
 
-6. **Boundaries** — Three-tier system:
-   - **Always do:** Run tests before commits, follow naming conventions, validate inputs
-   - **Ask first:** Database schema changes, adding dependencies, changing CI config
-   - **Never do:** Commit secrets, edit vendor directories, remove failing tests without approval
+## If it's an architectural decision
 
-**Spec template:**
+Choosing a partner, a data-flow shape, a storage model, or anything costly to
+reverse belongs in an ADR (`docs/adr/NNN-<slug>.md`, next number after the
+highest existing, plus an entry in the `CLAUDE.md` ADR index). Reference it in
+the spec's header. See `documentation-and-adrs`.
 
-```markdown
-# Spec: [Project/Feature Name]
+## Done when
 
-## Objective
-[What we're building and why. User stories or acceptance criteria.]
-
-## Tech Stack
-[Framework, language, key dependencies with versions]
-
-## Commands
-[Build, test, lint, dev — full commands]
-
-## Project Structure
-[Directory layout with descriptions]
-
-## Code Style
-[Example snippet + key conventions]
-
-## Testing Strategy
-[Framework, test locations, coverage requirements, test levels]
-
-## Boundaries
-- Always: [...]
-- Ask first: [...]
-- Never: [...]
-
-## Success Criteria
-[How we'll know this is done — specific, testable conditions]
-
-## Open Questions
-[Anything unresolved that needs human input]
-```
-
-**Reframe instructions as success criteria.** When receiving vague requirements, translate them into concrete conditions:
-
-```
-REQUIREMENT: "Make the dashboard faster"
-
-REFRAMED SUCCESS CRITERIA:
-- Dashboard LCP < 2.5s on 4G connection
-- Initial data load completes in < 500ms
-- No layout shift during load (CLS < 0.1)
-→ Are these the right targets?
-```
-
-This lets you loop, retry, and problem-solve toward a clear goal rather than guessing what "faster" means.
-
-### Phase 2: Plan
-
-With the validated spec, generate a technical implementation plan:
-
-1. Identify the major components and their dependencies
-2. Determine the implementation order (what must be built first)
-3. Note risks and mitigation strategies
-4. Identify what can be built in parallel vs. what must be sequential
-5. Define verification checkpoints between phases
-
-> Follow `planning-and-task-breakdown` for the dependency-graph mapping and vertical-slicing mechanics behind these steps; it is the canonical source. The bullets above are a lightweight summary; if they ever diverge, `planning-and-task-breakdown` takes precedence.
-
-The plan should be reviewable: the human should be able to read it and say "yes, that's the right approach" or "no, change X."
-
-### Phase 3: Tasks
-
-Break the plan into discrete, implementable tasks:
-
-- Each task should be completable in a single focused session
-- Each task has explicit acceptance criteria
-- Each task includes a verification step (test, build, manual check)
-- Tasks are ordered by dependency, not by perceived importance
-- No task should require changing more than ~5 files
-
-> Follow `planning-and-task-breakdown` for the full task-sizing and dependency-ordering mechanics; it is the canonical source. The template below is a lightweight inline form; if they ever diverge, `planning-and-task-breakdown` takes precedence.
-
-**Task template:**
-```markdown
-- [ ] Task: [Description]
-  - Acceptance: [What must be true when done]
-  - Verify: [How to confirm — test command, build, manual check]
-  - Files: [Which files will be touched]
-```
-
-### Phase 4: Implement
-
-Execute tasks one at a time following `skills/incremental-implementation/SKILL.md` (`incremental-implementation`) and `skills/test-driven-development/SKILL.md` (`test-driven-development`). Use `skills/context-engineering/SKILL.md` (`context-engineering`) to load the right spec sections and source files at each step rather than flooding the agent with the entire spec.
-
-## Keeping the Spec Alive
-
-The spec is a living document, not a one-time artifact:
-
-- **Update when decisions change** — If you discover the data model needs to change, update the spec first, then implement.
-- **Update when scope changes** — Features added or cut should be reflected in the spec.
-- **Commit the spec** — The spec belongs in version control alongside the code.
-- **Reference the spec in PRs** — Link back to the spec section that each PR implements.
-
-## Common Rationalizations
-
-| Rationalization | Reality |
-|---|---|
-| "This is simple, I don't need a spec" | Simple tasks don't need *long* specs, but they still need acceptance criteria. A two-line spec is fine. |
-| "I'll write the spec after I code it" | That's documentation, not specification. The spec's value is in forcing clarity *before* code. |
-| "The spec will slow us down" | A 15-minute spec prevents hours of rework. Waterfall in 15 minutes beats debugging in 15 hours. |
-| "Requirements will change anyway" | That's why the spec is a living document. An outdated spec is still better than no spec. |
-| "The user knows what they want" | Even clear requests have implicit assumptions. The spec surfaces those assumptions. |
-
-## Red Flags
-
-- Starting to write code without any written requirements
-- Asking "should I just start building?" before clarifying what "done" means
-- Implementing features not mentioned in any spec or task list
-- Making architectural decisions without documenting them
-- Skipping the spec because "it's obvious what to build"
-
-## Verification
-
-Before proceeding to implementation, confirm:
-
-- [ ] The spec covers all six core areas
-- [ ] The human has reviewed and approved the spec
-- [ ] Success criteria are specific and testable
-- [ ] Boundaries (Always/Ask First/Never) are defined
-- [ ] The spec is saved to a file in the repository
+- [ ] File is at `docs/specs/<module>/<feature>.md`, all nine sections present (State Machine may say "n/a")
+- [ ] Money is integer VND, PKs are UUID, timestamps are TIMESTAMPTZ, no hand-numbered migration
+- [ ] Every financial write has `Idempotency-Key` semantics and every error is `{"detail": …}`
+- [ ] Business Rules agree with `fundlok-domain` and MVP scope
+- [ ] Acceptance criteria are pytest-name-shaped and binary
+- [ ] Open Questions each have an owner; Status reflects reality
+- [ ] The other engineer could implement their side from this file alone
