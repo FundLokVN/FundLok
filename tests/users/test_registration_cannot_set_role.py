@@ -16,7 +16,7 @@ from sqlalchemy import select
 
 from app.users.models import Role, User
 
-PASSWORD = "test-password-123"
+PASSWORD = "Test-Passw0rd-123"
 
 
 @pytest.mark.parametrize("attempted_role", ["ADMIN", "SYSTEM_ADMIN", "SME", "INVESTOR"])
