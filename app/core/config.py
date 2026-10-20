@@ -67,6 +67,19 @@ class Settings(BaseSettings):
     # stops meaning anything.
     TRUSTED_PROXY_HOPS: int = 0
 
+    # --- Abuse controls (compliance audit SEC-08) ---
+    # Captcha is required unless turned off here. Required with no
+    # CLOUDFLARE_TURNSTILE_SECRET_KEY means the protected endpoints refuse
+    # (503) rather than accept every request. The safe value is the default,
+    # as with COOKIE_SECURE; local dev and the tests opt out.
+    CAPTCHA_REQUIRED: bool = True
+    # Per-IP limits, app/core/rate_limit.py. Off until a deployment sets
+    # TRUSTED_PROXY_HOPS to its real proxy count: keyed on a proxy's
+    # address, a per-IP limit throttles every visitor as one caller.
+    RATE_LIMIT_ENABLED: bool = False
+    RATE_LIMIT_PER_MINUTE: int = 600
+    RATE_LIMIT_SENSITIVE_PER_MINUTE: int = 20
+
 
     # --- Passkeys / WebAuthn ---
     # The Relying Party ID is the domain a credential is bound to, and a

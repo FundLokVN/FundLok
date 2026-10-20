@@ -19,6 +19,7 @@ from app.auth.router import router as auth_router
 from app.contracts.router import router as contracts_router
 from app.core.config import settings
 from app.utils.client_ip import TrustedProxyMiddleware
+from app.core.rate_limit import RateLimitMiddleware
 from app.core.database import get_db
 from app.lending.router import router as lending_router
 from app.loans.router import router as loans_router
@@ -53,16 +54,37 @@ app = FastAPI(
 )
 
 
-# The captcha verifier no-ops when its secret is unset -- right for local dev and
-# CI, silently wrong anywhere public, where login, contact and the rate
-# calculator then accept any request. Not made fatal: if production is already
-# running without the secret, refusing to boot would take login down with it.
-# But it must not be silent.
-if not settings.CLOUDFLARE_TURNSTILE_SECRET_KEY and not settings.DEBUG:
-    logging.getLogger("app.captcha").warning(
-        "CLOUDFLARE_TURNSTILE_SECRET_KEY is not set: captcha verification is "
-        "DISABLED on every protected endpoint."
-    )
+# Startup checks for the abuse controls (compliance audit SEC-08). None is
+# fatal: refusing to boot would take every endpoint down, not only the ones a
+# setting affects. Each is logged so that a misconfigured deploy shows.
+#
+# Captcha is required by default, so a missing secret makes login, sign-up,
+# password reset, contact and the rate calculator refuse (503) instead of
+# accepting any request. Local dev and CI run with CAPTCHA_REQUIRED=False.
+if not settings.CLOUDFLARE_TURNSTILE_SECRET_KEY:
+    if settings.CAPTCHA_REQUIRED:
+        logging.getLogger("app.captcha").error(
+            "CLOUDFLARE_TURNSTILE_SECRET_KEY is not set and CAPTCHA_REQUIRED is on: "
+            "every captcha-protected endpoint will refuse requests (503)."
+        )
+    elif not settings.DEBUG:
+        logging.getLogger("app.captcha").warning(
+            "CAPTCHA_REQUIRED is off and no Turnstile secret is set: captcha "
+            "verification is DISABLED on every protected endpoint."
+        )
+# With TRUSTED_PROXY_HOPS at 0 behind a proxy, every client IP is the proxy's
+# address: audit rows record it, and a per-IP limit treats all visitors as one.
+if settings.TRUSTED_PROXY_HOPS == 0 and not settings.DEBUG:
+    if settings.RATE_LIMIT_ENABLED:
+        logging.getLogger("app.rate_limit").error(
+            "RATE_LIMIT_ENABLED with TRUSTED_PROXY_HOPS=0: behind a proxy the "
+            "per-IP limit applies to all visitors together."
+        )
+    else:
+        logging.getLogger("app.client_ip").warning(
+            "TRUSTED_PROXY_HOPS is 0: behind a proxy every client IP is the "
+            "proxy's address. Set it to this deployment's real proxy count."
+        )
 
 
 # ================= VALIDATION ERRORS =================
@@ -126,6 +148,12 @@ async def maintenance_gate(request: Request, call_next):
         )
     return await call_next(request)
 # =====================================================
+
+# Per-IP rate limits (SEC-08, app/core/rate_limit.py). Added here so it wraps
+# the maintenance gate but sits inside the security headers, CORS and the
+# client-IP rewrite: the address is settled first, and a 429 still carries
+# CORS headers a browser can read.
+app.add_middleware(RateLimitMiddleware)
 
 
 # ================= SECURITY HEADERS =================

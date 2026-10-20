@@ -69,6 +69,12 @@ os.environ.setdefault("COOKIE_SECURE", "False")
 # real Turnstile secret into the test run and make verify_turnstile_token try
 # a real network call.
 os.environ["CLOUDFLARE_TURNSTILE_SECRET_KEY"] = ""
+# With no secret, captcha must be explicitly not required, or every protected
+# endpoint answers 503 (SEC-08). The captcha tests turn it back on.
+os.environ["CAPTCHA_REQUIRED"] = "False"
+# Off for the same reason as the Turnstile secret: a local .env must not make
+# unrelated tests start getting 429s. tests/core/test_rate_limit.py enables it.
+os.environ["RATE_LIMIT_ENABLED"] = "False"
 # Belt-and-suspenders: never let tests touch real R2 / Didit even if a local
 # .env has them configured.
 os.environ["R2_ENDPOINT_URL"] = ""
