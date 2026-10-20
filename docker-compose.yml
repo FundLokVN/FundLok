@@ -25,10 +25,19 @@ services:
     environment:
       MP_MAX_MESSAGES: 5000
 
+  # Local stand-in for Upstash Redis (deployed environments). The app speaks
+  # plain Redis protocol (ARQ), which Upstash also serves over TLS, so going
+  # from here to Upstash is only a REDIS_URL change -- see .env.example.
+  # `--save 60 1` snapshots to the redis_data volume so queued jobs survive
+  # `docker compose down`.
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -65,6 +74,7 @@ services:
       # Override .env values that point at host "localhost" so they resolve on
       # the compose network instead.
       DATABASE_URL: postgresql+asyncpg://fundlok:fundlok@postgres:5432/fundlok_dev
+      REDIS_URL: redis://redis:6379/0
       SMTP_HOST: mailpit
       SMTP_PORT: "1025"
       PORT: "8080"
@@ -107,3 +117,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  redis_data:

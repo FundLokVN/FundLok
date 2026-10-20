@@ -84,6 +84,7 @@ Local infra is defined in `docker-compose.yml`; app config comes from `.env`
 | `postgres` | `postgres:16-alpine` | **5433** → 5432 | Dev database `fundlok_dev` (user/pass `fundlok`/`fundlok`); init script enables `pgcrypto` |
 | `mailpit` | `axllent/mailpit` | 8025 (UI), 1025 (SMTP) | Local SMTP catcher for email flows |
 | `minio` | `pgsty/minio` (community fork; official images discontinued) | 9000 (S3 API), 9001 (console) | Local stand-in for Cloudflare R2 (creds `minioadmin`/`minioadmin`) |
+| `redis` | `redis:7-alpine` | 6379 | Local stand-in for Upstash Redis — the ARQ queue. Snapshots to the `redis_data` volume. Run the worker on the host with `bun run worker` |
 | `api` (optional) | built from `Dockerfile` | 8000 → 8080 | Prod-like containerized run (`bun run docker:up`); overrides `DATABASE_URL`/`SMTP_HOST` to resolve on the compose network |
 
 ### Local env vars (`.env`, from `.env.example`)
@@ -96,6 +97,7 @@ Local infra is defined in `docker-compose.yml`; app config comes from `.env`
 | `R2_ENDPOINT_URL` | `http://localhost:9000` | Points at MinIO |
 | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | `minioadmin` / `minioadmin` | MinIO defaults |
 | `DIDIT_*` | secrets empty in example | KYC secrets go only into gitignored `.env` |
+| `REDIS_URL` | `redis://localhost:6379/0` | Points at the compose `redis` service; deployed environments use Upstash (see §4, *Redis (Upstash)*) |
 
 ---
 
@@ -179,6 +181,33 @@ deploy fails visibly rather than serving a half-configured API.
 
 No service-account JSON key secret exists — auth is keyless via Workload Identity Federation.
 
+### Redis (Upstash)
+
+Locally the ARQ queue is the compose `redis` service; deployed, it is
+[Upstash](https://console.upstash.com). ARQ speaks the plain Redis protocol,
+which Upstash serves over TLS, so the only difference is `REDIS_URL` — no
+code change, and no Upstash REST URL/token (that API is for the
+`@upstash/redis` HTTP SDK, which this backend does not use).
+
+1. In Upstash, create **one database per environment** (staging, prod) in
+   the region nearest `asia-southeast1` (Singapore). Upstash serves database
+   0 only and every ARQ worker reads the same `arq:queue` key, so a shared
+   database would let staging and prod take each other's jobs.
+2. Copy the database's TCP connection string — the
+   `rediss://default:<password>@<endpoint>.upstash.io:6379` form (`rediss`,
+   two s's, turns on TLS).
+3. Set it as `REDIS_URL` on the Cloud Run service config (Console → *Edit &
+   deploy new revision* → *Variables & secrets*), the same place prod's
+   `DATABASE_URL` lives; `deploy-cloudrun@v2` merges env vars, so it
+   survives deploys. Never commit it or put it in the workflow file.
+
+**Not done yet:** the ARQ worker has no deployed service — the pipeline
+above deploys only the API, which does not use Redis today. When the worker
+is deployed, size the Upstash plan for it: an idle ARQ worker polls the
+queue every 0.5 s (`poll_delay`), about 5M commands a month, against the
+free tier's 500K. Either take a fixed plan (no per-command billing) or raise
+`poll_delay` on `WorkerSettings`.
+
 ---
 
 ## 5. Container Runtime (what actually runs on Cloud Run)
@@ -240,11 +269,12 @@ ignored). **Required** = app crashes at import without it.
 | `DIDIT_BASE_URL` | | `https://verification.didit.me` | Didit API base | default | default | default | default |
 | `DIDIT_CALLBACK_URL` | | `None` (→ `FRONTEND_URL/kyc/callback`) | Post-KYC redirect | default | default | default | default |
 | `DIDIT_LANGUAGE` | | `vi` | Hosted KYC flow UI language | default | default | default | default |
+| `REDIS_URL` | | `redis://localhost:6379/0` | ARQ worker queue (§4, *Redis (Upstash)*) | compose Redis :6379 | default (tests never connect) | *Upstash `rediss://` URL, own DB** | *Upstash `rediss://` URL, own DB** |
 | `PORT` | | `8080` (Dockerfile) | Uvicorn listen port | 8000 (host run) | n/a | Cloud Run injects | Cloud Run injects |
 
 \* *"unset\*" / "needs prod value\*\*": the pipeline only injects
 `DATABASE_URL`/`SECRET_KEY`. Any of these needed in staging/production
-(R2, SMTP, Didit, Turnstile, OAuth client IDs, `FRONTEND_URL`) must be set
+(R2, SMTP, Didit, Turnstile, OAuth client IDs, `FRONTEND_URL`, `REDIS_URL`) must be set
 directly on the Cloud Run service (console or `gcloud run services update`)
 — they persist across deploys because `deploy-cloudrun@v2` merges rather than
 replaces env vars. Whether each is currently set can only be verified in the
