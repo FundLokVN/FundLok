@@ -67,6 +67,19 @@ class Settings(BaseSettings):
     # stops meaning anything.
     TRUSTED_PROXY_HOPS: int = 0
 
+    # The frontend's shared secret: the SAME value as BACKEND_SECRET_KEY on
+    # Vercel, which every Next → FastAPI call sends as X-Backend-Secret. A
+    # request carrying it came from our own Next server, so the X-Client-IP it
+    # also carries is trusted as the visitor's address and TRUSTED_PROXY_HOPS
+    # is not consulted (app/utils/client_ip.py).
+    #
+    # Needed because the hop rule cannot see visitors at all: the API's caller
+    # is Vercel, so XFF ends in a Vercel egress address, and the server-side
+    # session checks Next makes on every page load carry no visitor address in
+    # it. Unset (the default) disables the header entirely and leaves the hop
+    # rule as the only one.
+    BACKEND_SECRET_KEY: str | None = None
+
 
     # --- Passkeys / WebAuthn ---
     # The Relying Party ID is the domain a credential is bound to, and a

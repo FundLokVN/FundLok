@@ -265,6 +265,8 @@ ignored). **Required** = app crashes at import without it.
 | `FRONTEND_URL` | | `http://localhost:3000` | CORS / redirects / KYC callback base | default | default | *needs prod value** | *needs prod value** |
 | `MOCK_UPLOAD_BASE_URL` | | mock URL | Legacy mock storage | example value | default | default | default |
 | `CLOUDFLARE_TURNSTILE_SECRET_KEY` | | `None` | Bot protection (CAPTCHA) verify | placeholder | unset | unset* | unset* |
+| `BACKEND_SECRET_KEY` | | `None` | Vouches for the visitor address the frontend sends in `X-Client-IP` (see *Client IP* below). Same value as the frontend's `BACKEND_SECRET_KEY` | empty | unset (tests set it) | *staging frontend's value** | *production frontend's value** |
+| `TRUSTED_PROXY_HOPS` | | `0` | X-Forwarded-For entries to trust from the right, for requests without the secret | `0` | default | default | default |
 | `R2_ENDPOINT_URL` | | `None` | Cloudflare R2 endpoint | MinIO :9000 | unset | unset* | unset* |
 | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | | `None` | R2 credentials | `minioadmin` | unset | unset* | unset* |
 | `R2_BUCKET` / `R2_REGION` | | `fundlok-uploads` / `auto` | R2 bucket config | defaults | defaults | defaults | defaults |
@@ -283,11 +285,43 @@ ignored). **Required** = app crashes at import without it.
 
 \* *"unset\*" / "needs prod value\*\*": the pipeline only injects
 `DATABASE_URL`/`SECRET_KEY`. Any of these needed in staging/production
-(R2, SMTP, Didit, Turnstile, OAuth client IDs, `FRONTEND_URL`, `REDIS_URL`) must be set
+(R2, SMTP, Didit, Turnstile, OAuth client IDs, `FRONTEND_URL`, `REDIS_URL`,
+`BACKEND_SECRET_KEY`) must be set
 directly on the Cloud Run service (console or `gcloud run services update`)
 — they persist across deploys because `deploy-cloudrun@v2` merges rather than
 replaces env vars. Whether each is currently set can only be verified in the
 Cloud Run console, not from the repo.*
+
+### Client IP (audit logs and the per-IP rate limiter)
+
+The API never talks to a browser. A visitor's request goes browser →
+Cloudflare → Vercel (Next.js) → Cloudflare → Cloud Run, so the socket peer and
+the right-hand end of `X-Forwarded-For` are Vercel's servers, not the visitor.
+The session checks Next makes on every page load (`/users/me`,
+`/auth/refresh`, the GVerify status endpoints, `/system/maintenance`) start
+on Vercel and carry no visitor address in any standard header at all.
+
+So the frontend states the address itself: every Next → FastAPI call carries
+`X-Client-IP` (from `lib/client-ip.ts`) next to `X-Backend-Secret`, and
+`app/utils/client_ip.py` believes it only when that secret matches
+`BACKEND_SECRET_KEY`. Without a match it falls back to `TRUSTED_PROXY_HOPS`,
+and with that at `0`, to the socket peer.
+
+**Setting it.** On each Cloud Run service, set `BACKEND_SECRET_KEY` to the
+value the Vercel environment that calls it uses (the same value the Cloudflare
+rule in front of the API checks). Rotating it means changing all three
+together: Vercel, the Cloudflare rule, and Cloud Run.
+
+**Deploy order.** Backend first, with the setting in place, then the
+frontend. The other order is harmless but useless: until the backend knows
+the secret, it ignores `X-Client-IP`.
+
+**Checking it.** Sign in to production from a known network and look at the
+newest audit rows (`audit_logs.ip_address`, or Security → Sessions in the
+dashboard): they must show that network's public address, not a Vercel or
+Cloudflare one. Only then turn on `RATE_LIMIT_ENABLED` (compliance finding
+SEC-08). Until then every visitor shares a handful of addresses, and a per-IP
+limit would throttle them all as one caller.
 
 ---
 
