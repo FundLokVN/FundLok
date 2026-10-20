@@ -84,6 +84,7 @@ Local infra is defined in `docker-compose.yml`; app config comes from `.env`
 | `postgres` | `postgres:16-alpine` | **5433** → 5432 | Dev database `fundlok_dev` (user/pass `fundlok`/`fundlok`); init script enables `pgcrypto` |
 | `mailpit` | `axllent/mailpit` | 8025 (UI), 1025 (SMTP) | Local SMTP catcher for email flows |
 | `minio` | `pgsty/minio` (community fork; official images discontinued) | 9000 (S3 API), 9001 (console) | Local stand-in for Cloudflare R2 (creds `minioadmin`/`minioadmin`) |
+| `clamav` | `clamav/clamav-debian:1.4` | 3310 | Malware scanner for uploads (SEC-04); the worker streams each file to it. First start downloads signatures. Start with `docker compose up -d clamav` |
 | `redis` | `redis:7-alpine` | 6379 | Local stand-in for Upstash Redis — the ARQ queue. Snapshots to the `redis_data` volume. Run the worker on the host with `bun run worker` |
 | `api` (optional) | built from `Dockerfile` | 8000 → 8080 | Prod-like containerized run (`bun run docker:up`); overrides `DATABASE_URL`/`SMTP_HOST` to resolve on the compose network |
 
@@ -200,6 +201,25 @@ code change, and no Upstash REST URL/token (that API is for the
    deploy new revision* → *Variables & secrets*), the same place prod's
    `DATABASE_URL` lives; `deploy-cloudrun@v2` merges env vars, so it
    survives deploys. Never commit it or put it in the workflow file.
+
+### Malware scanning (ClamAV)
+
+With `UPLOAD_SCAN_ENABLED=True`, a confirmed upload stays `SCANNING` until the
+ARQ worker streams it from R2 to clamd and records `UPLOADED`, `INFECTED`
+(object deleted) or `SCAN_FAILED` (see `app/uploads/scanning.py`). Reviewers
+can open, and applications can be submitted with, `UPLOADED` documents only.
+It is off by default. Before turning it on in an environment:
+
+1. Run ClamAV where the worker can reach TCP 3310: `clamav/clamav-debian:1.4`
+   with ~2 GB memory and the same `CLAMD_CONF_*` limits as `docker-compose.yml`
+   (streams up to 210 MB, `AlertExceedsMax yes`). Signatures update themselves
+   (freshclam runs in the container).
+2. Deploy the worker (below) with `REDIS_URL`, `DATABASE_URL`, the R2 settings,
+   `CLAMAV_HOST` / `CLAMAV_PORT`.
+3. Set `UPLOAD_SCAN_ENABLED=True` on the API and the worker.
+
+Until then every upload goes straight to `UPLOADED`; the file-signature check
+at confirm applies either way.
 
 **Not done yet:** the ARQ worker has no deployed service — the pipeline
 above deploys only the API, which does not use Redis today. When the worker

@@ -26,7 +26,9 @@ from app.uploads.schemas import (
     safe_object_filename,
 )
 from app.users.models import Role, User
-from app.utils.r2 import delete_object, get_bytes, head_object, presign_put
+from app.uploads.scanning import CLEAN, SCANNING
+from app.uploads.signatures import PREFIX_LENGTH, signature_matches
+from app.utils.r2 import delete_object, get_bytes, head_object, presign_put, read_prefix
 
 
 async def _get_owned_draft_application(db: AsyncSession, application_id: UUID, current_user: User) -> LoanApplication:
@@ -112,11 +114,27 @@ async def create_upload_presign(
     return doc, upload_url, settings.R2_PRESIGN_EXPIRE_SECONDS
 
 
+def _status_after_upload() -> str:
+    """SCANNING while a malware scan is pending (SEC-04), else UPLOADED."""
+    return SCANNING if settings.UPLOAD_SCAN_ENABLED else CLEAN
+
+
+def _signature_error(key: str, ext: str) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail=f"The file's content is not a .{ext} file: {key}",
+        headers={"X-Error-Code": "FILE_SIGNATURE_MISMATCH"},
+    )
+
+
 async def confirm_uploads(
     db: AsyncSession,
     body: UploadConfirmRequest,
     current_user: User,
-) -> list[LoanApplicationDocument]:
+) -> tuple[list[LoanApplicationDocument], list[LoanApplicationDocument]]:
+    """Confirm uploads; return (every document named, those this call set to
+    SCANNING). Only the second need a scan queued: one already SCANNING has
+    its scan on the way."""
     app_row = await _get_owned_draft_application(db, body.loan_application_id, current_user)
 
     file_keys = list(dict.fromkeys(body.file_keys))
@@ -133,9 +151,10 @@ async def confirm_uploads(
         raise HTTPException(status_code=400, detail=f"Unknown file_key(s): {', '.join(missing)}")
 
     now = datetime.now(timezone.utc)
+    to_scan = []
     for key in file_keys:
         doc = by_key[key]
-        if doc.status == "UPLOADED":
+        if doc.status in (CLEAN, SCANNING):
             continue
         head = head_object(key)
         if head is None:
@@ -147,10 +166,18 @@ async def confirm_uploads(
             # refusing it without deleting it left the oversized file in R2.
             delete_object(key)
             raise HTTPException(status_code=400, detail=f"Uploaded object too large: {key}")
+        # The extension and content type were the client's word; the bytes are
+        # not (SEC-04). An empty object has no signature to check.
+        ext = key.rsplit(".", 1)[-1]
+        if not head["size"] or not signature_matches(ext, read_prefix(key, PREFIX_LENGTH)):
+            delete_object(key)
+            raise _signature_error(key, ext)
         doc.file_size_bytes = head["size"]
         if head["content_type"]:
             doc.content_type = head["content_type"]
-        doc.status = "UPLOADED"
+        doc.status = _status_after_upload()
+        if doc.status == SCANNING:
+            to_scan.append(doc)
         doc.uploaded_at = now
         db.add(doc)
         if doc.document_type == "e_invoice_data":
@@ -160,7 +187,7 @@ async def confirm_uploads(
         elif doc.document_type == "cic_report":
             await _ingest_cic(db, app_row, doc)
     await db.flush()
-    return [by_key[k] for k in file_keys]
+    return [by_key[k] for k in file_keys], to_scan
 
 
 def _einvoice_error(message: str, code: str) -> HTTPException:
@@ -357,12 +384,13 @@ async def commit_file(
         raise HTTPException(status_code=404, detail="File not found")
     await _check_document_owner(db, doc, current_user)
 
-    if doc.status in ("APPROVED", "UPLOADED", "SCANNING") and doc.checksum_sha256 == body.checksum:
+    if doc.status in ("APPROVED", CLEAN, SCANNING) and doc.checksum_sha256 == body.checksum:
         return doc
 
     doc.checksum_sha256 = body.checksum
     doc.size_bytes = body.size
-    doc.status = "SCANNING"
+    # Before SEC-04 this always said SCANNING, and nothing ever scanned.
+    doc.status = _status_after_upload()
     db.add(doc)
     return doc
 
