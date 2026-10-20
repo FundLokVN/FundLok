@@ -19,6 +19,7 @@ from app.auth.schemas import LoginRequest
 from app.core.database import SessionLocal
 from app.lending.models import AuditLog
 from conftest import DEFAULT_PASSWORD as PASSWORD
+from conftest import audit_rows_backdatable
 
 LOGIN = "/auth/login"
 LOCKED = {"detail": "Too many failed sign-in attempts. Try again in 15 minutes."}
@@ -95,11 +96,12 @@ async def test_one_address_locking_leaves_others_alone(client, make_user):
 async def test_the_lock_lifts_after_the_window(client, make_user, db_session):
     user = await make_user()
     await _miss(client, user["email"], service.MAX_FAILED_LOGINS)
-    await db_session.execute(
-        update(AuditLog)
-        .where(AuditLog.action == service.SIGN_IN_FAILED)
-        .values(created_at=AuditLog.created_at - service.FAILED_LOGIN_WINDOW - timedelta(seconds=1))
-    )
+    async with audit_rows_backdatable(db_session):
+        await db_session.execute(
+            update(AuditLog)
+            .where(AuditLog.action == service.SIGN_IN_FAILED)
+            .values(created_at=AuditLog.created_at - service.FAILED_LOGIN_WINDOW - timedelta(seconds=1))
+        )
     await db_session.commit()
 
     resp = await client.post(LOGIN, json={"email": user["email"], "password": PASSWORD})

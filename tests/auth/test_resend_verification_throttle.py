@@ -22,6 +22,7 @@ from app.core.database import SessionLocal
 from app.lending.models import AuditLog
 from app.users.models import User
 from app.utils import captcha
+from conftest import audit_rows_backdatable
 
 RESEND = "/auth/resend-verification"
 
@@ -50,11 +51,12 @@ async def _register(client, email: str, outbox: list[str]) -> None:
 async def _age_sends(db_session, email: str, by: timedelta) -> None:
     """Move this account's recorded sends back in time."""
     user_id = (await db_session.execute(select(User.id).where(User.email == email))).scalar_one()
-    await db_session.execute(
-        update(AuditLog)
-        .where(AuditLog.entity_id == user_id, AuditLog.action == service.VERIFICATION_EMAIL_SENT)
-        .values(created_at=AuditLog.created_at - by)
-    )
+    async with audit_rows_backdatable(db_session):
+        await db_session.execute(
+            update(AuditLog)
+            .where(AuditLog.entity_id == user_id, AuditLog.action == service.VERIFICATION_EMAIL_SENT)
+            .values(created_at=AuditLog.created_at - by)
+        )
     await db_session.commit()
 
 

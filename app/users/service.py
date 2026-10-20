@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from uuid import UUID
 
+from app.auth.password_policy import reject_breached_password
 from app.auth.service import revoke_other_sessions
 from app.users.models import Role, User
 from app.users.schemas import (
@@ -91,6 +92,7 @@ async def set_password(
             detail="This account already has a password. Use Forgot password to change it.",
         )
 
+    await reject_breached_password(body.new_password)
     current_user.password_hash = hash_password(body.new_password)
     db.add(current_user)
     await db.commit()
@@ -239,6 +241,7 @@ async def change_password(
             detail="New password must be different from the current one",
         )
 
+    await reject_breached_password(body.new_password)
     current_user.password_hash = hash_password(body.new_password)
     db.add(current_user)
 

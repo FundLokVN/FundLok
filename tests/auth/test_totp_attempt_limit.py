@@ -14,6 +14,7 @@ from sqlalchemy import select, update
 from app.auth.service import MAX_SECOND_FACTOR_FAILURES
 from app.lending.models import AuditLog
 from conftest import DEFAULT_PASSWORD as PASSWORD
+from conftest import audit_rows_backdatable
 from tests.auth.test_totp import code_for, enrol
 
 
@@ -85,11 +86,12 @@ async def test_old_misses_age_out(client, make_user, db_session):
     secret, _ = await enrol(client, user)
     await _miss(client, user, secret, MAX_SECOND_FACTOR_FAILURES)
 
-    await db_session.execute(
-        update(AuditLog)
-        .where(AuditLog.action == "TWO_FACTOR_FAILED")
-        .values(created_at=datetime.now(timezone.utc) - timedelta(minutes=16))
-    )
+    async with audit_rows_backdatable(db_session):
+        await db_session.execute(
+            update(AuditLog)
+            .where(AuditLog.action == "TWO_FACTOR_FAILED")
+            .values(created_at=datetime.now(timezone.utc) - timedelta(minutes=16))
+        )
     await db_session.commit()
 
     resp = await _second_step(client, await _challenge(client, user), code_for(secret))

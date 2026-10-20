@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import BackgroundTasks, HTTPException, status
 
 from app.auth import totp, totp_crypto
+from app.auth.password_policy import reject_breached_password
 from app.auth.user_agent import describe_browser, describe_device
 from app.utils.email import send_new_device_signin_alert
 from app.auth.schemas import (
@@ -646,6 +647,8 @@ async def register_user(
     which the email branch does not provide anyway once you know the address.
     """
     verify_turnstile_token(user_in.turnstile_token)
+    # Before the email lookup, so a refusal says nothing about the account.
+    await reject_breached_password(user_in.password)
 
     # Shared by the "created" and "email already taken" outcomes so the two are
     # indistinguishable. Wording must not imply success or failure of account
@@ -847,6 +850,7 @@ async def reset_password(
     ):
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
 
+    await reject_breached_password(body.new_password)
     user.password_hash = hash_password(body.new_password)
     # The link was delivered to the address, so following it proves control of
     # it, the same proof verify_email accepts.

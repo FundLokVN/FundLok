@@ -6,6 +6,8 @@ from typing import Literal
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from uuid import UUID
 
+from app.auth.password_policy import check_password_strength
+
 
 PHONE_NUMBER_PATTERN = re.compile(
     r"^(?:\+84|84|0)(?:3|5|7|8|9)\d{8}$|^\+?[1-9]\d{7,14}$"
@@ -40,10 +42,8 @@ class UserCreate(BaseModel):
 
     @field_validator("password")
     @classmethod
-    def validate_password_length(cls, v: str):
-        if len(v.encode("utf-8")) > 72:
-            raise ValueError("Password too long for bcrypt")
-        return v
+    def validate_password_strength(cls, v: str):
+        return check_password_strength(v)
 
 
 class UserOut(BaseModel):
@@ -110,10 +110,8 @@ class ResetPasswordRequest(BaseModel):
 
     @field_validator("new_password")
     @classmethod
-    def validate_password_length(cls, v: str):
-        if len(v.encode("utf-8")) > 72:
-            raise ValueError("Password too long for bcrypt")
-        return v
+    def validate_password_strength(cls, v: str):
+        return check_password_strength(v)
 
 
 

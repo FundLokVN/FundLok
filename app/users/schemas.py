@@ -2,6 +2,7 @@ import re
 
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
+from app.auth.password_policy import check_password_strength
 from app.auth.schemas import PHONE_NUMBER_PATTERN
 from app.users.models import Role
 
@@ -73,16 +74,12 @@ class SetPasswordRequest(BaseModel):
     never overwrite a password that already exists.
     """
 
-    new_password: str = Field(..., min_length=8)
+    new_password: str
 
     @field_validator("new_password")
     @classmethod
-    def validate_password_length(cls, v: str) -> str:
-        # Same 72-byte ceiling as ResetPasswordRequest — passlib silently
-        # truncates beyond it, which would make two different passwords match.
-        if len(v.encode("utf-8")) > 72:
-            raise ValueError("Password too long")
-        return v
+    def validate_password_strength(cls, v: str) -> str:
+        return check_password_strength(v)
 
 
 class UserUpdateRequest(BaseModel):
@@ -151,9 +148,7 @@ class ChangePasswordRequest(BaseModel):
     @field_validator("new_password")
     @classmethod
     def _strong_enough(cls, value: str) -> str:
-        if len(value) < 8:
-            raise ValueError("New password must be at least 8 characters")
-        return value
+        return check_password_strength(value)
 
 
 class SecurityPreferencesOut(BaseModel):

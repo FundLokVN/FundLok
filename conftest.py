@@ -22,6 +22,7 @@ Design constraints:
   asyncio_mode = auto) and the HTTP client is httpx.AsyncClient over the
   ASGI app directly, per HANDOFF-02 Fix A.
 """
+import contextlib
 import os
 import sys
 import uuid
@@ -109,6 +110,18 @@ def iter_endpoint_routes(routes):
             yield from iter_endpoint_routes(sub_routes)
         elif hasattr(route, "path") and hasattr(route, "methods"):
             yield route
+
+
+@contextlib.asynccontextmanager
+async def audit_rows_backdatable(db_session):
+    """Lift the audit_logs append-only trigger (migration 17ec24f17dba) for
+    the current transaction, so a throttle test can age its rows to
+    simulate time passing. Test setup only: the app never updates an audit
+    row. Re-enabled before the caller commits; if the update fails the
+    rollback restores it, because ALTER TABLE is transactional."""
+    await db_session.execute(text("ALTER TABLE audit_logs DISABLE TRIGGER trg_audit_logs_append_only"))
+    yield
+    await db_session.execute(text("ALTER TABLE audit_logs ENABLE TRIGGER trg_audit_logs_append_only"))
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -285,6 +298,14 @@ def _mock_external_io(monkeypatch):
 
     monkeypatch.setattr("app.gverify.storage.store_kyc_documents", _no_store)
     monkeypatch.setattr("app.gverify.storage.store_kyb_document", _no_store)
+
+    # Breached-password lookups (app/auth/password_policy.py) see an empty
+    # Have I Been Pwned range: no password is breached. The SEC-03 tests
+    # re-patch it to return a match.
+    async def _no_breaches(prefix: str) -> str:
+        return ""
+
+    monkeypatch.setattr("app.auth.password_policy._fetch_range", _no_breaches)
     yield
 
 
