@@ -228,15 +228,59 @@ async def _rep_match_rejection_reason(
     person_number = await approved_kyc_person_number(db, user_id)
     if not person_number:
         return KYC_REQUIRED_REASON
+    if not _is_representative(person_number, ocr):
+        return NOT_A_REPRESENTATIVE_REASON
+    return None
 
+
+def _is_representative(person_number: str, ocr: dict) -> bool:
     # Live payloads use identity_number; the API doc said id_number — accept both.
     # Whitespace is dropped on both sides, as OCR output can vary in spacing.
     rep_ids = {
         "".join((rep.get("identity_number") or rep.get("id_number") or "").split())
         for rep in (ocr.get("representatives") or [])
     }
-    if "".join(person_number.split()) not in rep_ids:
-        return NOT_A_REPRESENTATIVE_REASON
+    return "".join(person_number.split()) in rep_ids
+
+
+TAX_CODE_TAKEN_REVIEW = "This tax code is already verified on another account"
+NOT_A_VERIFIED_REPRESENTATIVE_REVIEW = (
+    "The applicant is not verified as a legal representative of this business"
+)
+
+
+async def _identity_review_reason(
+    db: AsyncSession, user_id, ocr: dict, tax_code: str
+) -> str | None:
+    """Last gate before an automatic APPROVED: is this business really theirs?
+
+    Everything before it checks the certificate is genuine and the company is
+    real, which is just as true when an SME uploads someone ELSE'S certificate
+    (shared with banks and partners; the tax code is public in the registry).
+    Nothing tied the applicant to the business, and grading reads an APPROVED
+    KYB as the project's KYC/AML pass for that tax code. So an automatic
+    approval now needs both of these; failing either parks the attempt for an
+    operator, who can still approve (an employee filing for the company).
+
+    With GVERIFY_KYB_REQUIRE_REP_MATCH on, a non-representative was already
+    rejected outright by _rep_match_rejection_reason; this is the softer
+    default for when it is off.
+    """
+    taken = await db.execute(
+        select(GVerifyKybVerification.id)
+        .where(
+            GVerifyKybVerification.tax_code == tax_code,
+            GVerifyKybVerification.status == STATUS_APPROVED,
+            GVerifyKybVerification.user_id != user_id,
+        )
+        .limit(1)
+    )
+    if taken.scalar_one_or_none() is not None:
+        return TAX_CODE_TAKEN_REVIEW
+
+    person_number = await approved_kyc_person_number(db, user_id)
+    if not person_number or not _is_representative(person_number, ocr):
+        return NOT_A_VERIFIED_REPRESENTATIVE_REVIEW
     return None
 
 
@@ -387,6 +431,8 @@ async def run_kyb_verification(
         review = _cross_check_review_reason(ocr, tax, effective_tax_code)
         if review is None:
             review = _license_cross_check_review_reason(effective_license_code, tax)
+        if review is None:
+            review = await _identity_review_reason(db, user.id, ocr, effective_tax_code)
         if review is not None:
             attempt.status = STATUS_MANUAL_REVIEW
             attempt.rejection_reason = review

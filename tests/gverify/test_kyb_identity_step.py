@@ -146,15 +146,18 @@ async def test_an_identity_still_under_review_does_not_count(
 # --- flag off: unchanged ---------------------------------------------------------
 
 
-async def test_with_the_flag_off_kyb_does_not_require_identity(
+async def test_with_the_flag_off_kyb_is_accepted_without_identity_but_parked(
     client, make_sme, mock_gverify_kyb  # noqa: F811
 ):
+    # Flag off: no identity step is demanded up front (no 409), but without
+    # an approved identity matching a representative the attempt is parked
+    # for an operator instead of approved automatically.
     sme = await make_sme()
 
     resp = await _kyb(client, sme)
 
     assert resp.status_code == 201, resp.text
-    assert resp.json()["status"] == "APPROVED"
+    assert resp.json()["status"] == "MANUAL_REVIEW"
 
 
 async def test_a_plain_rejection_has_no_code(client, make_sme, mock_gverify_kyb):  # noqa: F811
