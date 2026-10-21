@@ -269,6 +269,18 @@ def _pin_feature_flags(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _clear_oauth_key_cache():
+    """OAuth discovery/JWKS are cached per process (app/oauth/service.py).
+    Tests swap in their own keys via _fetch_json, so start each one empty or
+    a previous test's fake keys would answer instead."""
+    from app.oauth import service as oauth_service
+
+    oauth_service._JSON_CACHE.clear()
+    yield
+    oauth_service._JSON_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def _mock_external_io(monkeypatch):
     """Mock all external I/O per HANDOFF-01 guardrail: tests must never hit a
     real SMTP server, Cloudflare R2, Brankas, or Didit endpoint."""

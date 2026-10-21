@@ -2,8 +2,9 @@ from abc import ABC, abstractmethod
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, status
+from fastapi.concurrency import run_in_threadpool
 import jwt
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,18 @@ from app.users.models import (
     WebAuthnChallenge,
     WebAuthnCredential,
 )
+
+
+# Provider discovery documents and JWKS, by URL: (fetched_at, body).
+#
+# Both change rarely (Google rotates signing keys over days), yet every login
+# fetched both, unauthenticated and before the token was even parsed: a flood
+# of junk tokens became two outbound HTTPS calls each. Cached for an hour; an
+# unknown key id refetches the JWKS, but at most every few minutes, so random
+# key ids cannot turn the cache back off.
+_JSON_CACHE: dict[str, tuple[datetime, dict]] = {}
+_JSON_CACHE_TTL = timedelta(hours=1)
+_JWKS_MIN_REFRESH_INTERVAL = timedelta(minutes=5)
 
 
 class OAuthProviderBase(ABC):
@@ -52,7 +65,11 @@ class OAuthProviderBase(ABC):
         user agent ("Unknown device" on the security screen), never appeared in
         recent activity, and never triggered a new-device alert.
         """
-        claims = self.verify_token(token)
+        # verify_token does blocking HTTP (provider keys, Google's tokeninfo and
+        # userinfo). Called inline it stalled this worker's whole event loop for
+        # each round trip, so an unauthenticated flood took the API down. A
+        # worker thread keeps the loop serving everything else meanwhile.
+        claims = await run_in_threadpool(self.verify_token, token)
         user_info = self.map_claims(claims)
         user = await self.get_or_create_user(db, user_info)
 
@@ -99,9 +116,17 @@ class OAuthProviderBase(ABC):
             )
 
         try:
-            discovery = self._fetch_json(self.discovery_url)
-            jwks = self._fetch_json(discovery["jwks_uri"])
+            # Parsed first: a token that is not even a JWT fails here, before
+            # anything goes over the network.
             header = jwt.get_unverified_header(id_token)
+            discovery = self._fetch_cached(self.discovery_url)
+            jwks_uri = discovery["jwks_uri"]
+            jwks = self._fetch_cached(jwks_uri)
+            if not any(k.get("kid") == header.get("kid") for k in jwks["keys"]):
+                # Possibly a key published since the cached copy.
+                jwks = self._fetch_cached(
+                    jwks_uri, max_age=_JWKS_MIN_REFRESH_INTERVAL
+                )
             jwk = self._find_key(jwks["keys"], header.get("kid"))
             # PyJWT does not accept a raw JWK dict as the key: PyJWK parses it
             # into a cryptography public key (kty RSA/EC -> RS/ES family).
@@ -243,6 +268,16 @@ class OAuthProviderBase(ABC):
             after_state={"provider": self.provider.value, "email_verified": True},
         )
         await db.flush()
+
+    def _fetch_cached(self, url: str, *, max_age: timedelta = _JSON_CACHE_TTL) -> dict:
+        """_fetch_json through the shared cache, refetching once older than max_age."""
+        now = datetime.now(timezone.utc)
+        hit = _JSON_CACHE.get(url)
+        if hit is not None and now - hit[0] < max_age:
+            return hit[1]
+        body = self._fetch_json(url)
+        _JSON_CACHE[url] = (now, body)
+        return body
 
     def _fetch_json(self, url: str) -> dict:
         with httpx.Client(timeout=10.0) as client:
