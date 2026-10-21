@@ -65,3 +65,19 @@ async def test_a_tax_code_verified_on_another_account_is_parked(
 
     assert second["status"] == "MANUAL_REVIEW"
     assert second["rejection_reason"] == TAX_CODE_TAKEN_REVIEW
+
+
+async def test_a_differently_spaced_tax_code_is_still_the_same_business(
+    client, make_verified_sme, mock_gverify_kyb  # noqa: F811
+):
+    first = await _kyb(client, await make_verified_sme())
+    assert first["status"] == "APPROVED"
+
+    # OCR spacing varies between scans of one certificate; the exact-string
+    # comparison let the second account through as a different business.
+    code = mock_gverify_kyb.ocr["tax_code"]
+    mock_gverify_kyb.ocr = {**mock_gverify_kyb.ocr, "tax_code": f" {code[:4]} {code[4:]} "}
+    second = await _kyb(client, await make_verified_sme())
+
+    assert second["status"] == "MANUAL_REVIEW"
+    assert second["rejection_reason"] == TAX_CODE_TAKEN_REVIEW

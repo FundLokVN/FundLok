@@ -20,7 +20,7 @@ import binascii
 import re
 import unicodedata
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -37,6 +37,7 @@ from app.gverify.models import (
 )
 from app.gverify.service import ImageValidationError, _as_float
 from app.users.models import User
+from app.utils.locks import advisory_xact_lock
 
 _MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
 
@@ -266,10 +267,17 @@ async def _identity_review_reason(
     rejected outright by _rep_match_rejection_reason; this is the softer
     default for when it is off.
     """
+    # Locked per tax code until the attempt commits: unlocked, two accounts
+    # submitting the same certificate at once both found no APPROVED row and
+    # were both approved automatically.
+    tax_code = normalize_identifier(tax_code)
+    await advisory_xact_lock(db, f"kyb-tax-code:{tax_code}")
     taken = await db.execute(
         select(GVerifyKybVerification.id)
         .where(
-            GVerifyKybVerification.tax_code == tax_code,
+            # Whitespace dropped on the stored side too, for rows written
+            # before the OCR code was normalised.
+            func.regexp_replace(GVerifyKybVerification.tax_code, r"\s", "", "g") == tax_code,
             GVerifyKybVerification.status == STATUS_APPROVED,
             GVerifyKybVerification.user_id != user_id,
         )
@@ -360,7 +368,9 @@ async def run_kyb_verification(
     attempt.ocr_data = ocr
     # OCR extraction wins; the SME-declared MST is the fallback for the live
     # extraction gap (legible "Mã số doanh nghiệp" returned as tax_code:"").
-    effective_tax_code = str(ocr.get("tax_code") or "").strip() or declared
+    # Normalised like the declared one, so the stored code compares equal
+    # across attempts however the OCR spaced or digit-encoded it.
+    effective_tax_code = normalize_identifier(str(ocr.get("tax_code") or "")) or declared
     attempt.tax_code = effective_tax_code
     # license_code: OCR value → declared → fall back to the tax code. The
     # working tax-verify contract wants it (KYB plan §7.3); for modern VN
