@@ -171,3 +171,84 @@ async def test_disabling_2fa_is_limited_across_password_and_code_misses(
 
     status_resp = await client.get("/auth/2fa", headers=user["headers"])
     assert status_resp.json()["enabled"] is True
+
+
+async def _second_session(client, user) -> dict:
+    """The same account signed in again: a separate session, as on a second
+    device. Cookies cleared so the new sign-in is not tied to the first."""
+    client.cookies.clear()
+    login = await client.post(
+        "/auth/login", json={"email": user["email"], "password": user["password"]}
+    )
+    assert login.status_code == 200, login.text
+    return {"Authorization": f"Bearer {login.cookies.get('access_token')}"}
+
+
+async def test_misses_on_one_session_do_not_lock_out_another(
+    client, make_user, db_session
+):
+    # Counted per account, a stolen session could keep the owner from adding
+    # a passkey or turning 2FA off by missing five times every 15 minutes.
+    user = await make_user(role="INVESTOR")
+    await _verified(db_session, user)
+    owner_headers = await _second_session(client, user)
+
+    for _ in range(MAX_STEP_UP_FAILURES):
+        await client.post(
+            "/auth/passkeys/register/options",
+            json={"password": "guess"},
+            headers=user["headers"],
+        )
+    thief = await client.post(
+        "/auth/passkeys/register/options",
+        json={"password": user["password"]},
+        headers=user["headers"],
+    )
+    assert thief.status_code == 429, thief.text
+
+    owner = await client.post(
+        "/auth/passkeys/register/options",
+        json={"password": user["password"]},
+        headers=owner_headers,
+    )
+    assert owner.status_code == 200, owner.text
+
+
+async def test_oauth_only_account_can_disable_2fa_on_a_fresh_sign_in(
+    client, make_user, db_session
+):
+    user = await make_user(role="INVESTOR")
+    secret, _ = await enrol(client, user)
+    await _make_oauth_only(db_session, user)
+
+    resp = await client.post(
+        "/auth/2fa/disable", json={"code": code_for(secret)}, headers=user["headers"]
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["enabled"] is False
+
+
+async def test_oauth_only_account_must_sign_in_again_to_disable_2fa(
+    client, make_user, db_session
+):
+    user = await make_user(role="INVESTOR")
+    secret, _ = await enrol(client, user)
+    await _make_oauth_only(db_session, user)
+    await _age_sessions(db_session, user, timedelta(minutes=30))
+
+    resp = await client.post(
+        "/auth/2fa/disable", json={"code": code_for(secret)}, headers=user["headers"]
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.headers["X-Error-Code"] == "REAUTH_REQUIRED"
+    # Not a guess: nothing recorded towards the lockout.
+    misses = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.entity_id == user["id"], AuditLog.action == STEP_UP_FAILED
+            )
+        )
+    ).scalars().all()
+    assert misses == []

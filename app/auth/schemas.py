@@ -199,7 +199,8 @@ class TotpEnableOut(BaseModel):
 
 
 class TotpDisableRequest(BaseModel):
-    password: str
+    # Omitted by OAuth-only accounts, which pass on a fresh sign-in instead.
+    password: str | None = Field(default=None, max_length=1024)
     # A live code or a recovery code; the service accepts either.
     code: str = Field(min_length=1, max_length=64)
 

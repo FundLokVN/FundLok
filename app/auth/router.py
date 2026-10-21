@@ -249,6 +249,7 @@ async def disable_two_factor(
         current_user,
         body.password,
         body.code,
+        session_id=getattr(request.state, "session_id", None),
         ip_address=request.client.host if request.client else None,
     )
     append_audit(

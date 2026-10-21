@@ -1022,19 +1022,27 @@ STEP_UP_FAILURE_WINDOW = timedelta(minutes=15)
 STEP_UP_MAX_SESSION_AGE = timedelta(minutes=10)
 
 
-async def _recent_step_up_failures(db: AsyncSession, user_id: UUID) -> int:
+async def _recent_step_up_failures(
+    db: AsyncSession, user_id: UUID, session_id: UUID | None
+) -> int:
     since = datetime.now(timezone.utc) - STEP_UP_FAILURE_WINDOW
-    result = await db.execute(
-        select(func.count(AuditLog.id)).where(
-            AuditLog.entity_id == user_id,
-            AuditLog.action == STEP_UP_FAILED,
-            AuditLog.created_at >= since,
-        )
+    query = select(func.count(AuditLog.id)).where(
+        AuditLog.entity_id == user_id,
+        AuditLog.action == STEP_UP_FAILED,
+        AuditLog.created_at >= since,
     )
-    return result.scalar_one()
+    # Counted per session, not per account. Per account, whoever held a
+    # stolen session could miss five times every 15 minutes and keep the
+    # owner, on their own session, from turning 2FA off or adding a passkey
+    # for as long as they liked. A session only comes from a sign-in, so this
+    # gives a thief no more guesses than before: still five, on the one
+    # session they hold. (No session id: the account, as before.)
+    if session_id is not None:
+        query = query.where(AuditLog.after_state["session_id"].astext == str(session_id))
+    return (await db.execute(query)).scalar_one()
 
 
-async def _lock_step_up(db: AsyncSession, user: User) -> None:
+async def _lock_step_up(db: AsyncSession, user: User, session_id: UUID | None) -> None:
     """Serialise step-up checks per account and refuse once over the limit.
 
     Locked so that count, verify and record are one step: without it, parallel
@@ -1042,7 +1050,7 @@ async def _lock_step_up(db: AsyncSession, user: User) -> None:
     hundreds got hundreds of password guesses (see complete_totp_login).
     """
     await advisory_xact_lock(db, f"auth-step-up:{user.id}")
-    if await _recent_step_up_failures(db, user.id) >= MAX_STEP_UP_FAILURES:
+    if await _recent_step_up_failures(db, user.id, session_id) >= MAX_STEP_UP_FAILURES:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many incorrect attempts. Try again in 15 minutes.",
@@ -1051,7 +1059,11 @@ async def _lock_step_up(db: AsyncSession, user: User) -> None:
 
 
 async def _record_step_up_failure(
-    db: AsyncSession, user: User, ip_address: str | None, detail: str
+    db: AsyncSession,
+    user: User,
+    session_id: UUID | None,
+    ip_address: str | None,
+    detail: str,
 ) -> HTTPException:
     # Committed before the caller raises, or the rollback would take the count
     # with it. AUTH, so every miss is on the owner's security screen: a wrong
@@ -1062,35 +1074,18 @@ async def _record_step_up_failure(
         entity_id=user.id,
         action=STEP_UP_FAILED,
         actor_id=user.id,
+        after_state={"session_id": str(session_id)} if session_id else None,
         ip_address=ip_address,
     )
     await db.commit()
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 
 
-async def require_step_up(
-    db: AsyncSession,
-    user: User,
-    *,
-    session_id: UUID | None,
-    password: str | None,
-    ip_address: str | None = None,
+async def _require_recent_sign_in(
+    db: AsyncSession, user: User, session_id: UUID | None
 ) -> None:
-    """Gate adding a sign-in method on proof beyond the session itself."""
-    if user.password_hash:
-        if not password:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Enter your password to continue.",
-                headers={"X-Error-Code": "PASSWORD_REQUIRED"},
-            )
-        await _lock_step_up(db, user)
-        if not verify_password(password, user.password_hash):
-            raise await _record_step_up_failure(
-                db, user, ip_address, "Password is incorrect"
-            )
-        return
-
+    """Step-up for an account with no password: a session that signed in
+    within STEP_UP_MAX_SESSION_AGE, counted from its ORIGINAL sign-in."""
     started = None
     if session_id is not None:
         started = (
@@ -1109,14 +1104,42 @@ async def require_step_up(
         )
 
 
+async def require_step_up(
+    db: AsyncSession,
+    user: User,
+    *,
+    session_id: UUID | None,
+    password: str | None,
+    ip_address: str | None = None,
+) -> None:
+    """Gate adding a sign-in method on proof beyond the session itself."""
+    if not user.password_hash:
+        await _require_recent_sign_in(db, user, session_id)
+        return
+    if not password:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Enter your password to continue.",
+            headers={"X-Error-Code": "PASSWORD_REQUIRED"},
+        )
+    await _lock_step_up(db, user, session_id)
+    if not verify_password(password, user.password_hash):
+        raise await _record_step_up_failure(
+            db, user, session_id, ip_address, "Password is incorrect"
+        )
+
+
 async def disable_totp(
     db: AsyncSession,
     current_user: User,
-    password: str,
+    password: str | None,
     code: str,
+    *,
+    session_id: UUID | None = None,
     ip_address: str | None = None,
 ) -> None:
-    """Turn 2FA off. Requires the password AND a second-factor code.
+    """Turn 2FA off. Requires the password (or, for an account without one, a
+    fresh sign-in) AND a second-factor code.
 
     Both checks share the step-up attempt limit. Without one, a stolen session
     had an unlimited oracle here: first for the password ("Password is
@@ -1127,21 +1150,27 @@ async def disable_totp(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Two-factor authentication is not enabled",
         )
-    await _lock_step_up(db, current_user)
-    if not current_user.password_hash or not verify_password(
-        password, current_user.password_hash
-    ):
-        raise await _record_step_up_failure(
-            db, current_user, ip_address, "Password is incorrect"
-        )
+    if not current_user.password_hash:
+        # OAuth-only accounts can enrol TOTP on a fresh sign-in, so they turn
+        # it off the same way. Asking for a password they do not have made
+        # 2FA impossible to remove, and every try counted as a failure.
+        await _require_recent_sign_in(db, current_user, session_id)
+        await _lock_step_up(db, current_user, session_id)
+    else:
+        await _lock_step_up(db, current_user, session_id)
+        if not password or not verify_password(password, current_user.password_hash):
+            raise await _record_step_up_failure(
+                db, current_user, session_id, ip_address, "Password is incorrect"
+            )
 
     # A recovery code is accepted here on purpose: someone who has lost their
     # authenticator needs a way out that is not "contact support", and they have
-    # already proved knowledge of the password above.
+    # already proved knowledge of the password (or signed in fresh) above.
     if not await _consume_second_factor(db, current_user, code):
         raise await _record_step_up_failure(
             db,
             current_user,
+            session_id,
             ip_address,
             "That code is not valid. Use a code from your app or a recovery code.",
         )
