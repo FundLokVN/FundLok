@@ -2,7 +2,7 @@
 
 approve_score_run only checked `status == "READY"`, so an admin could LOCK a
 run the engine had decided REJECT (a hard gate: KYC/AML failed, fraud flags,
-an excluded industry), or one still AI_PENDING, or an older run graded on
+an excluded industry), or one with nothing graded, or an older run graded on
 older evidence. A LOCKED run is the engine half of the two-approval gate: it
 puts the project on the marketplace and backs the contract. These pin that
 only the newest run, with a decision the engine did not block, can be locked.
@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import select, update
 
 from app.lending.models import ScoreRun
-from tests.underwriting.test_score_run_persistence import scored_setup  # noqa: F401
+from tests.underwriting.test_score_run_persistence import _put_financials, scored_setup  # noqa: F401
 
 
 async def _score(client, admin, application_id) -> dict:
@@ -39,7 +39,7 @@ async def _set_decision(db_session, run_id, decision: str) -> None:
     await db_session.commit()
 
 
-@pytest.mark.parametrize("decision", ["REJECT", "AI_PENDING"])
+@pytest.mark.parametrize("decision", ["REJECT", "INSUFFICIENT_DATA"])
 async def test_a_blocked_decision_cannot_be_locked(
     client, db_session, scored_setup, decision  # noqa: F811
 ):
@@ -56,7 +56,9 @@ async def test_a_blocked_decision_cannot_be_locked(
     assert status == "READY"
 
 
-@pytest.mark.parametrize("decision", ["APPROVED", "REVIEW"])
+# AI_PENDING included: `founder` has no automatic source, so a complete run
+# normally ends there, and refusing it refused almost every approval.
+@pytest.mark.parametrize("decision", ["APPROVED", "REVIEW", "AI_PENDING"])
 async def test_an_approvable_decision_can_be_locked(
     client, db_session, scored_setup, decision  # noqa: F811
 ):
@@ -71,6 +73,7 @@ async def test_an_approvable_decision_can_be_locked(
 
 async def test_only_the_newest_run_can_be_locked(client, scored_setup):  # noqa: F811
     admin, app_id = scored_setup["admin"], scored_setup["application"]["id"]
+    await _put_financials(client, admin, app_id)  # INSUFFICIENT_DATA cannot be locked
     older = await _score(client, admin, app_id)
     newer = await _score(client, admin, app_id)
 

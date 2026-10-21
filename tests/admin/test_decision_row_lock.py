@@ -15,7 +15,7 @@ from sqlalchemy import event
 
 from app.core.database import engine
 from tests.admin.test_admin_approval import make_submitted_application  # noqa: F401
-from tests.underwriting.test_score_run_persistence import scored_setup  # noqa: F401
+from tests.underwriting.test_score_run_persistence import _put_financials, scored_setup  # noqa: F401
 
 
 @pytest.fixture
@@ -55,6 +55,7 @@ async def test_locking_a_score_run_takes_the_same_row_lock(
     client, scored_setup, statements  # noqa: F811
 ):
     admin, app_id = scored_setup["admin"], scored_setup["application"]["id"]
+    await _put_financials(client, admin, app_id)  # INSUFFICIENT_DATA cannot be locked
     run = await client.post(
         "/underwriting/score-runs",
         json={"application_id": app_id, "mode": None},

@@ -460,8 +460,14 @@ async def replay_score_run(db: AsyncSession, score_run_id: UUID) -> tuple[ScoreR
 # Engine decisions an operator cannot lock. REJECT means a hard gate fired
 # (KYC/AML failed, fraud flags, an excluded industry): locking it would turn
 # the engine's absolute block into an operator's choice, recorded only as a
-# generic approval. AI_PENDING means grading has not finished.
-_UNLOCKABLE_DECISIONS = frozenset({"REJECT", "AI_PENDING"})
+# generic approval. INSUFFICIENT_DATA means there was nothing to grade, so the
+# run carries no grade or rate for a contract to use.
+#
+# AI_PENDING is NOT here: `founder` has no automatic source (only the
+# operator's override), so it is the normal outcome of a complete run, and the
+# rate is still computed (app/loans/lite_grading.py). Blocking it blocked
+# nearly every approval.
+_UNLOCKABLE_DECISIONS = frozenset({"REJECT", "INSUFFICIENT_DATA"})
 
 
 async def approve_score_run(db: AsyncSession, score_run_id: UUID) -> tuple[ScoreRun, bool]:
@@ -511,7 +517,10 @@ async def approve_score_run(db: AsyncSession, score_run_id: UUID) -> tuple[Score
         await db.execute(
             select(ScoreRun.id)
             .where(ScoreRun.application_id == sr.application_id)
-            .order_by(ScoreRun.created_at.desc())
+            # id breaks ties: created_at is the transaction's now(), so runs
+            # from one transaction share it and would otherwise come back in
+            # any order.
+            .order_by(ScoreRun.created_at.desc(), ScoreRun.id.desc())
             .limit(1)
         )
     ).scalar_one()
