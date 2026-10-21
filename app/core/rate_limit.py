@@ -51,6 +51,7 @@ SENSITIVE_PATHS = frozenset(
         "/auth/login/2fa",
         "/auth/passkeys/login/options",
         "/auth/passkeys/login/verify",
+        "/auth/oauth/login",
         "/auth/register",
         "/auth/resend-verification",
         "/auth/forgot-password",

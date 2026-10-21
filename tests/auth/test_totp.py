@@ -25,7 +25,9 @@ def code_for(secret: str) -> str:
 
 async def enrol(client, user) -> tuple[str, list[str]]:
     """Take an account all the way through enrolment. Returns (secret, codes)."""
-    setup = await client.post("/auth/2fa/setup", headers=user["headers"])
+    setup = await client.post(
+        "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
+    )
     assert setup.status_code == 201, setup.text
     secret = setup.json()["secret"]
 
@@ -128,7 +130,9 @@ class TestChallengeToken:
 async def test_setup_returns_a_secret_and_a_scannable_uri(client, make_user):
     user = await make_user(role="INVESTOR")
 
-    resp = await client.post("/auth/2fa/setup", headers=user["headers"])
+    resp = await client.post(
+        "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
+    )
 
     assert resp.status_code == 201, resp.text
     body = resp.json()
@@ -139,7 +143,9 @@ async def test_setup_returns_a_secret_and_a_scannable_uri(client, make_user):
 async def test_setup_alone_does_not_enable_anything(client, make_user, db_session):
     # An abandoned setup must never lock anyone out of their account.
     user = await make_user(role="INVESTOR")
-    await client.post("/auth/2fa/setup", headers=user["headers"])
+    await client.post(
+        "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
+    )
 
     status_resp = await client.get("/auth/2fa", headers=user["headers"])
     assert status_resp.json()["enabled"] is False
@@ -154,7 +160,9 @@ async def test_setup_alone_does_not_enable_anything(client, make_user, db_sessio
 
 async def test_enable_requires_a_valid_code(client, make_user):
     user = await make_user(role="INVESTOR")
-    await client.post("/auth/2fa/setup", headers=user["headers"])
+    await client.post(
+        "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
+    )
 
     resp = await client.post(
         "/auth/2fa/enable", json={"code": "000000"}, headers=user["headers"]
@@ -208,7 +216,9 @@ async def test_setup_is_refused_once_enabled(client, make_user):
     user = await make_user(role="INVESTOR")
     await enrol(client, user)
 
-    resp = await client.post("/auth/2fa/setup", headers=user["headers"])
+    resp = await client.post(
+        "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
+    )
 
     assert resp.status_code == 409
 
@@ -594,7 +604,9 @@ async def test_the_stored_secret_is_encrypted_not_plaintext(
     """The point of the whole module: a database dump must not yield secrets."""
     user = await make_user(role="INVESTOR")
 
-    setup = await client.post("/auth/2fa/setup", headers=user["headers"])
+    setup = await client.post(
+        "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
+    )
     plaintext_secret = setup.json()["secret"]
 
     row = (
@@ -678,7 +690,9 @@ async def test_setup_is_refused_when_no_encryption_key_is_configured(
     user = await make_user(role="INVESTOR")
     monkeypatch.setattr(settings, "TOTP_ENCRYPTION_KEY", None)
 
-    resp = await client.post("/auth/2fa/setup", headers=user["headers"])
+    resp = await client.post(
+        "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
+    )
 
     assert resp.status_code == 503
     # The response must NOT name the setting: that is server configuration, and
@@ -694,6 +708,8 @@ async def test_an_invalid_encryption_key_is_reported_not_ignored(
     user = await make_user(role="INVESTOR")
     monkeypatch.setattr(settings, "TOTP_ENCRYPTION_KEY", "not-a-fernet-key")
 
-    resp = await client.post("/auth/2fa/setup", headers=user["headers"])
+    resp = await client.post(
+        "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
+    )
 
     assert resp.status_code == 503

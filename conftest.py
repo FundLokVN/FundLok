@@ -269,6 +269,18 @@ def _pin_feature_flags(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _clear_oauth_key_cache():
+    """OAuth discovery/JWKS are cached per process (app/oauth/service.py).
+    Tests swap in their own keys via _fetch_json, so start each one empty or
+    a previous test's fake keys would answer instead."""
+    from app.oauth import service as oauth_service
+
+    oauth_service._JSON_CACHE.clear()
+    yield
+    oauth_service._JSON_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def _mock_external_io(monkeypatch):
     """Mock all external I/O per HANDOFF-01 guardrail: tests must never hit a
     real SMTP server, Cloudflare R2, Brankas, or Didit endpoint."""
@@ -473,9 +485,21 @@ def submit_loan_application(client):
 def run_and_lock_score(client):
     """Start a score run (SUBMITTED -> UNDER_REVIEW, side effect on the
     application) and immediately lock it (READY -> LOCKED). Returns the
-    score_run id."""
+    score_run id.
+
+    Financials go in first: a run with none decides INSUFFICIENT_DATA, which
+    approve_score_run refuses to lock."""
 
     async def _run(admin: dict, application_id: str):
+        # Imported here: a test module, and conftest loads before it.
+        from tests.underwriting.test_score_run_persistence import FULL_FINANCIALS
+
+        financials = await client.put(
+            f"/underwriting/applications/{application_id}/financials",
+            json=FULL_FINANCIALS,
+            headers=auth_headers(admin),
+        )
+        assert financials.status_code == 200, financials.text
         start = await client.post(
             "/underwriting/score-runs",
             json={"application_id": application_id, "mode": None},

@@ -81,7 +81,11 @@ async def _passkeys(db_session, user_id) -> list:
 async def test_an_unverified_account_cannot_start_adding_a_passkey(client, make_user):
     user = await make_user()  # registered, signed in, never verified
 
-    resp = await client.post("/auth/passkeys/register/options", headers=user["headers"])
+    resp = await client.post(
+        "/auth/passkeys/register/options",
+        json={"password": user.get("password")},
+        headers=user["headers"],
+    )
 
     assert resp.status_code == 403, resp.text
 
@@ -102,7 +106,11 @@ async def test_a_verified_account_can_start_adding_a_passkey(client, make_user, 
     user = await make_user()
     await _mark_verified(db_session, user["id"])
 
-    resp = await client.post("/auth/passkeys/register/options", headers=user["headers"])
+    resp = await client.post(
+        "/auth/passkeys/register/options",
+        json={"password": user.get("password")},
+        headers=user["headers"],
+    )
 
     assert resp.status_code == 200, resp.text
     assert "challenge" in resp.json()
@@ -137,7 +145,11 @@ async def test_a_reset_removes_passkeys_on_a_verified_account_too(
 async def test_a_reset_drops_pending_passkey_ceremonies(client, make_user, reset_links, db_session):
     user = await make_user()
     await _mark_verified(db_session, user["id"])
-    resp = await client.post("/auth/passkeys/register/options", headers=user["headers"])
+    resp = await client.post(
+        "/auth/passkeys/register/options",
+        json={"password": user.get("password")},
+        headers=user["headers"],
+    )
     assert resp.status_code == 200, resp.text
 
     await _reset(client, user["email"], reset_links)

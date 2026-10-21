@@ -727,11 +727,18 @@ async def decide_application(
     # selectinload, not db.get(): the response model carries `documents`, and
     # validating a bare ORM row would lazy-load that relationship inside an
     # async session — which raises MissingGreenlet rather than emitting SQL.
+    #
+    # FOR UPDATE: the PENDING check below is check-then-act. Unlocked, two
+    # concurrent decisions (two operators, or one double-submitting APPROVED
+    # and REJECTED) both passed it; the approval put the project on the
+    # marketplace and the rejection then overwrote the row. The second
+    # request now waits here and sees the first one's decision.
     row = (
         await db.execute(
             select(LoanApplication)
             .where(LoanApplication.id == application_id)
             .options(selectinload(LoanApplication.documents))
+            .with_for_update()
         )
     ).scalars().first()
     if row is None:

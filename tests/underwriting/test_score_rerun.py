@@ -56,6 +56,7 @@ async def test_a_rerun_is_audited_with_the_run_it_follows(client, db_session, sc
 
 async def test_no_rerun_once_a_run_is_locked(client, scored_setup):  # noqa: F811
     admin, app_id = scored_setup["admin"], scored_setup["application"]["id"]
+    await _put_financials(client, admin, app_id)  # INSUFFICIENT_DATA cannot be locked
     run = (await _score(client, admin, app_id)).json()
     locked = await client.post(f"/underwriting/score-runs/{run['id']}/approve", headers=admin["headers"])
     assert locked.status_code == 200, locked.text

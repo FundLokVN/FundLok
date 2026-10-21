@@ -239,7 +239,12 @@ async def upsert_application_financials(
 async def start_score_run(
     db: AsyncSession, application_id: UUID, mode: Optional[str] = None
 ) -> tuple[ScoreRun, GradingResult]:
-    result = await db.execute(select(LoanApplication).where(LoanApplication.id == application_id))
+    # Locked: approve_score_run takes the same row lock, so a re-run cannot
+    # slip in beside a run that is being locked (the "no LOCKED run" check
+    # below would otherwise read before the lock commits).
+    result = await db.execute(
+        select(LoanApplication).where(LoanApplication.id == application_id).with_for_update()
+    )
     app = result.scalar_one_or_none()
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
@@ -452,6 +457,19 @@ async def replay_score_run(db: AsyncSession, score_run_id: UUID) -> tuple[ScoreR
     return sr, grading_result
 
 
+# Engine decisions an operator cannot lock. REJECT means a hard gate fired
+# (KYC/AML failed, fraud flags, an excluded industry): locking it would turn
+# the engine's absolute block into an operator's choice, recorded only as a
+# generic approval. INSUFFICIENT_DATA means there was nothing to grade, so the
+# run carries no grade or rate for a contract to use.
+#
+# AI_PENDING is NOT here: `founder` has no automatic source (only the
+# operator's override), so it is the normal outcome of a complete run, and the
+# rate is still computed (app/loans/lite_grading.py). Blocking it blocked
+# nearly every approval.
+_UNLOCKABLE_DECISIONS = frozenset({"REJECT", "INSUFFICIENT_DATA"})
+
+
 async def approve_score_run(db: AsyncSession, score_run_id: UUID) -> tuple[ScoreRun, bool]:
     result = await db.execute(select(ScoreRun).where(ScoreRun.id == score_run_id))
     sr = result.scalar_one_or_none()
@@ -459,8 +477,60 @@ async def approve_score_run(db: AsyncSession, score_run_id: UUID) -> tuple[Score
         raise HTTPException(status_code=404, detail="Score run not found")
     if sr.status == "LOCKED":
         return sr, False
+
+    # One LOCKED run backs an application (contracts and the marketplace read
+    # it), so everything below runs under the application's row lock: the
+    # same lock start_score_run and the operator decision take. Re-read the
+    # run under it, since a concurrent approve may have just locked it.
+    await db.execute(
+        select(LoanApplication.id)
+        .where(LoanApplication.id == sr.application_id)
+        .with_for_update()
+    )
+    await db.refresh(sr)
+    if sr.status == "LOCKED":
+        return sr, False
     if sr.status != "READY":
         raise HTTPException(status_code=400, detail="Score run must be READY to approve")
+    if sr.decision in _UNLOCKABLE_DECISIONS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"The engine decided {sr.decision}; this score run cannot be locked",
+        )
+    other_locked = (
+        await db.execute(
+            select(ScoreRun.id)
+            .where(
+                ScoreRun.application_id == sr.application_id,
+                ScoreRun.status == "LOCKED",
+                ScoreRun.id != sr.id,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if other_locked is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Another score run is already locked for this application",
+        )
+    latest = (
+        await db.execute(
+            select(ScoreRun.id)
+            .where(ScoreRun.application_id == sr.application_id)
+            # id breaks ties: created_at is the transaction's now(), so runs
+            # from one transaction share it and would otherwise come back in
+            # any order.
+            .order_by(ScoreRun.created_at.desc(), ScoreRun.id.desc())
+            .limit(1)
+        )
+    ).scalar_one()
+    if latest != sr.id:
+        # An older run graded older evidence; locking it would put terms on
+        # the contract that the current figures no longer support.
+        raise HTTPException(
+            status_code=409,
+            detail="A newer score run exists for this application; approve that one",
+        )
     sr.status = "LOCKED"
     sr.locked_at = datetime.now(timezone.utc)
     db.add(sr)

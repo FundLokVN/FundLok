@@ -9,6 +9,7 @@ import uuid
 import pytest
 
 from app.gverify.client import GVerifyError
+from app.gverify.models import STATUS_APPROVED, GVerifyVerification
 
 # --------------------------------------------------------------------------- #
 # Fixtures / helpers
@@ -111,13 +112,38 @@ def make_sme(make_user):
     return _make
 
 
+# The legal representative on the mock certificate (see _ocr_data).
+REPRESENTATIVE_ID = "079203001234"
+
+
+@pytest.fixture
+def make_verified_sme(make_user, db_session):
+    """An SME whose own identity (KYC) is approved as the certificate's legal
+    representative: the only applicant a KYB is approved for automatically.
+    Anyone else is parked for an operator (kyb_service._identity_review_reason)."""
+
+    async def _make(person_number: str = REPRESENTATIVE_ID):
+        sme = await make_user(role="SME")
+        db_session.add(
+            GVerifyVerification(
+                user_id=uuid.UUID(sme["id"]),
+                status=STATUS_APPROVED,
+                person_number=person_number,
+            )
+        )
+        await db_session.commit()
+        return sme
+
+    return _make
+
+
 # --------------------------------------------------------------------------- #
 # POST /gverify/kyb/verify
 # --------------------------------------------------------------------------- #
 
 
-async def test_kyb_verify_happy_path_approves(client, make_sme, mock_gverify_kyb):
-    sme = await make_sme()
+async def test_kyb_verify_happy_path_approves(client, make_verified_sme, mock_gverify_kyb):
+    sme = await make_verified_sme()
     resp = await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
     assert resp.status_code == 201, resp.text
     data = resp.json()
@@ -132,8 +158,8 @@ async def test_kyb_verify_happy_path_approves(client, make_sme, mock_gverify_kyb
     assert mock_gverify_kyb.tax_calls == 1
 
 
-async def test_kyb_verify_accepts_pdf_document(client, make_sme, mock_gverify_kyb):
-    sme = await make_sme()
+async def test_kyb_verify_accepts_pdf_document(client, make_verified_sme, mock_gverify_kyb):
+    sme = await make_verified_sme()
     resp = await client.post(
         "/gverify/kyb/verify",
         json=_body(document_b64=_b64(_PDF_BYTES)),
@@ -172,11 +198,11 @@ async def test_kyb_verify_rejects_missing_tax_code(client, make_sme, mock_gverif
 
 
 async def test_kyb_verify_declared_tax_code_covers_ocr_extraction_gap(
-    client, make_sme, mock_gverify_kyb
+    client, make_verified_sme, mock_gverify_kyb
 ):
     """Live gap (2026-07-15): OCR returned tax_code:"" for a legible MST. An
     SME-declared MST stands in — still bound by the registry name cross-check."""
-    sme = await make_sme()
+    sme = await make_verified_sme()
     mock_gverify_kyb.ocr = _ocr_data(tax_code="")
     resp = await client.post(
         "/gverify/kyb/verify",
@@ -190,8 +216,8 @@ async def test_kyb_verify_declared_tax_code_covers_ocr_extraction_gap(
     assert mock_gverify_kyb.tax_calls == 1
 
 
-async def test_kyb_verify_ocr_tax_code_wins_over_declared(client, make_sme, mock_gverify_kyb):
-    sme = await make_sme()
+async def test_kyb_verify_ocr_tax_code_wins_over_declared(client, make_verified_sme, mock_gverify_kyb):
+    sme = await make_verified_sme()
     resp = await client.post(
         "/gverify/kyb/verify",
         json=_body(tax_code="9999999999"),  # OCR extracted 0312345678 — that wins
@@ -333,16 +359,18 @@ async def test_kyb_verify_rep_match_rule(client, make_sme, mock_gverify_kyb, mon
     assert mock_gverify_kyb.ocr_calls == 0
     assert mock_gverify_kyb.tax_calls == 0
 
-    # Flag OFF -> same certificate approves (fresh user, no KYC needed).
+    # Flag OFF -> no KYC needed to submit, but nothing ties this user to the
+    # business, so the same certificate is parked for an operator rather than
+    # approved automatically (kyb_service._identity_review_reason).
     monkeypatch.setattr(app_settings, "GVERIFY_KYB_REQUIRE_REP_MATCH", False)
     sme2 = await make_sme()
     resp = await client.post("/gverify/kyb/verify", json=_body(), headers=sme2["headers"])
     assert resp.status_code == 201, resp.text
-    assert resp.json()["status"] == "APPROVED"
+    assert resp.json()["status"] == "MANUAL_REVIEW"
 
 
-async def test_kyb_verify_conflict_when_already_approved(client, make_sme, mock_gverify_kyb):
-    sme = await make_sme()
+async def test_kyb_verify_conflict_when_already_approved(client, make_verified_sme, mock_gverify_kyb):
+    sme = await make_verified_sme()
     first = await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
     assert first.status_code == 201 and first.json()["status"] == "APPROVED"
 
@@ -351,8 +379,8 @@ async def test_kyb_verify_conflict_when_already_approved(client, make_sme, mock_
     assert mock_gverify_kyb.ocr_calls == 1  # no provider call for the duplicate
 
 
-async def test_kyb_verify_allows_retry_after_rejection(client, make_sme, mock_gverify_kyb):
-    sme = await make_sme()
+async def test_kyb_verify_allows_retry_after_rejection(client, make_verified_sme, mock_gverify_kyb):
+    sme = await make_verified_sme()
     mock_gverify_kyb.tax = _tax_data(is_valid=False)
     first = await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
     assert first.status_code == 201 and first.json()["status"] == "REJECTED"
@@ -413,8 +441,8 @@ async def test_kyb_verify_provider_error_returns_502_and_marks_failed(
 # --------------------------------------------------------------------------- #
 
 
-async def test_kyb_status_returns_latest_attempt(client, make_sme, mock_gverify_kyb):
-    sme = await make_sme()
+async def test_kyb_status_returns_latest_attempt(client, make_verified_sme, mock_gverify_kyb):
+    sme = await make_verified_sme()
     mock_gverify_kyb.tax = _tax_data(is_valid=False)
     await client.post("/gverify/kyb/verify", json=_body(), headers=sme["headers"])
     mock_gverify_kyb.tax = _tax_data()
