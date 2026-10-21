@@ -239,7 +239,12 @@ async def upsert_application_financials(
 async def start_score_run(
     db: AsyncSession, application_id: UUID, mode: Optional[str] = None
 ) -> tuple[ScoreRun, GradingResult]:
-    result = await db.execute(select(LoanApplication).where(LoanApplication.id == application_id))
+    # Locked: approve_score_run takes the same row lock, so a re-run cannot
+    # slip in beside a run that is being locked (the "no LOCKED run" check
+    # below would otherwise read before the lock commits).
+    result = await db.execute(
+        select(LoanApplication).where(LoanApplication.id == application_id).with_for_update()
+    )
     app = result.scalar_one_or_none()
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
@@ -452,6 +457,13 @@ async def replay_score_run(db: AsyncSession, score_run_id: UUID) -> tuple[ScoreR
     return sr, grading_result
 
 
+# Engine decisions an operator cannot lock. REJECT means a hard gate fired
+# (KYC/AML failed, fraud flags, an excluded industry): locking it would turn
+# the engine's absolute block into an operator's choice, recorded only as a
+# generic approval. AI_PENDING means grading has not finished.
+_UNLOCKABLE_DECISIONS = frozenset({"REJECT", "AI_PENDING"})
+
+
 async def approve_score_run(db: AsyncSession, score_run_id: UUID) -> tuple[ScoreRun, bool]:
     result = await db.execute(select(ScoreRun).where(ScoreRun.id == score_run_id))
     sr = result.scalar_one_or_none()
@@ -459,8 +471,57 @@ async def approve_score_run(db: AsyncSession, score_run_id: UUID) -> tuple[Score
         raise HTTPException(status_code=404, detail="Score run not found")
     if sr.status == "LOCKED":
         return sr, False
+
+    # One LOCKED run backs an application (contracts and the marketplace read
+    # it), so everything below runs under the application's row lock: the
+    # same lock start_score_run and the operator decision take. Re-read the
+    # run under it, since a concurrent approve may have just locked it.
+    await db.execute(
+        select(LoanApplication.id)
+        .where(LoanApplication.id == sr.application_id)
+        .with_for_update()
+    )
+    await db.refresh(sr)
+    if sr.status == "LOCKED":
+        return sr, False
     if sr.status != "READY":
         raise HTTPException(status_code=400, detail="Score run must be READY to approve")
+    if sr.decision in _UNLOCKABLE_DECISIONS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"The engine decided {sr.decision}; this score run cannot be locked",
+        )
+    other_locked = (
+        await db.execute(
+            select(ScoreRun.id)
+            .where(
+                ScoreRun.application_id == sr.application_id,
+                ScoreRun.status == "LOCKED",
+                ScoreRun.id != sr.id,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if other_locked is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Another score run is already locked for this application",
+        )
+    latest = (
+        await db.execute(
+            select(ScoreRun.id)
+            .where(ScoreRun.application_id == sr.application_id)
+            .order_by(ScoreRun.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one()
+    if latest != sr.id:
+        # An older run graded older evidence; locking it would put terms on
+        # the contract that the current figures no longer support.
+        raise HTTPException(
+            status_code=409,
+            detail="A newer score run exists for this application; approve that one",
+        )
     sr.status = "LOCKED"
     sr.locked_at = datetime.now(timezone.utc)
     db.add(sr)
