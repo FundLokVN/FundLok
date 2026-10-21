@@ -129,7 +129,11 @@ async def _verified_user(make_user, db_session) -> dict:
 
 
 async def _register_options(client, user) -> dict:
-    resp = await client.post("/auth/passkeys/register/options", headers=user["headers"])
+    resp = await client.post(
+        "/auth/passkeys/register/options",
+        json={"password": user.get("password")},
+        headers=user["headers"],
+    )
     assert resp.status_code == 200, resp.text
     return resp.json()
 

@@ -28,6 +28,7 @@ from app.auth.schemas import (
     SecurityOverviewOut,
     SecurityPreferencesSnapshot,
     SessionOut,
+    StepUpRequest,
     Token,
     UserCreate,
     UserOut,
@@ -197,9 +198,20 @@ async def two_factor_status(
 
 @router.post("/2fa/setup", response_model=TotpSetupOut, status_code=status.HTTP_201_CREATED)
 async def start_two_factor_setup(
+    request: Request,
+    body: StepUpRequest | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_for_second_factor_enrolment),
 ):
+    # Gated here, at the start: /2fa/enable can only confirm the secret this
+    # call stages, so it needs no second check.
+    await service.require_step_up(
+        db,
+        current_user,
+        session_id=getattr(request.state, "session_id", None),
+        password=body.password if body else None,
+        ip_address=request.client.host if request.client else None,
+    )
     secret, uri = await service.start_totp_setup(db, current_user)
     await db.commit()
     return TotpSetupOut(secret=secret, provisioning_uri=uri)
@@ -232,7 +244,13 @@ async def disable_two_factor(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    await service.disable_totp(db, current_user, body.password, body.code)
+    await service.disable_totp(
+        db,
+        current_user,
+        body.password,
+        body.code,
+        ip_address=request.client.host if request.client else None,
+    )
     append_audit(
         db,
         entity_type="USER",
@@ -549,10 +567,22 @@ async def list_passkeys(
 
 @router.post("/passkeys/register/options")
 async def passkey_registration_options(
+    request: Request,
+    body: StepUpRequest | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_for_second_factor_enrolment),
 ):
-    """Options for creating a passkey. Returns the spec's JSON verbatim."""
+    """Options for creating a passkey. Returns the spec's JSON verbatim.
+
+    Gated here: /register/verify only accepts the challenge this call issues.
+    """
+    await service.require_step_up(
+        db,
+        current_user,
+        session_id=getattr(request.state, "session_id", None),
+        password=body.password if body else None,
+        ip_address=request.client.host if request.client else None,
+    )
     return Response(
         content=await passkeys.registration_options(db, current_user),
         media_type="application/json",

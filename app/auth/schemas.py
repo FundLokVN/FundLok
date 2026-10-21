@@ -173,6 +173,16 @@ class TotpSetupOut(BaseModel):
     provisioning_uri: str
 
 
+class StepUpRequest(BaseModel):
+    """Proof for adding a sign-in method: the account password.
+
+    Omitted by OAuth-only accounts, which have none; those pass on a recent
+    sign-in instead (see service.require_step_up).
+    """
+
+    password: str | None = Field(default=None, max_length=1024)
+
+
 class TotpEnableRequest(BaseModel):
     code: str = Field(min_length=6, max_length=8)
 

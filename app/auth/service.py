@@ -1004,29 +1004,146 @@ async def enable_totp(db: AsyncSession, current_user: User, code: str) -> list[s
     return plaintext
 
 
-async def disable_totp(
-    db: AsyncSession, current_user: User, password: str, code: str
+# --- Step-up: proving it is still the owner before changing sign-in methods ---
+#
+# Adding a passkey or an authenticator app, and turning 2FA off, are what an
+# attacker holding a stolen session does next: a passkey they register keeps
+# signing them in after the owner changes the password (only a reset removes
+# passkeys), and an authenticator they enrol on an account without 2FA locks
+# the owner out. A session alone must not be enough for any of them.
+#
+# Accounts with a password re-enter it. OAuth-only accounts have nothing to
+# re-enter, so they need a session that signed in moments ago instead: a
+# copied cookie or refresh token carries its session's ORIGINAL sign-in time
+# through every rotation, so it cannot pass this once that sign-in is old.
+STEP_UP_FAILED = "STEP_UP_FAILED"
+MAX_STEP_UP_FAILURES = 5
+STEP_UP_FAILURE_WINDOW = timedelta(minutes=15)
+STEP_UP_MAX_SESSION_AGE = timedelta(minutes=10)
+
+
+async def _recent_step_up_failures(db: AsyncSession, user_id: UUID) -> int:
+    since = datetime.now(timezone.utc) - STEP_UP_FAILURE_WINDOW
+    result = await db.execute(
+        select(func.count(AuditLog.id)).where(
+            AuditLog.entity_id == user_id,
+            AuditLog.action == STEP_UP_FAILED,
+            AuditLog.created_at >= since,
+        )
+    )
+    return result.scalar_one()
+
+
+async def _lock_step_up(db: AsyncSession, user: User) -> None:
+    """Serialise step-up checks per account and refuse once over the limit.
+
+    Locked so that count, verify and record are one step: without it, parallel
+    requests all read the count before any failure is written, and a burst of
+    hundreds got hundreds of password guesses (see complete_totp_login).
+    """
+    await advisory_xact_lock(db, f"auth-step-up:{user.id}")
+    if await _recent_step_up_failures(db, user.id) >= MAX_STEP_UP_FAILURES:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many incorrect attempts. Try again in 15 minutes.",
+            headers={"X-Error-Code": "STEP_UP_LOCKED"},
+        )
+
+
+async def _record_step_up_failure(
+    db: AsyncSession, user: User, ip_address: str | None, detail: str
+) -> HTTPException:
+    # Committed before the caller raises, or the rollback would take the count
+    # with it. AUTH, so every miss is on the owner's security screen: a wrong
+    # password from a live session means someone else is holding it.
+    append_audit(
+        db,
+        entity_type="AUTH",
+        entity_id=user.id,
+        action=STEP_UP_FAILED,
+        actor_id=user.id,
+        ip_address=ip_address,
+    )
+    await db.commit()
+    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+
+async def require_step_up(
+    db: AsyncSession,
+    user: User,
+    *,
+    session_id: UUID | None,
+    password: str | None,
+    ip_address: str | None = None,
 ) -> None:
-    """Turn 2FA off. Requires the password AND a second-factor code."""
+    """Gate adding a sign-in method on proof beyond the session itself."""
+    if user.password_hash:
+        if not password:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Enter your password to continue.",
+                headers={"X-Error-Code": "PASSWORD_REQUIRED"},
+            )
+        await _lock_step_up(db, user)
+        if not verify_password(password, user.password_hash):
+            raise await _record_step_up_failure(
+                db, user, ip_address, "Password is incorrect"
+            )
+        return
+
+    started = None
+    if session_id is not None:
+        started = (
+            await db.execute(
+                select(func.min(RefreshToken.created_at)).where(
+                    RefreshToken.user_id == user.id,
+                    RefreshToken.session_id == session_id,
+                )
+            )
+        ).scalar_one()
+    if started is None or datetime.now(timezone.utc) - started > STEP_UP_MAX_SESSION_AGE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="For your security, sign in again to continue.",
+            headers={"X-Error-Code": "REAUTH_REQUIRED"},
+        )
+
+
+async def disable_totp(
+    db: AsyncSession,
+    current_user: User,
+    password: str,
+    code: str,
+    ip_address: str | None = None,
+) -> None:
+    """Turn 2FA off. Requires the password AND a second-factor code.
+
+    Both checks share the step-up attempt limit. Without one, a stolen session
+    had an unlimited oracle here: first for the password ("Password is
+    incorrect"), then for the code, and at the end the second factor gone.
+    """
     if not current_user.totp_enabled:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Two-factor authentication is not enabled",
         )
+    await _lock_step_up(db, current_user)
     if not current_user.password_hash or not verify_password(
         password, current_user.password_hash
     ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Password is incorrect"
+        raise await _record_step_up_failure(
+            db, current_user, ip_address, "Password is incorrect"
         )
 
     # A recovery code is accepted here on purpose: someone who has lost their
     # authenticator needs a way out that is not "contact support", and they have
     # already proved knowledge of the password above.
     if not await _consume_second_factor(db, current_user, code):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="That code is not valid. Use a code from your app or a recovery code.",
+        raise await _record_step_up_failure(
+            db,
+            current_user,
+            ip_address,
+            "That code is not valid. Use a code from your app or a recovery code.",
         )
 
     current_user.totp_enabled = False
