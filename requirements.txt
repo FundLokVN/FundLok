@@ -57,7 +57,7 @@ fastapi-mail==1.6.8
 email-validator==2.3.0
 google-cloud-storage==3.13.1
 boto3==1.43.67           # Cloudflare R2 (S3-compatible) presigned uploads
-pypdf==6.21.1            # CIC credit-report PDFs (app/uploads/parsers/cic.py)
+pypdf==6.21.2            # CIC credit-report PDFs (app/uploads/parsers/cic.py)
 defusedxml==0.7.1        # safe XML parsing of uploaded XLSX / e-invoice files (app/uploads/parsers/xlsx.py, statements.py)
 PyYAML==6.0.3          # grading engine params loader (app/underwriting/grading/params.py)
 
