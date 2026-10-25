@@ -6,11 +6,13 @@ that one only ever sets a FIRST password (overwriting an existing one from a
 borrowed session would be account takeover), so changing an existing password
 requires the current one as proof the session is not borrowed.
 """
+import uuid
+
 from sqlalchemy import select
 
 from app.auth.service import hash_refresh_token
 from app.users.models import RefreshToken
-from conftest import auth_headers
+from conftest import DEFAULT_PASSWORD, auth_headers
 
 CHROME = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -154,29 +156,36 @@ async def test_password_change_is_audited(client, make_user):
 # --- sign-in alerts --------------------------------------------------------
 
 
-async def test_signin_alerts_default_to_off(client, make_user):
+async def test_signin_alerts_default_to_on(client, make_user):
     user = await make_user()
     resp = await client.get(
         "/users/me/security-preferences", headers=auth_headers(user)
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["signin_alerts_enabled"] is False
+    assert resp.json()["signin_alerts_enabled"] is True
 
 
 async def test_signin_alerts_can_be_toggled(client, make_user):
     user = await make_user()
+    off = await client.patch(
+        "/users/me/security-preferences",
+        json={"signin_alerts_enabled": False},
+        headers=auth_headers(user),
+    )
+    assert off.status_code == 200, off.text
+    assert off.json()["signin_alerts_enabled"] is False
+
+    read_back = await client.get(
+        "/users/me/security-preferences", headers=auth_headers(user)
+    )
+    assert read_back.json()["signin_alerts_enabled"] is False
+
     on = await client.patch(
         "/users/me/security-preferences",
         json={"signin_alerts_enabled": True},
         headers=auth_headers(user),
     )
-    assert on.status_code == 200, on.text
     assert on.json()["signin_alerts_enabled"] is True
-
-    read_back = await client.get(
-        "/users/me/security-preferences", headers=auth_headers(user)
-    )
-    assert read_back.json()["signin_alerts_enabled"] is True
 
 
 async def test_toggling_alerts_is_audited(client, make_user):
@@ -185,7 +194,7 @@ async def test_toggling_alerts_is_audited(client, make_user):
     user = await make_user()
     await client.patch(
         "/users/me/security-preferences",
-        json={"signin_alerts_enabled": True},
+        json={"signin_alerts_enabled": False},
         headers=auth_headers(user),
     )
     events = (
@@ -205,12 +214,8 @@ async def test_alert_is_sent_only_for_an_unseen_device(
     # Patch where it is used, not where it is defined.
     monkeypatch.setattr("app.auth.service.send_new_device_signin_alert", _capture)
 
+    # No opt-in: alerts are on for a new account.
     user = await make_user()
-    await client.patch(
-        "/users/me/security-preferences",
-        json={"signin_alerts_enabled": True},
-        headers=auth_headers(user),
-    )
 
     # First sign-in from this UA -> unseen -> alert.
     await client.post(
@@ -239,12 +244,49 @@ async def test_no_alert_when_the_preference_is_off(client, make_user, monkeypatc
     )
 
     user = await make_user()
+    await client.patch(
+        "/users/me/security-preferences",
+        json={"signin_alerts_enabled": False},
+        headers=auth_headers(user),
+    )
     await client.post(
         "/auth/login",
         json={"email": user["email"], "password": user["password"]},
         headers={"user-agent": EDGE_WINDOWS},
     )
-    assert sent == [], "alerts are opt-in"
+    assert sent == [], "an owner who switched alerts off gets none"
+
+
+async def test_first_ever_signin_does_not_alert(client, monkeypatch):
+    """There is no earlier device to compare the first sign-in with, so with
+    alerts on by default it would otherwise mail every new account."""
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        "app.auth.service.send_new_device_signin_alert",
+        lambda *a, **k: sent.append(k),
+    )
+
+    email = f"first-{uuid.uuid4().hex[:12]}@example.com"
+    reg = await client.post(
+        "/auth/register",
+        json={"email": email, "password": DEFAULT_PASSWORD, "full_name": "First"},
+    )
+    assert reg.status_code == 201, reg.text
+    first = await client.post(
+        "/auth/login",
+        json={"email": email, "password": DEFAULT_PASSWORD},
+        headers={"user-agent": EDGE_WINDOWS},
+    )
+    assert first.status_code == 200, first.text
+    assert sent == [], "the account's first sign-in is not a new device"
+
+    # A second, different device is new -> alert.
+    await client.post(
+        "/auth/login",
+        json={"email": email, "password": DEFAULT_PASSWORD},
+        headers={"user-agent": CHROME},
+    )
+    assert len(sent) == 1, sent
 
 
 # --- admin self-service -----------------------------------------------------
@@ -259,15 +301,15 @@ async def test_admin_can_toggle_their_own_signin_alerts(client, make_admin):
         "/users/me/security-preferences", headers=auth_headers(admin)
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["signin_alerts_enabled"] is False
+    assert resp.json()["signin_alerts_enabled"] is True
 
-    on = await client.patch(
+    off = await client.patch(
         "/users/me/security-preferences",
-        json={"signin_alerts_enabled": True},
+        json={"signin_alerts_enabled": False},
         headers=auth_headers(admin),
     )
-    assert on.status_code == 200, on.text
-    assert on.json()["signin_alerts_enabled"] is True
+    assert off.status_code == 200, off.text
+    assert off.json()["signin_alerts_enabled"] is False
 
     events = (
         await client.get("/auth/security-events", headers=auth_headers(admin))
@@ -315,6 +357,6 @@ async def test_security_overview_consolidates_security_screen_reads(client, make
     assert any(s["current"] for s in data["sessions"])
     assert len(data["security_events"]) >= 1
     assert len(data["security_events"]) <= 5
-    assert data["security_preferences"] == {"signin_alerts_enabled": False}
+    assert data["security_preferences"] == {"signin_alerts_enabled": True}
 
 

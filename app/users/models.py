@@ -42,9 +42,10 @@ class User(Base):
     role = Column(Text, nullable=True)  # null until the user selects a role post-registration
     email_verified = Column(Boolean, nullable=False, server_default="false")
     status = Column(Text, nullable=False, server_default="ACTIVE")
-    # Email the owner when a device we have not seen before signs in. Opt-in:
-    # see migration b8d41c60ea92.
-    signin_alerts_enabled = Column(Boolean, nullable=False, server_default="false")
+    # Email the owner when a device we have not seen before signs in. On by
+    # default, the owner can switch it off: see migration 5e1f0b7c9a24 (it was
+    # opt-in when b8d41c60ea92 added it).
+    signin_alerts_enabled = Column(Boolean, nullable=False, server_default="true")
 
     # When this user finished (or skipped) the first-run dashboard walkthrough.
     # NULL means they have not seen it yet.

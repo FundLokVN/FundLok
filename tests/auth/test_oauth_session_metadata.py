@@ -15,6 +15,8 @@ on the first rotation.
 These tests pin all four. The provider's ID-token verification is stubbed --
 the point here is the session bookkeeping, not Google's JWKS.
 """
+import uuid
+
 import pytest
 from sqlalchemy import select
 
@@ -140,6 +142,23 @@ async def test_oauth_signin_sends_the_new_device_alert(
     # Familiar device on the second sign-in -> no repeat alert.
     await _oauth_login(client)
     assert len(sent) == 1
+
+
+async def test_oauth_signup_does_not_alert_about_itself(
+    client, stub_google, monkeypatch
+):
+    """A Google sign-up is the account's first sign-in: nothing to compare the
+    device with, so no "new device" mail although alerts are on by default."""
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        "app.oauth.service.send_new_device_signin_alert",
+        lambda to_email, **kwargs: sent.append({"to": to_email, **kwargs}),
+    )
+    stub_google(f"oauth-new-{uuid.uuid4().hex[:12]}@example.com")
+
+    resp = await _oauth_login(client)
+    assert resp.status_code == 200, resp.text
+    assert sent == []
 
 
 async def test_oauth_login_sets_the_remember_marker(client, make_user, stub_google):

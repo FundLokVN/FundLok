@@ -498,18 +498,25 @@ async def is_unseen_device(
     a false "new device" is one extra email rather than a missed warning. An
     absent user agent is treated as NOT new -- an unknown client would otherwise
     alert on every single sign-in.
+
+    An account's first sign-in ever is NOT new either: there is no earlier
+    device to compare it with, and since alerts are on by default, every new
+    account (a Google sign-up included) would otherwise be told about itself.
+    Session rows are revoked, never deleted, so "no rows" means "never signed
+    in", not "signed out everywhere".
     """
     if not user_agent:
         return False
-    result = await db.execute(
-        select(RefreshToken.id)
-        .where(
-            RefreshToken.user_id == user_id,
-            RefreshToken.user_agent == user_agent,
-        )
-        .limit(1)
-    )
-    return result.scalar_one_or_none() is None
+    signed_in_before = select(RefreshToken.id).where(
+        RefreshToken.user_id == user_id
+    ).exists()
+    seen_this_device = select(RefreshToken.id).where(
+        RefreshToken.user_id == user_id,
+        RefreshToken.user_agent == user_agent,
+    ).exists()
+    result = await db.execute(select(signed_in_before, seen_this_device))
+    has_history, seen = result.one()
+    return has_history and not seen
 
 
 async def list_sessions(

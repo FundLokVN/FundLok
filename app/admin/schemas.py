@@ -284,7 +284,7 @@ class AdminUserFullDetail(AdminUserDetail):
     avatar_key: str | None = None
     email_signature: str | None = None
     has_password: bool
-    # Opt-in "a new device signed in" emails — see migration b8d41c60ea92.
+    # "A new device signed in" emails, on by default — see migration 5e1f0b7c9a24.
     signin_alerts_enabled: bool
     totp_enabled: bool
     totp_confirmed_at: datetime | None = None
