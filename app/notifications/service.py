@@ -7,7 +7,11 @@ from fastapi import HTTPException
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.notifications.models import NOTIFICATION_EVENTS, Notification
+from app.notifications.models import (
+    EVENT_VERIFICATION_REQUIRED,
+    NOTIFICATION_EVENTS,
+    Notification,
+)
 
 # The bell shows a short list, not an archive. Anything older is history the
 # user reads elsewhere; loading it all would make the hover card slower the
@@ -46,6 +50,29 @@ def create_notification(
     )
     db.add(row)
     return row
+
+
+async def resolve_verification_reminder(
+    db: AsyncSession, *, user_id: UUID, check: str
+) -> None:
+    """Mark the account's "verify first" reminder read once `check` passes.
+
+    Without this the reminder outlives the verification and a verified user
+    keeps being asked to verify. Staged on the caller's transaction, like
+    create_notification: the approval and the cleared reminder commit or roll
+    back together. Matched on the check, so an SME's KYC (part of their KYB)
+    does not clear a reminder that is about their business.
+    """
+    await db.execute(
+        update(Notification)
+        .where(
+            Notification.user_id == user_id,
+            Notification.event == EVENT_VERIFICATION_REQUIRED,
+            Notification.data["check"].astext == check,
+            Notification.read_at.is_(None),
+        )
+        .values(read_at=datetime.now(timezone.utc))
+    )
 
 
 async def list_notifications(

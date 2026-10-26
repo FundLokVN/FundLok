@@ -25,7 +25,9 @@ from app.gverify import kyb_service, service
 from app.gverify import storage
 from app.system import service as system_service
 from app.gverify.client import GVerifyError
-from app.gverify.models import STATUS_MANUAL_REVIEW
+from app.gverify.models import STATUS_APPROVED, STATUS_MANUAL_REVIEW
+from app.notifications.models import VERIFICATION_CHECK_KYB, VERIFICATION_CHECK_KYC
+from app.notifications.service import resolve_verification_reminder
 from app.gverify.schemas import (
     HandoffResponse,
     KybRepresentative,
@@ -61,6 +63,12 @@ ATTEMPT_LIMIT_DETAIL = (
     "Too many verification attempts in the last 24 hours. "
     "Please try again tomorrow or contact support."
 )
+
+# A submission that ends here has done what the "verify first" notification
+# (written at role selection) asked: approved, or with the review team and out
+# of the user's hands. It is marked read so the bell stops asking. A rejection
+# or failure leaves it: they still have something to do.
+_REMINDER_DONE_STATUSES = (STATUS_APPROVED, STATUS_MANUAL_REVIEW)
 
 
 async def _enforce_attempt_limit(db: AsyncSession, user_id, kind: str) -> None:
@@ -160,6 +168,10 @@ async def _run_verification(
         },
         ip_address=request.client.host if request.client else None,
     )
+    if attempt.status in _REMINDER_DONE_STATUSES:
+        await resolve_verification_reminder(
+            db, user_id=user.id, check=VERIFICATION_CHECK_KYC
+        )
     await db.commit()
     await db.refresh(attempt)
 
@@ -357,6 +369,10 @@ async def kyb_verify(
         },
         ip_address=request.client.host if request.client else None,
     )
+    if attempt.status in _REMINDER_DONE_STATUSES:
+        await resolve_verification_reminder(
+            db, user_id=current_user.id, check=VERIFICATION_CHECK_KYB
+        )
     await db.commit()
     await db.refresh(attempt)
 

@@ -2,7 +2,13 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.users.models import User
+from app.notifications.models import (
+    EVENT_VERIFICATION_REQUIRED,
+    VERIFICATION_CHECK_KYB,
+    VERIFICATION_CHECK_KYC,
+)
+from app.notifications.service import create_notification
+from app.users.models import Role, User
 from app.users.schemas import (
     AvatarConfirmRequest,
     AvatarPresignRequest,
@@ -125,6 +131,23 @@ async def select_role(
         before_state=before,
         after_state={"role": user.role},
         ip_address=request.client.host if request.client else None,
+    )
+    # A role is chosen once, so this is the one moment every new SME and
+    # investor passes through. Nothing can be applied for or invested in
+    # until they verify, and verification is otherwise only offered when they
+    # hit that gate, so tell them now. Same transaction as the role: no
+    # reminder for a selection that did not stick.
+    create_notification(
+        db,
+        user_id=user.id,
+        event=EVENT_VERIFICATION_REQUIRED,
+        entity_type="USER",
+        entity_id=user.id,
+        data={
+            "check": VERIFICATION_CHECK_KYB
+            if body.role is Role.SME
+            else VERIFICATION_CHECK_KYC
+        },
     )
     await db.commit()
     return user_me_payload(user)

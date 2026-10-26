@@ -25,10 +25,23 @@ from app.core.base import Base
 # one place the client can be checked against.
 EVENT_APPLICATION_APPROVED = "APPLICATION_APPROVED"
 EVENT_APPLICATION_REJECTED = "APPLICATION_REJECTED"
+# Written once, when an account picks its role: "verify before you can apply or
+# invest". `data["check"]` says which verification -- an SME verifies its
+# business (KYB), an investor their identity (KYC) -- and the reminder is
+# marked read when that check is approved.
+EVENT_VERIFICATION_REQUIRED = "VERIFICATION_REQUIRED"
 
 NOTIFICATION_EVENTS = frozenset(
-    {EVENT_APPLICATION_APPROVED, EVENT_APPLICATION_REJECTED}
+    {
+        EVENT_APPLICATION_APPROVED,
+        EVENT_APPLICATION_REJECTED,
+        EVENT_VERIFICATION_REQUIRED,
+    }
 )
+
+# Values of `data["check"]` on a VERIFICATION_REQUIRED notification.
+VERIFICATION_CHECK_KYC = "KYC"
+VERIFICATION_CHECK_KYB = "KYB"
 
 
 class Notification(Base):

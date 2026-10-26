@@ -9,14 +9,19 @@ notification lives or dies with the decision.
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.notifications.models import Notification
 
 
 @pytest.fixture
 def make_submitted_application(
-    make_user, make_project, make_loan_application, submit_loan_application, attach_required_documents
+    make_user,
+    make_project,
+    make_loan_application,
+    submit_loan_application,
+    attach_required_documents,
+    db_session,
 ):
     async def _make():
         sme = await make_user(role="SME")
@@ -27,6 +32,13 @@ def make_submitted_application(
         resp = await submit_loan_application(sme, application["id"])
         assert resp.status_code == 200, resp.text
         await attach_required_documents(application["id"])
+        # Choosing a role left a verification reminder in the bell. These
+        # tests count the decision's notification, so they start from an
+        # empty bell; the reminder has tests of its own below.
+        await db_session.execute(
+            delete(Notification).where(Notification.user_id == uuid.UUID(sme["id"]))
+        )
+        await db_session.commit()
         return sme, project, application
 
     return _make
@@ -94,7 +106,10 @@ async def test_notifications_are_scoped_to_their_owner(
     stranger = await make_user(role="SME")
     resp = await client.get("/notifications", headers=stranger["headers"])
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"items": [], "unread": 0}
+    # Only their own verification reminder; nothing of the applicant's.
+    assert [item["event"] for item in resp.json()["items"]] == [
+        "VERIFICATION_REQUIRED"
+    ]
 
     mine = await client.get("/notifications", headers=sme["headers"])
     target = mine.json()["items"][0]["id"]

@@ -15,6 +15,7 @@ from pydantic import ValidationError
 import app.main as main_module
 from app.core.database import get_db
 from app.main import app
+from app.notifications.models import Notification
 from app.users.models import Role, User
 from app.users.schemas import SELECTABLE_ROLES, RoleSelectRequest
 from app.users.service import select_user_role
@@ -148,6 +149,24 @@ def test_put_role_conflict_when_already_set(make_client):
     client, _ = make_client(_user(role="SME"))
     resp = client.patch("/users/me/role", json={"role": "INVESTOR"})
     assert resp.status_code == 409
+
+
+@pytest.mark.parametrize("role, check", [("SME", "KYB"), ("INVESTOR", "KYC")])
+def test_put_role_leaves_a_verification_reminder(make_client, role, check):
+    client, db = make_client(_user(role=None))
+    resp = client.patch("/users/me/role", json={"role": role})
+    assert resp.status_code == 200
+    # Staged on the same session the role is committed through.
+    [reminder] = [obj for obj in db.added if isinstance(obj, Notification)]
+    assert reminder.event == "VERIFICATION_REQUIRED"
+    assert reminder.data == {"check": check}
+
+
+def test_put_role_conflict_leaves_no_reminder(make_client):
+    client, db = make_client(_user(role="SME"))
+    resp = client.patch("/users/me/role", json={"role": "INVESTOR"})
+    assert resp.status_code == 409
+    assert not any(isinstance(obj, Notification) for obj in db.added)
 
 
 def test_put_role_requires_authentication():
