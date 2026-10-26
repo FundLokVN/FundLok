@@ -87,21 +87,25 @@ async def set_current_user_password(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Set a first password on an account that doesn't have one.
+    """Set a first password on an account that doesn't have one (Google or
+    Microsoft sign-in only). Needs a recent sign-in; see set_password.
 
-    Changing an existing password is NOT done here -- that's forgot-password /
-    reset-password, where the emailed token proves the mailbox.
-
-    Currently unreachable in practice: `users.password_hash` is NOT NULL and
-    /auth/register always sets it, so every account 400s. Two things make it
-    live: a migration making `password_hash` nullable, and an OAuth sign-in
-    endpoint that creates accounts without one (the frontend already calls
-    /auth/oauth/login, which this API does not implement yet).
+    Changing an existing password is NOT done here -- that's /me/password/change
+    or forgot-password.
     """
-    await set_password(db, body, current_user, background_tasks)
+    await set_password(
+        db,
+        body,
+        current_user,
+        background_tasks,
+        session_id=getattr(request.state, "session_id", None),
+    )
+    # AUTH, not USER, so it shows on the owner's security screen
+    # (list_security_events): a password they didn't set is the sign that
+    # someone else holds their session.
     append_audit(
         db,
-        entity_type="USER",
+        entity_type="AUTH",
         entity_id=current_user.id,
         action="PASSWORD_SET",
         actor_id=current_user.id,
@@ -208,6 +212,7 @@ async def change_current_user_password(
         current_user,
         background_tasks,
         current_session_id=request.state.session_id,
+        ip_address=request.client.host if request.client else None,
     )
     append_audit(
         db,

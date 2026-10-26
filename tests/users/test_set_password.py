@@ -1,21 +1,95 @@
 """POST /users/me/password — set a FIRST password from the profile page.
 
-The split this protects: setting a first password is safe off a session alone
-(there was no password login to take away), but *changing* an existing one is
-not, so it belongs to forgot-password / reset-password where the emailed token
-proves the mailbox. This endpoint therefore refuses any account that already
-has a password.
+*Changing* an existing password off a session would be account takeover, so
+this endpoint refuses any account that already has one; that belongs to
+/me/password/change or forgot-password.
 
-Note every account currently has one -- `users.password_hash` is NOT NULL and
-registration always sets it -- so the passwordless branch is exercised here by
-clearing the hash directly. That branch goes live when OAuth sign-in starts
-creating accounts without a password.
+A first password needs more than a session too. Once one exists,
+require_step_up takes it as proof for enrolling 2FA or a passkey, so a stolen
+session could set one, enrol its own 2FA and lock the owner out of their next
+Google sign-in. Setting one therefore needs a recent sign-in, like those
+enrolments on a passwordless account.
+
+Google/Microsoft sign-in creates accounts with no password; the tests here
+simulate one by clearing the hash a registration left behind.
 """
-from sqlalchemy import select
+from datetime import timedelta
 
-from app.users.models import User
+from sqlalchemy import select, update
+
+from app.users.models import RefreshToken, User
 
 NEW_PASSWORD = "A-Brand-New-Passw0rd!"
+
+
+async def _make_passwordless(db_session, user) -> None:
+    await db_session.execute(
+        update(User).where(User.id == user["id"]).values(password_hash=None)
+    )
+    await db_session.commit()
+
+
+async def _age_sessions(db_session, user, by: timedelta) -> None:
+    await db_session.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user["id"])
+        .values(created_at=RefreshToken.created_at - by)
+    )
+    await db_session.commit()
+
+
+async def test_set_password_needs_a_recent_sign_in(client, make_user, db_session, monkeypatch):
+    """The takeover this closes: with an old stolen session, set a password,
+    then use it to enrol 2FA the owner can't pass. Both steps must refuse."""
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "app.users.service.send_password_changed_notice",
+        lambda to_email, first_time=False: sent.append(to_email),
+    )
+    user = await make_user()
+    await _make_passwordless(db_session, user)
+    # A stolen cookie keeps its session's original sign-in time through every
+    # refresh, so an old session cannot pass however recently it rotated.
+    await _age_sessions(db_session, user, timedelta(minutes=30))
+
+    resp = await client.post(
+        "/users/me/password",
+        json={"new_password": NEW_PASSWORD},
+        headers=user["headers"],
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.headers["X-Error-Code"] == "REAUTH_REQUIRED"
+    assert sent == []
+
+    setup = await client.post(
+        "/auth/2fa/setup", json={"password": NEW_PASSWORD}, headers=user["headers"]
+    )
+    assert setup.status_code == 403, setup.text
+    assert setup.headers["X-Error-Code"] == "REAUTH_REQUIRED"
+
+    login = await client.post(
+        "/auth/login", json={"email": user["email"], "password": NEW_PASSWORD}
+    )
+    assert login.status_code == 401, "no password may have been set"
+
+
+async def test_setting_a_first_password_shows_on_the_security_screen(
+    client, make_user, db_session
+):
+    """If someone else did set one, the owner has to be able to see it."""
+    user = await make_user()
+    await _make_passwordless(db_session, user)
+
+    resp = await client.post(
+        "/users/me/password",
+        json={"new_password": NEW_PASSWORD},
+        headers=user["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+
+    events = await client.get("/auth/security-events", headers=user["headers"])
+    assert events.status_code == 200, events.text
+    assert "PASSWORD_SET" in [event["action"] for event in events.json()]
 
 
 async def test_set_password_is_refused_when_one_already_exists(client, make_user):

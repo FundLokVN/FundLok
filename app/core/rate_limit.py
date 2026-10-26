@@ -21,7 +21,10 @@ It is off unless RATE_LIMIT_ENABLED is set, and should only be set once the
 audit log shows real visitor addresses: BACKEND_SECRET_KEY set and the
 frontend sending X-Client-IP. The key is the client address from
 app/utils/client_ip.py. Without those, behind a proxy that address is the
-proxy's, and the limit would throttle every visitor as one caller.
+proxy's, and the limit would throttle every visitor as one caller. So while
+neither BACKEND_SECRET_KEY nor TRUSTED_PROXY_HOPS is set it stays off
+whatever RATE_LIMIT_ENABLED says (app/main.py logs an error at startup):
+turning the flag on too early costs nothing instead of taking the site down.
 """
 from __future__ import annotations
 
@@ -114,6 +117,12 @@ class WindowCounter:
 counter = WindowCounter()
 
 
+def _sees_real_addresses() -> bool:
+    """Whether client_ip.py has any way to find the visitor behind the proxy."""
+    settings = config.settings
+    return bool(settings.BACKEND_SECRET_KEY) or settings.TRUSTED_PROXY_HOPS > 0
+
+
 def _rule_for(method: str, path: str) -> Rule:
     settings = config.settings
     if method == "POST" and path in SENSITIVE_PATHS:
@@ -132,6 +141,7 @@ class RateLimitMiddleware:
         if (
             scope["type"] != "http"
             or not config.settings.RATE_LIMIT_ENABLED
+            or not _sees_real_addresses()
             or scope["method"] == "OPTIONS"
             or scope["path"] in EXEMPT_PATHS
             or not scope.get("client")

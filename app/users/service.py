@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from app.auth.password_policy import reject_breached_password
-from app.auth.service import revoke_other_sessions
+from app.auth.service import require_step_up, revoke_other_sessions
 from app.users.models import Role, User
 from app.users.schemas import (
     ChangePasswordRequest,
@@ -71,26 +71,34 @@ async def set_password(
     body: SetPasswordRequest,
     current_user: User,
     background_tasks: BackgroundTasks,
+    *,
+    session_id: UUID | None,
 ) -> None:
-    """Give a passwordless account its first password.
+    """Give a passwordless account (Google/Microsoft sign-in only) its first
+    password.
 
     Only ever a *first* password. An account that already has one is refused
     and pointed at forgot-password, where the emailed token proves control of
-    the mailbox. That split is what makes this endpoint safe to serve off a
-    session alone: setting a first password can't take an account away from
-    anyone (there was no password login to lose), whereas overwriting an
-    existing one off a borrowed session would be account takeover.
+    the mailbox, because overwriting an existing one off a borrowed session
+    would be account takeover.
 
-    NOTE: no account can currently reach this branch -- `users.password_hash`
-    is NOT NULL and registration always sets it, so every existing user is
-    rejected below. It becomes reachable once OAuth sign-in creates accounts
-    without a password; see the endpoint docstring.
+    A first password is not harmless either, so a session alone is not enough.
+    Once it exists, require_step_up accepts it as proof for adding an
+    authenticator or a passkey. Whoever held a stolen session could set one,
+    enrol their own 2FA, and leave the owner facing a code they cannot give at
+    their next Google sign-in; a reset keeps 2FA on a verified account, so
+    that would be the end of it. Setting one therefore asks what those
+    enrolments ask of a passwordless account: a session that signed in
+    moments ago.
     """
     if current_user.password_hash:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This account already has a password. Use Forgot password to change it.",
         )
+
+    # No password to check, so this is the recent-sign-in branch.
+    await require_step_up(db, current_user, session_id=session_id, password=None)
 
     await reject_breached_password(body.new_password)
     current_user.password_hash = hash_password(body.new_password)
@@ -207,6 +215,7 @@ async def change_password(
     background_tasks: BackgroundTasks,
     *,
     current_session_id: UUID | None = None,
+    ip_address: str | None = None,
 ) -> int:
     """Change an existing password, proving control with the current one.
 
@@ -229,11 +238,16 @@ async def change_password(
             detail="This account has no password yet. Set one instead.",
         )
 
-    if not verify_password(body.current_password, current_user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password is incorrect",
-        )
+    # Through require_step_up rather than a bare verify_password, so a session
+    # checking guesses here gets the same five misses as every other step-up,
+    # and each miss is on the owner's security screen.
+    await require_step_up(
+        db,
+        current_user,
+        session_id=current_session_id,
+        password=body.current_password,
+        ip_address=ip_address,
+    )
 
     if verify_password(body.new_password, current_user.password_hash):
         raise HTTPException(

@@ -10,7 +10,7 @@ import uuid
 
 from sqlalchemy import select
 
-from app.auth.service import hash_refresh_token
+from app.auth.service import MAX_STEP_UP_FAILURES, STEP_UP_FAILED, hash_refresh_token
 from app.users.models import RefreshToken
 from conftest import DEFAULT_PASSWORD, auth_headers
 
@@ -35,7 +35,37 @@ async def test_change_password_requires_the_current_one(client, make_user):
         headers=auth_headers(user),
     )
     assert resp.status_code == 400, resp.text
-    assert resp.json()["detail"] == "Current password is incorrect"
+    assert resp.json()["detail"] == "Password is incorrect"
+
+
+async def test_change_password_shares_the_step_up_attempt_limit(client, make_user):
+    """A stolen session must not get unlimited guesses at the password here
+    while every other step-up stops it at five."""
+    user = await make_user()
+    for _ in range(MAX_STEP_UP_FAILURES):
+        miss = await client.post(
+            "/users/me/password/change",
+            json={"current_password": "a-wrong-guess", "new_password": "NewPassw0rd!"},
+            headers=auth_headers(user),
+        )
+        assert miss.status_code == 400, miss.text
+
+    resp = await client.post(
+        "/users/me/password/change",
+        json={"current_password": user["password"], "new_password": "NewPassw0rd!"},
+        headers=auth_headers(user),
+    )
+    assert resp.status_code == 429, resp.text
+    assert resp.headers["X-Error-Code"] == "STEP_UP_LOCKED"
+
+    events = await client.get("/auth/security-events", headers=auth_headers(user))
+    actions = [event["action"] for event in events.json()]
+    assert actions.count(STEP_UP_FAILED) == MAX_STEP_UP_FAILURES
+
+    login = await client.post(
+        "/auth/login", json={"email": user["email"], "password": user["password"]}
+    )
+    assert login.status_code == 200, "the password must be unchanged"
 
 
 async def test_change_password_succeeds_and_the_new_one_works(client, make_user):

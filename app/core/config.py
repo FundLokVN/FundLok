@@ -90,7 +90,8 @@ class Settings(BaseSettings):
     # real visitor addresses: BACKEND_SECRET_KEY set and the frontend sending
     # X-Client-IP, checked in the audit log (docs/deployment/
     # ci-cd-pipeline.md, "Client IP"). Keyed on a proxy's address, a per-IP
-    # limit throttles every visitor as one caller.
+    # limit throttles every visitor as one caller, so with neither
+    # BACKEND_SECRET_KEY nor TRUSTED_PROXY_HOPS set it stays off regardless.
     RATE_LIMIT_ENABLED: bool = False
     RATE_LIMIT_PER_MINUTE: int = 600
     RATE_LIMIT_SENSITIVE_PER_MINUTE: int = 20

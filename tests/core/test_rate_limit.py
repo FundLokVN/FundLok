@@ -21,6 +21,9 @@ GENERAL_LIMIT = 5
 @pytest.fixture
 def limits(monkeypatch):
     monkeypatch.setattr(config.settings, "RATE_LIMIT_ENABLED", True)
+    # A deployment that can see real visitor addresses; without one the
+    # limiter stays off (see test_nothing_is_limited_without_real_addresses).
+    monkeypatch.setattr(config.settings, "BACKEND_SECRET_KEY", "test-backend-secret")
     monkeypatch.setattr(config.settings, "RATE_LIMIT_SENSITIVE_PER_MINUTE", SENSITIVE_LIMIT)
     monkeypatch.setattr(config.settings, "RATE_LIMIT_PER_MINUTE", GENERAL_LIMIT)
     monkeypatch.setattr(rate_limit, "counter", WindowCounter(use_redis=False))
@@ -81,6 +84,17 @@ async def test_health_is_never_limited(limits):
 async def test_nothing_is_limited_when_disabled(limits, monkeypatch):
     monkeypatch.setattr(config.settings, "RATE_LIMIT_ENABLED", False)
     async with _from("203.0.113.16") as client:
+        statuses = {(await _login(client)).status_code for _ in range(SENSITIVE_LIMIT * 2)}
+    assert 429 not in statuses
+
+
+async def test_nothing_is_limited_without_real_addresses(limits, monkeypatch):
+    """Enabled, but with neither BACKEND_SECRET_KEY nor TRUSTED_PROXY_HOPS
+    set: behind the proxy every visitor has the proxy's address, so a per-IP
+    limit would throttle them all as one caller. No limit beats that outage."""
+    monkeypatch.setattr(config.settings, "BACKEND_SECRET_KEY", None)
+    monkeypatch.setattr(config.settings, "TRUSTED_PROXY_HOPS", 0)
+    async with _from("203.0.113.17") as client:
         statuses = {(await _login(client)).status_code for _ in range(SENSITIVE_LIMIT * 2)}
     assert 429 not in statuses
 

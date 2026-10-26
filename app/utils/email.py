@@ -408,6 +408,46 @@ def send_new_device_signin_alert(
     )
 
 
+def send_sign_in_locked_notice(
+    to_email: str, *, attempts: int, minutes: int, ip_address: str | None
+) -> None:
+    """Tell the owner that wrong passwords have paused password sign-in.
+
+    Same contract as send_new_device_signin_alert: a notification, no token,
+    nothing it can be tricked into doing. A run of wrong passwords means
+    someone is guessing, and the owner is the one person who can tell whether
+    it was them, so it names what to do either way. app/auth/service.py sends
+    it at most once an hour per account, so a guesser who waits out each lock
+    cannot turn it into a flood.
+    """
+    security_link = f"{settings.FRONTEND_URL}/dashboard/security"
+    reset_link = f"{settings.FRONTEND_URL}/forgot-password"
+    where = ip_address or "an unknown address"
+    html_content = render_email(
+        "sign-in-locked",
+        attempts=attempts,
+        minutes=minutes,
+        where=where,
+        security_link=security_link,
+        reset_link=reset_link,
+    )
+    text_content = (
+        f"Someone entered the wrong password for your FundLok account {attempts} "
+        f"times, most recently from {where}. None of those attempts signed in. "
+        f"Signing in with a password is paused for {minutes} minutes. If that was "
+        f"you, wait and try again, or reset your password at {reset_link}. If it "
+        "was not you, choose a strong password and turn on two-factor "
+        f"authentication at {security_link}."
+    )
+
+    send_email(
+        to_email=to_email,
+        subject="Too many failed sign-in attempts on your FundLok account",
+        html_content=html_content,
+        text_content=text_content,
+    )
+
+
 def send_application_updated_email(to_email: str) -> None:
     """Tell an applicant their loan application has an update, with a button to
     read it on the site.

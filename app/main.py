@@ -79,7 +79,8 @@ if not settings.BACKEND_SECRET_KEY and settings.TRUSTED_PROXY_HOPS == 0 and not 
     if settings.RATE_LIMIT_ENABLED:
         logging.getLogger("app.rate_limit").error(
             "RATE_LIMIT_ENABLED with no BACKEND_SECRET_KEY and TRUSTED_PROXY_HOPS=0: "
-            "behind a proxy the per-IP limit applies to all visitors together."
+            "the per-IP limit stays OFF, since behind a proxy it would apply to "
+            "all visitors together. Set BACKEND_SECRET_KEY to the frontend's value."
         )
     else:
         logging.getLogger("app.client_ip").warning(

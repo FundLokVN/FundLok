@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import hmac
+import logging
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -42,12 +44,15 @@ from app.utils.email import (
     send_existing_account_notice,
     send_password_changed_notice,
     send_password_reset_email,
+    send_sign_in_locked_notice,
     send_verification_email,
 )
 from app.utils.audit import append_audit
 from app.utils.captcha import verify_turnstile_token, verify_turnstile_token_async
 from app.utils.locks import advisory_xact_lock
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 async def authenticate_user(db: AsyncSession, email: str, password: str):
@@ -375,17 +380,34 @@ async def login(
     # count before any failure is written.
     login_key = _login_throttle_key(login_data.email)
     await advisory_xact_lock(db, f"auth-login:{login_key}")
-    if await _recent_failed_logins(db, login_key) >= MAX_FAILED_LOGINS:
+    failed_so_far = await _recent_failed_logins(db, login_key)
+    if failed_so_far >= MAX_FAILED_LOGINS:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed sign-in attempts. Try again in 15 minutes.",
+            # SIGN_IN_LOCKED, not the middleware's RATE_LIMITED: this wait is
+            # the full window, and the sign-in page says so in its own words.
+            headers={"X-Error-Code": SIGN_IN_LOCKED},
         )
 
     user = await authenticate_user(db, login_data.email, login_data.password)
     if not user:
-        await _record_failed_login(db, login_data.email, login_key, ip_address)
+        owner_id = await _record_failed_login(db, login_data.email, login_key, ip_address)
+        # This miss is the one that locks the address. The advisory lock above
+        # makes it exactly one request, so the owner hears once per lock.
+        notify = None
+        if owner_id is not None and failed_so_far + 1 == MAX_FAILED_LOGINS:
+            notify = await _record_sign_in_locked(db, owner_id, ip_address)
         # Committed before raising, or the rollback would take the count with it.
         await db.commit()
+        if notify is not None:
+            _send_despite_the_error(
+                send_sign_in_locked_notice,
+                notify,
+                attempts=MAX_FAILED_LOGINS,
+                minutes=int(FAILED_LOGIN_WINDOW.total_seconds() // 60),
+                ip_address=ip_address,
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -444,6 +466,35 @@ async def login(
 MAX_FAILED_LOGINS = 10
 FAILED_LOGIN_WINDOW = timedelta(minutes=15)
 SIGN_IN_FAILED = "SIGN_IN_FAILED"
+SIGN_IN_LOCKED = "SIGN_IN_LOCKED"
+# The owner is emailed when their address locks, but at most this often:
+# a guesser who waits out every lock would otherwise get to send them an
+# email every 15 minutes. Every lock still lands on the security screen.
+LOCK_NOTICE_INTERVAL = timedelta(hours=1)
+
+# Strong references to notices still being sent: the event loop keeps only
+# weak ones, so an otherwise unreferenced task can vanish before it runs.
+_background_notices: set[asyncio.Task] = set()
+
+
+def _send_despite_the_error(send, /, *args, **kwargs) -> None:
+    """Send an email on a worker thread without holding up the response, for
+    a request that is about to fail.
+
+    BackgroundTasks cannot do this: FastAPI runs that queue only with a
+    response the endpoint returned, and an endpoint that raises HTTPException
+    returns none, so add_task would never send.
+    """
+    task = asyncio.create_task(asyncio.to_thread(send, *args, **kwargs))
+    _background_notices.add(task)
+    task.add_done_callback(_notice_done)
+
+
+def _notice_done(task: asyncio.Task) -> None:
+    _background_notices.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        # Nobody awaits the task, so this is the only place the failure shows.
+        logger.error("Security notice not sent", exc_info=task.exception())
 
 
 def _login_throttle_key(email: str) -> str:
@@ -470,7 +521,8 @@ async def _recent_failed_logins(db: AsyncSession, login_key: str) -> int:
 
 async def _record_failed_login(
     db: AsyncSession, email: str, login_key: str, ip_address: str | None
-) -> None:
+) -> UUID | None:
+    """Record a wrong password; return the account it was for, if any."""
     # When the address has an account, the row is on the owner's security
     # history (actor = the account, as for TWO_FACTOR_FAILED), so a stream of
     # wrong passwords is something they can see.
@@ -486,6 +538,39 @@ async def _record_failed_login(
         after_state={"login_key": login_key},
         ip_address=ip_address,
     )
+    return owner_id
+
+
+async def _record_sign_in_locked(
+    db: AsyncSession, owner_id: UUID, ip_address: str | None
+) -> str | None:
+    """Put the lock on the owner's security history; return the address to
+    email about it, or None if they were emailed within LOCK_NOTICE_INTERVAL."""
+    since = datetime.now(timezone.utc) - LOCK_NOTICE_INTERVAL
+    emailed_recently = (
+        await db.execute(
+            select(func.count(AuditLog.id)).where(
+                AuditLog.entity_id == owner_id,
+                AuditLog.action == SIGN_IN_LOCKED,
+                AuditLog.after_state["notified"].astext == "true",
+                AuditLog.created_at >= since,
+            )
+        )
+    ).scalar_one() > 0
+    append_audit(
+        db,
+        entity_type="AUTH",
+        entity_id=owner_id,
+        action=SIGN_IN_LOCKED,
+        actor_id=owner_id,
+        after_state={"notified": not emailed_recently},
+        ip_address=ip_address,
+    )
+    if emailed_recently:
+        return None
+    return (
+        await db.execute(select(User.email).where(User.id == owner_id))
+    ).scalar_one()
 
 
 async def is_unseen_device(
