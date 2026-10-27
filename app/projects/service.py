@@ -162,6 +162,19 @@ async def locked_business_scores(db: AsyncSession, application_ids: list[UUID]) 
     return {application_id: round(float(grade), 2) for application_id, grade in rows}
 
 
+async def bank_rate_in_force(db: AsyncSession) -> float | None:
+    """bank_rate_config.rate_pct in force today, as the marketplace's target
+    return. None rather than a 500 if the seed row was ever removed: the
+    listing still loads, and the card shows a dash."""
+    from app.underwriting.service import get_current_bank_rate
+
+    try:
+        row = await get_current_bank_rate(db)
+    except HTTPException:
+        return None
+    return float(row.rate_pct)
+
+
 LISTED_STATUSES = ("OPEN", "FUNDED", "CLOSED")
 
 

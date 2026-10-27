@@ -195,6 +195,10 @@ class MarketplaceLoanApplicationOut(BaseModel):
     # locked.
     business_score: float | None = None
     listing: MarketplaceListingOut | None = None
+    # The rate the marketplace shows as the investor's target return: FundLok's
+    # bank rate in force (bank_rate_config.rate_pct), the same on every card.
+    # A target, never a promise; the card says so beside it.
+    bank_rate_pct: float | None = None
 
     model_config = {"from_attributes": True}
 

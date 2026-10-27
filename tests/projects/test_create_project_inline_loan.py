@@ -176,6 +176,7 @@ async def test_public_listing_hides_the_applicant_only_fields(client, make_user,
         "verified_documents",
         "business_score",
         "listing",
+        "bank_rate_pct",
     }
     assert "prior default" not in listed.text
 
@@ -349,3 +350,23 @@ async def test_public_listing_carries_the_rounds_real_funding_figures(client, ma
         "min_ticket": 1_000_000,
         "investor_count": 2,
     }
+
+
+async def test_public_listing_carries_the_bank_rate_in_force(client, make_user, db_session):
+    """The card's ROI is FundLok's bank rate in force (bank_rate_config), the
+    same on every listing: the seeded 12.0% here."""
+    from sqlalchemy import select
+
+    from app.lending.models import Project
+
+    sme = await make_user(role="SME")
+    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    project_id = created.json()["id"]
+    project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+    project.status = "ACTIVE"
+    await db_session.commit()
+
+    investor = await make_user(role="INVESTOR")
+    listed = await client.get("/projects/public", headers=auth_headers(investor))
+    match = next(p for p in listed.json() if p["id"] == project_id)
+    assert match["loan_application"]["bank_rate_pct"] == 12.0

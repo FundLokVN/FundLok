@@ -14,6 +14,7 @@ from app.projects.schemas import (
 )
 from app.projects.service import (
     approval_for,
+    bank_rate_in_force,
     create_project,
     get_my_projects,
     display_projects,
@@ -74,6 +75,7 @@ async def list_projects(
     application_ids = [p.loan_applications[0].id for p in projects if p.loan_applications]
     scores = await locked_business_scores(db, application_ids)
     listings = await marketplace_listings(db, application_ids)
+    bank_rate_pct = await bank_rate_in_force(db)
     results = []
     for project in projects:
         out = MarketplaceProjectOut.model_validate(project)
@@ -83,5 +85,6 @@ async def list_projects(
             out.loan_application.verified_documents = verified_document_types(application)
             out.loan_application.business_score = scores.get(application.id)
             out.loan_application.listing = listings.get(application.id)
+            out.loan_application.bank_rate_pct = bank_rate_pct
         results.append(out)
     return results
