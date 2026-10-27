@@ -17,6 +17,8 @@ from app.projects.service import (
     create_project,
     get_my_projects,
     display_projects,
+    locked_business_scores,
+    marketplace_listings,
     verified_document_types,
 )
 from app.users.models import User
@@ -69,6 +71,9 @@ async def list_projects(
     documents (see MarketplaceLoanApplicationOut) — only the types the team
     reviewed."""
     projects = await display_projects(db, current_user)
+    application_ids = [p.loan_applications[0].id for p in projects if p.loan_applications]
+    scores = await locked_business_scores(db, application_ids)
+    listings = await marketplace_listings(db, application_ids)
     results = []
     for project in projects:
         out = MarketplaceProjectOut.model_validate(project)
@@ -76,5 +81,7 @@ async def list_projects(
             application = project.loan_applications[0]
             out.loan_application = MarketplaceLoanApplicationOut.model_validate(application)
             out.loan_application.verified_documents = verified_document_types(application)
+            out.loan_application.business_score = scores.get(application.id)
+            out.loan_application.listing = listings.get(application.id)
         results.append(out)
     return results

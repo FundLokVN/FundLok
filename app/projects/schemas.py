@@ -147,6 +147,25 @@ class ProjectWithApplicationOut(ProjectOut):
     loan_application: ProjectLoanApplicationOut | None = None
 
 
+class MarketplaceListingOut(BaseModel):
+    """The funding round on a marketplace card: the listing an investor joins.
+
+    Real figures only, replacing the samples the card used to derive from a
+    hash of the project id. Absent until the request has a contract and a
+    listing; a DRAFT listing is not open, so it never appears.
+    """
+
+    id: UUID
+    status: str  # OPEN | FUNDED | CLOSED
+    target_amount: int
+    funded_amount: int
+    min_ticket: int | None
+    # Distinct investors with a FILLED order.
+    investor_count: int
+    open_at: datetime | None
+    close_at: datetime | None
+
+
 class MarketplaceLoanApplicationOut(BaseModel):
     """The deal terms an investor sees on a marketplace card.
 
@@ -170,6 +189,12 @@ class MarketplaceLoanApplicationOut(BaseModel):
     # request (service.verified_document_types). Types only: the files, their
     # names and storage keys never reach an investor.
     verified_documents: list[str] = []
+    # The 0-100 business score of the LOCKED score run this request was
+    # approved on (service.locked_business_scores): the same figure the SME
+    # sees in its approval summary. Never a credit rating. Null until a run is
+    # locked.
+    business_score: float | None = None
+    listing: MarketplaceListingOut | None = None
 
     model_config = {"from_attributes": True}
 

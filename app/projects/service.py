@@ -139,6 +139,78 @@ async def display_projects(db: AsyncSession, current_user: User):
     return result.scalars().all()
 
 
+async def locked_business_scores(db: AsyncSession, application_ids: list[UUID]) -> dict[UUID, float]:
+    """Each application's business score from its LOCKED score run, in one
+    query for the whole marketplace list. At most one run is locked per
+    application (approve_score_run refuses a second), and it is the run the
+    approval and any contract rest on, so it is the score to show. Rounded to
+    2dp like the SME's approval summary (approval_for), so both read the same.
+    """
+    from app.lending.models import ScoreRun
+
+    if not application_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(ScoreRun.application_id, ScoreRun.final_grade_precise).where(
+                ScoreRun.application_id.in_(application_ids),
+                ScoreRun.status == "LOCKED",
+                ScoreRun.final_grade_precise.is_not(None),
+            )
+        )
+    ).all()
+    return {application_id: round(float(grade), 2) for application_id, grade in rows}
+
+
+LISTED_STATUSES = ("OPEN", "FUNDED", "CLOSED")
+
+
+async def marketplace_listings(db: AsyncSession, application_ids: list[UUID]):
+    """Each application's listing for the marketplace card, in two queries
+    for the whole list. An application has at most one contract
+    (create_contract refuses a second) and a contract at most one listing
+    (listings.contract_id is unique), so the mapping is one to one.
+    """
+    from sqlalchemy import func
+
+    from app.lending.models import Contract, Listing, Order
+    from app.projects.schemas import MarketplaceListingOut
+
+    if not application_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(Contract.application_id, Listing)
+            .join(Listing, Listing.contract_id == Contract.id)
+            .where(Contract.application_id.in_(application_ids), Listing.status.in_(LISTED_STATUSES))
+        )
+    ).all()
+    if not rows:
+        return {}
+    investors = dict(
+        (
+            await db.execute(
+                select(Order.listing_id, func.count(func.distinct(Order.investor_id)))
+                .where(Order.listing_id.in_([listing.id for _, listing in rows]), Order.status == "FILLED")
+                .group_by(Order.listing_id)
+            )
+        ).all()
+    )
+    return {
+        application_id: MarketplaceListingOut(
+            id=listing.id,
+            status=listing.status,
+            target_amount=int(listing.target_amount),
+            funded_amount=int(listing.funded_amount or 0),
+            min_ticket=int(listing.min_ticket) if listing.min_ticket is not None else None,
+            investor_count=investors.get(listing.id, 0),
+            open_at=listing.open_at,
+            close_at=listing.close_at,
+        )
+        for application_id, listing in rows
+    }
+
+
 def verified_document_types(application: LoanApplication) -> list[str]:
     """The document types the FundLok team reviewed before approving.
 

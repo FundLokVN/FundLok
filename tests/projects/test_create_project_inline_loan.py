@@ -174,6 +174,8 @@ async def test_public_listing_hides_the_applicant_only_fields(client, make_user,
         "submitted_at",
         "created_at",
         "verified_documents",
+        "business_score",
+        "listing",
     }
     assert "prior default" not in listed.text
 
@@ -256,3 +258,94 @@ async def test_public_listing_names_the_reviewed_document_types_only(client, mak
     # Every required type (approval is refused without them), then the extra
     # upload; a PENDING row never landed, so it is not a document.
     assert await listed_documents() == [*REQUIRED_DOCUMENT_TYPES, "financial_report"]
+
+
+async def test_public_listing_carries_the_locked_score_runs_business_score(client, make_user, db_session):
+    """The card and the project page show the score the request was approved
+    on, not a sample: the LOCKED run's, 2dp, as in the SME's approval summary.
+    An unlocked (READY) run is not shown."""
+    from sqlalchemy import select
+
+    from app.lending.models import LoanApplication, Project, ScoreRun
+
+    sme = await make_user(role="SME")
+    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    assert created.status_code == 201, created.text
+    project_id = created.json()["id"]
+    project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+    project.status = "ACTIVE"
+    application = (
+        await db_session.execute(select(LoanApplication).where(LoanApplication.project_id == project_id))
+    ).scalar_one()
+    run = ScoreRun(application_id=application.id, status="READY", final_grade_precise=79.24661)
+    db_session.add(run)
+    await db_session.commit()
+
+    investor = await make_user(role="INVESTOR")
+
+    async def listed_score():
+        listed = await client.get("/projects/public", headers=auth_headers(investor))
+        assert listed.status_code == 200, listed.text
+        match = next(p for p in listed.json() if p["id"] == project_id)
+        return match["loan_application"]["business_score"]
+
+    assert await listed_score() is None
+
+    run.status = "LOCKED"
+    await db_session.commit()
+    assert await listed_score() == 79.25
+
+
+async def test_public_listing_carries_the_rounds_real_funding_figures(client, make_user, db_session):
+    """The card's funding block reads the listing: target, funded, minimum
+    ticket and how many investors have a FILLED order. A DRAFT listing is not
+    open, so a request with only that shows no round."""
+    from sqlalchemy import select
+
+    from app.lending.models import Contract, LoanApplication, Listing, Order, Project, ScoreRun
+
+    sme = await make_user(role="SME")
+    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    assert created.status_code == 201, created.text
+    project_id = created.json()["id"]
+    project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+    project.status = "ACTIVE"
+    application = (
+        await db_session.execute(select(LoanApplication).where(LoanApplication.project_id == project_id))
+    ).scalar_one()
+    run = ScoreRun(application_id=application.id, status="LOCKED")
+    db_session.add(run)
+    await db_session.flush()
+    contract = Contract(application_id=application.id, score_run_id=run.id, status="ACTIVE_PENDING_FUNDING", final_terms={},
+                        target_amount=80_000_000, funded_amount=0)
+    db_session.add(contract)
+    await db_session.flush()
+    listing = Listing(contract_id=contract.id, target_amount=80_000_000, min_ticket=1_000_000,
+                      status="DRAFT", funded_amount=20_000_000)
+    db_session.add(listing)
+    await db_session.commit()
+
+    investor = await make_user(role="INVESTOR")
+    other = await make_user(role="INVESTOR")
+
+    async def listed_round():
+        listed = await client.get("/projects/public", headers=auth_headers(investor))
+        assert listed.status_code == 200, listed.text
+        match = next(p for p in listed.json() if p["id"] == project_id)
+        return match["loan_application"]["listing"]
+
+    assert await listed_round() is None
+
+    listing.status = "OPEN"
+    for who, status in ((investor, "FILLED"), (investor, "FILLED"), (other, "FILLED"), (other, "CANCELLED")):
+        db_session.add(Order(listing_id=listing.id, investor_id=who["id"], amount=5_000_000, status=status))
+    await db_session.commit()
+
+    round_ = await listed_round()
+    assert {k: round_[k] for k in ("status", "target_amount", "funded_amount", "min_ticket", "investor_count")} == {
+        "status": "OPEN",
+        "target_amount": 80_000_000,
+        "funded_amount": 20_000_000,
+        "min_ticket": 1_000_000,
+        "investor_count": 2,
+    }
