@@ -17,6 +17,7 @@ from app.projects.service import (
     create_project,
     get_my_projects,
     display_projects,
+    verified_document_types,
 )
 from app.users.models import User
 
@@ -65,14 +66,15 @@ async def list_projects(
     than opening every project to find the asking amount.
 
     The investor schema, not the applicant's: no operator decision_note, no
-    documents (see MarketplaceLoanApplicationOut)."""
+    documents (see MarketplaceLoanApplicationOut) — only the types the team
+    reviewed."""
     projects = await display_projects(db, current_user)
     results = []
     for project in projects:
         out = MarketplaceProjectOut.model_validate(project)
         if project.loan_applications:
-            out.loan_application = MarketplaceLoanApplicationOut.model_validate(
-                project.loan_applications[0]
-            )
+            application = project.loan_applications[0]
+            out.loan_application = MarketplaceLoanApplicationOut.model_validate(application)
+            out.loan_application.verified_documents = verified_document_types(application)
         results.append(out)
     return results

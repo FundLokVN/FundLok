@@ -166,6 +166,10 @@ class MarketplaceLoanApplicationOut(BaseModel):
     status: str
     submitted_at: datetime | None
     created_at: datetime | None
+    # The document types the FundLok team reviewed before approving this
+    # request (service.verified_document_types). Types only: the files, their
+    # names and storage keys never reach an investor.
+    verified_documents: list[str] = []
 
     model_config = {"from_attributes": True}
 

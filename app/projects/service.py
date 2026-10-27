@@ -129,14 +129,31 @@ async def display_projects(db: AsyncSession, current_user: User):
     # The investor marketplace card shows the deal terms (asking amount), not
     # just the company, so the application rides along. Eager-loaded for the
     # same reason as get_my_projects: a lazy load during response serialisation
-    # raises MissingGreenlet on an AsyncSession. Documents are not loaded: the
-    # investor schema does not carry them.
+    # raises MissingGreenlet on an AsyncSession. Documents are loaded only for
+    # verified_document_types; the investor schema carries their types alone.
     result = await db.execute(
         select(Project)
         .where(Project.status == "ACTIVE")
-        .options(selectinload(Project.loan_applications))
+        .options(selectinload(Project.loan_applications).selectinload(LoanApplication.documents))
     )
     return result.scalars().all()
+
+
+def verified_document_types(application: LoanApplication) -> list[str]:
+    """The document types the FundLok team reviewed before approving.
+
+    An operator cannot approve while a required type is missing
+    (admin decide_application), and uploads are refused once a request leaves
+    DRAFT, so an approved request holds exactly what was reviewed. The business
+    registration may have come from the verified certificate (KYB) instead of
+    an upload; it was reviewed either way. Not approved: nothing to vouch for.
+    """
+    if application.admin_approval != "APPROVED":
+        return []
+    from app.admin.service import REQUIRED_DOCUMENT_TYPES
+
+    uploaded = dict.fromkeys(d.document_type for d in application.documents if d.status == "UPLOADED")
+    return [*REQUIRED_DOCUMENT_TYPES, *(t for t in uploaded if t not in REQUIRED_DOCUMENT_TYPES)]
 
 
 

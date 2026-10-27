@@ -173,6 +173,7 @@ async def test_public_listing_hides_the_applicant_only_fields(client, make_user,
         "status",
         "submitted_at",
         "created_at",
+        "verified_documents",
     }
     assert "prior default" not in listed.text
 
@@ -204,3 +205,54 @@ async def test_public_listing_without_an_application_returns_null(
     listed = await client.get("/projects/public", headers=auth_headers(investor))
     match = next(p for p in listed.json() if p["id"] == project_id)
     assert match["loan_application"] is None
+
+
+async def test_public_listing_names_the_reviewed_document_types_only(client, make_user, db_session):
+    """The investor's due-diligence tab lists what the FundLok team reviewed.
+    It gets the document TYPES of an approved request: never a file, a
+    filename or a storage key."""
+    from sqlalchemy import select
+
+    from app.admin.service import REQUIRED_DOCUMENT_TYPES
+    from app.lending.models import LoanApplication, LoanApplicationDocument, Project
+
+    sme = await make_user(role="SME")
+    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    assert created.status_code == 201, created.text
+    project_id = created.json()["id"]
+    project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+    project.status = "ACTIVE"
+    application = (
+        await db_session.execute(select(LoanApplication).where(LoanApplication.project_id == project_id))
+    ).scalar_one()
+    for document_type, status in (("legal_charter", "UPLOADED"), ("financial_report", "UPLOADED"), ("vat_tax_zip", "PENDING")):
+        db_session.add(
+            LoanApplicationDocument(
+                loan_application_id=application.id,
+                document_type=document_type,
+                file_key=f"application_documents/{document_type}-secret-key.pdf",
+                original_filename=f"{document_type}-secret-name.pdf",
+                content_type="application/pdf",
+                file_size_bytes=1024,
+                status=status,
+            )
+        )
+    await db_session.commit()
+
+    investor = await make_user(role="INVESTOR")
+
+    async def listed_documents():
+        listed = await client.get("/projects/public", headers=auth_headers(investor))
+        assert listed.status_code == 200, listed.text
+        assert "secret" not in listed.text
+        match = next(p for p in listed.json() if p["id"] == project_id)
+        return match["loan_application"]["verified_documents"]
+
+    # Not approved yet: there is nothing the team has vouched for.
+    assert await listed_documents() == []
+
+    application.admin_approval = "APPROVED"
+    await db_session.commit()
+    # Every required type (approval is refused without them), then the extra
+    # upload; a PENDING row never landed, so it is not a document.
+    assert await listed_documents() == [*REQUIRED_DOCUMENT_TYPES, "financial_report"]
