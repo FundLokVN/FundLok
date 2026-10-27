@@ -9,7 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import SessionLocal, get_db
 from app.auth.schemas import TokenData
 from app.users.models import USER_STATUS_SUSPENDED, RefreshToken, Role, User, WebAuthnCredential
 
@@ -76,6 +76,33 @@ async def get_current_user(
     if user.role in SECOND_FACTOR_ROLES and not payload.get("mfa"):
         raise _second_factor_required()
     return user
+
+
+async def is_system_admin_session(request: Request) -> bool:
+    """Whether the request carries a SYSTEM_ADMIN's full session.
+
+    For the maintenance gate in app/main.py, which runs before routing and so
+    before any dependency: maintenance never blocks a system admin (the
+    frontend proxy applies the same rule to /login). Without this the admin's
+    own /users/me got the 503, the proxy read that as signed out, and the
+    admin who had just switched maintenance on was locked out with everyone
+    else.
+
+    The checks are get_current_user's, second factor included. Any failure is
+    just "no": the caller then gets the maintenance response like anyone else.
+    """
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    credentials = (
+        HTTPAuthorizationCredentials(scheme=scheme, credentials=token)
+        if scheme.lower() == "bearer" and token
+        else None
+    )
+    async with SessionLocal() as db:
+        try:
+            user, payload = await _session_user(request, credentials, db)
+        except HTTPException:
+            return False
+    return user.role == Role.SYSTEM_ADMIN.value and bool(payload.get("mfa"))
 
 
 async def get_current_user_without_second_factor(
