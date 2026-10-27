@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
@@ -50,6 +50,7 @@ from app.gverify.normalize import normalize_identifier
 from app.gverify.models import (
     STATUS_APPROVED,
     STATUS_MANUAL_REVIEW,
+    STATUS_REJECTED,
     GVerifyKybVerification,
     GVerifyVerification,
 )
@@ -101,6 +102,48 @@ async def _paginate(db: AsyncSession, stmt: Select, *, page: int, page_size: int
         page=page,
         page_size=page_size,
         total_pages=total_pages,
+    )
+
+
+# What "ALL" means on the KYC and KYB review lists: every attempt a reviewer
+# browses. FAILED (a provider outage) has nothing to review, and PENDING is
+# still in flight.
+REVIEW_LIST_ALL = "ALL"
+REVIEW_LIST_STATUSES = (STATUS_MANUAL_REVIEW, STATUS_APPROVED, STATUS_REJECTED)
+
+
+async def _review_page(db: AsyncSession, model, filters: list, *, status: str, page: int, page_size: int, out) -> Page:
+    """One page of KYC or KYB attempts, built row by row with `out`.
+
+    Attempts waiting for a reviewer come first and oldest first, the order the
+    queue is worked in. Decided ones follow, newest first, since history is
+    read from the latest decision back.
+    """
+    if status == REVIEW_LIST_ALL:
+        filters = [*filters, model.status.in_(REVIEW_LIST_STATUSES)]
+    else:
+        filters = [*filters, model.status == status]
+    stmt = select(model).where(*filters)
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
+
+    waiting = model.status == STATUS_MANUAL_REVIEW
+    rows = (
+        await db.execute(
+            stmt.order_by(
+                waiting.desc(),
+                case((waiting, model.created_at)).asc().nulls_last(),
+                model.created_at.desc(),
+            )
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).scalars().all()
+    return Page(
+        items=[await out(db, row) for row in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size,
     )
 
 
@@ -644,10 +687,6 @@ async def resolve_kyb_verification(
     return AdminKybVerificationOut.model_validate(row)
 
 
-# Same cap as the KYC queue: one row per waiting SME (resubmission is refused
-# while an attempt is in review).
-KYB_REVIEW_LIST_LIMIT = 100
-
 
 async def _kyb_review_out(db: AsyncSession, row: GVerifyKybVerification) -> AdminKybReviewOut:
     owner = await db.get(User, row.user_id)
@@ -690,18 +729,12 @@ async def _get_kyb_verification(db: AsyncSession, verification_id: UUID) -> GVer
 
 
 async def list_kyb_verifications(
-    db: AsyncSession, *, status: str = STATUS_MANUAL_REVIEW
-) -> list[AdminKybReviewOut]:
-    """KYB attempts in one status, oldest first so the queue is worked in order."""
-    rows = (
-        await db.execute(
-            select(GVerifyKybVerification)
-            .where(GVerifyKybVerification.status == status)
-            .order_by(GVerifyKybVerification.created_at)
-            .limit(KYB_REVIEW_LIST_LIMIT)
-        )
-    ).scalars().all()
-    return [await _kyb_review_out(db, row) for row in rows]
+    db: AsyncSession, *, status: str = STATUS_MANUAL_REVIEW, page: int = 1, page_size: int = 20
+) -> Page[AdminKybReviewOut]:
+    """KYB attempts in one status, or ALL, a page at a time (_review_page)."""
+    return await _review_page(
+        db, GVerifyKybVerification, [], status=status, page=page, page_size=page_size, out=_kyb_review_out
+    )
 
 
 async def get_kyb_verification(db: AsyncSession, verification_id: UUID) -> AdminKybReviewOut:
@@ -1124,8 +1157,6 @@ async def list_audit_logs(
 # from the card's own portrait cropped and resubmitted, so a person decides.
 # --------------------------------------------------------------------------- #
 
-KYC_REVIEW_LIST_LIMIT = 100
-
 # What the investor sees after a rejection. The operator's note is never shown
 # to them: it is written for colleagues and may name the suspected fraud or the
 # other account, which would confirm to an impostor whose identity they hold.
@@ -1204,26 +1235,23 @@ async def _get_kyc_verification(db: AsyncSession, verification_id: UUID, *, for_
 
 
 async def list_kyc_verifications(
-    db: AsyncSession, *, status: str = STATUS_MANUAL_REVIEW
-) -> list[AdminKycVerificationOut]:
-    """KYC attempts in one status, oldest first so the queue is worked in order.
+    db: AsyncSession, *, status: str = STATUS_MANUAL_REVIEW, page: int = 1, page_size: int = 20
+) -> Page[AdminKycVerificationOut]:
+    """KYC attempts in one status, or ALL, a page at a time (_review_page).
 
     Defaults to MANUAL_REVIEW, the only status an operator can act on. A parked
     attempt is always its account's newest (resubmission is refused while one
-    is in review), so this is one row per waiting investor.
+    is in review), so that queue is one row per waiting investor.
     """
-    rows = (
-        await db.execute(
-            select(GVerifyVerification)
-            .where(
-                GVerifyVerification.verification_type == "KYC",
-                GVerifyVerification.status == status,
-            )
-            .order_by(GVerifyVerification.created_at)
-            .limit(KYC_REVIEW_LIST_LIMIT)
-        )
-    ).scalars().all()
-    return [await _kyc_verification_out(db, row) for row in rows]
+    return await _review_page(
+        db,
+        GVerifyVerification,
+        [GVerifyVerification.verification_type == "KYC"],
+        status=status,
+        page=page,
+        page_size=page_size,
+        out=_kyc_verification_out,
+    )
 
 
 async def get_kyc_verification(

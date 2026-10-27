@@ -62,7 +62,7 @@ async def test_queue_lists_parked_attempts_with_the_conflicting_account(
     resp = await client.get("/admin/kyc-verifications", headers=admin["headers"])
 
     assert resp.status_code == 200, resp.text
-    [row] = resp.json()
+    [row] = resp.json()["items"]
     assert row["id"] == verification_id
     assert row["status"] == "MANUAL_REVIEW"
     assert row["user"]["email"] == impostor["email"]
@@ -79,7 +79,7 @@ async def test_queue_is_oldest_first(client, make_admin, make_user, parked_attem
     second = await client.post("/gverify/kyc/verify", json=_body(), headers=late["headers"])
     admin = await make_admin()
 
-    rows = (await client.get("/admin/kyc-verifications", headers=admin["headers"])).json()
+    rows = (await client.get("/admin/kyc-verifications", headers=admin["headers"])).json()["items"]
 
     assert [r["id"] for r in rows] == [first_id, second.json()["verification_id"]]
 
@@ -90,9 +90,36 @@ async def test_queue_can_be_filtered_by_status(client, make_admin, parked_attemp
 
     rows = (
         await client.get("/admin/kyc-verifications?status=APPROVED", headers=admin["headers"])
-    ).json()
+    ).json()["items"]
 
     assert [r["user"]["email"] for r in rows] == [owner["email"]]
+
+
+async def test_all_lists_the_attempts_that_need_action_first(client, make_admin, parked_attempt):
+    _, _, parked_id = await parked_attempt()
+    admin = await make_admin()
+
+    page = (
+        await client.get("/admin/kyc-verifications?status=ALL", headers=admin["headers"])
+    ).json()
+
+    assert page["total"] == 2
+    assert [r["status"] for r in page["items"]] == ["MANUAL_REVIEW", "APPROVED"]
+    assert page["items"][0]["id"] == parked_id
+
+
+async def test_the_list_is_paged(client, make_admin, parked_attempt):
+    owner, _, _ = await parked_attempt()
+    admin = await make_admin()
+
+    second = (
+        await client.get(
+            "/admin/kyc-verifications?status=ALL&page=2&page_size=1", headers=admin["headers"]
+        )
+    ).json()
+
+    assert (second["total"], second["total_pages"], second["page"]) == (2, 2, 2)
+    assert [r["user"]["email"] for r in second["items"]] == [owner["email"]]
 
 
 async def test_queue_rejects_an_unknown_status(client, make_admin):
@@ -193,7 +220,7 @@ async def test_approval_verifies_the_investor(client, make_admin, parked_attempt
     assert status["is_approved"] is True
     # Out of the queue.
     queue = (await client.get("/admin/kyc-verifications", headers=admin["headers"])).json()
-    assert queue == []
+    assert queue["items"] == [] and queue["total"] == 0
 
 
 async def test_rejection_shows_a_fixed_message_never_the_note(
@@ -240,7 +267,7 @@ async def test_only_a_parked_attempt_can_be_resolved(client, make_admin, parked_
     admin = await make_admin()
     [approved] = (
         await client.get("/admin/kyc-verifications?status=APPROVED", headers=admin["headers"])
-    ).json()
+    ).json()["items"]
 
     resp = await _resolve(client, admin, approved["id"], "REJECTED")
 

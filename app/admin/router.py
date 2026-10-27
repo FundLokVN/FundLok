@@ -26,6 +26,7 @@ from app.admin.schemas import (
     AdminUserFullDetail,
     AdminUserStatusRequest,
     AuditLogOut,
+    Page,
 )
 from app.core.database import get_db
 from app.loans import grading_inputs
@@ -111,19 +112,26 @@ async def resolve_kyb_verification(
     )
 
 
+# ALL = in review, approved and rejected together (service.REVIEW_LIST_STATUSES).
+ReviewListStatus = Literal["ALL", "MANUAL_REVIEW", "APPROVED", "REJECTED", "FAILED"]
+
+
 @router.get(
     "/kyb-verifications",
-    response_model=list[AdminKybReviewOut],
+    response_model=Page[AdminKybReviewOut],
     dependencies=[Depends(audit_admin_read("GVERIFY_KYB_VERIFICATION"))],
 )
 async def list_kyb_verifications(
-    status: Literal["MANUAL_REVIEW", "APPROVED", "REJECTED", "FAILED"] = "MANUAL_REVIEW",
+    status: ReviewListStatus = "MANUAL_REVIEW",
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """KYB attempts in one status, oldest first. Defaults to the review queue.
-    Admin-only."""
-    return await service.list_kyb_verifications(db, status=status)
+    """KYB attempts, a page at a time: those waiting for a reviewer first and
+    oldest first, decided ones after, newest first. Defaults to the review
+    queue. Admin-only."""
+    return await service.list_kyb_verifications(db, status=status, page=page, page_size=page_size)
 
 
 @router.get(
@@ -162,17 +170,19 @@ async def get_kyb_certificate_url(
 
 @router.get(
     "/kyc-verifications",
-    response_model=list[AdminKycVerificationOut],
+    response_model=Page[AdminKycVerificationOut],
     dependencies=[Depends(audit_admin_read("GVERIFY_KYC_VERIFICATION"))],
 )
 async def list_kyc_verifications(
-    status: Literal["MANUAL_REVIEW", "APPROVED", "REJECTED", "FAILED"] = "MANUAL_REVIEW",
+    status: ReviewListStatus = "MANUAL_REVIEW",
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """KYC attempts in one status, oldest first. Defaults to the review queue.
-    Admin-only."""
-    return await service.list_kyc_verifications(db, status=status)
+    """KYC attempts, a page at a time, in the same order as the KYB list.
+    Defaults to the review queue. Admin-only."""
+    return await service.list_kyc_verifications(db, status=status, page=page, page_size=page_size)
 
 
 @router.get(

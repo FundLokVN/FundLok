@@ -203,7 +203,7 @@ async def test_admin_approves_manual_kyc_with_details_from_the_card(
     admin = await make_admin()
 
     queue = await client.get("/admin/kyc-verifications", headers=admin["headers"])
-    row = next(r for r in queue.json() if r["id"] == attempt["verification_id"])
+    row = next(r for r in queue.json()["items"] if r["id"] == attempt["verification_id"])
     assert row["provider_checked"] is False
     assert row["person_number"] is None
 
@@ -350,7 +350,7 @@ async def test_kyb_queue_lists_manual_attempts_with_review_context(
 
     queue = await client.get("/admin/kyb-verifications", headers=admin["headers"])
     assert queue.status_code == 200, queue.text
-    row = next(r for r in queue.json() if r["id"] == attempt["verification_id"])
+    row = next(r for r in queue.json()["items"] if r["id"] == attempt["verification_id"])
     assert row["provider_checked"] is False
     assert row["user"]["email"] == sme["email"]
     assert row["projects"] == [project["legal_name"]]
