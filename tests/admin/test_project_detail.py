@@ -32,6 +32,20 @@ async def test_returns_the_company_and_its_applications(
     assert all(isinstance(a["requested_amount"], int) for a in data["applications"])
 
 
+async def test_the_owner_comes_with_the_company(client, make_admin, make_user, make_project):
+    sme = await make_user(role="SME")
+    project = await make_project(sme)
+    admin = await make_admin()
+
+    resp = await client.get(f"/admin/projects/{project['id']}", headers=admin["headers"])
+
+    assert resp.status_code == 200, resp.text
+    owner = resp.json()["owner"]
+    assert (owner["id"], owner["email"], owner["role"]) == (sme["id"], sme["email"], "SME")
+    # Never started KYC: the preview has no identity check to open.
+    assert owner["kyc_verification_id"] is None and owner["kyc_status"] is None
+
+
 async def test_applications_are_newest_first(
     client, make_admin, make_user, make_project, make_loan_application
 ):

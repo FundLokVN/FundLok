@@ -28,6 +28,7 @@ from app.admin.schemas import (
     AdminMode,
     AdminOverview,
     AdminProjectDetail,
+    AdminProjectOwnerOut,
     AdminScoreRunOut,
     AdminStats,
     AdminUserDetail,
@@ -453,6 +454,38 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
         created_at=project.created_at,
         applications=[_row(row) for row in rows],
         kyb=kyb,
+        owner=await _project_owner(db, project_id),
+    )
+
+
+async def _project_owner(db: AsyncSession, project_id: UUID) -> AdminProjectOwnerOut | None:
+    """The company's OWNER account and its latest KYC attempt.
+
+    The first OWNER row: creation makes exactly one, and nothing adds co-owners
+    yet. KYC is a property of the user, like KYB in _latest_kyb_for_project.
+    """
+    user = (
+        await db.execute(
+            select(User)
+            .join(ProjectOwnership, ProjectOwnership.user_id == User.id)
+            .where(ProjectOwnership.project_id == project_id, ProjectOwnership.role == "OWNER")
+            .order_by(ProjectOwnership.created_at)
+            .limit(1)
+        )
+    ).scalars().first()
+    if user is None:
+        return None
+    kyc = await gverify_service.latest_for_user(db, user.id, "KYC")
+    return AdminProjectOwnerOut(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        phone=user.phone,
+        role=user.role,
+        status=user.status,
+        created_at=user.created_at,
+        kyc_verification_id=kyc.id if kyc else None,
+        kyc_status=kyc.status if kyc else None,
     )
 
 

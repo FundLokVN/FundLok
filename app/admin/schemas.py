@@ -510,6 +510,22 @@ class AdminLoanApplicationRow(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AdminProjectOwnerOut(BaseModel):
+    """The account that owns the company, so the operator can open it and its
+    identity check from the project preview instead of searching for it."""
+
+    id: UUID
+    email: str
+    full_name: str | None
+    phone: str | None
+    role: str | None
+    status: str
+    created_at: datetime | None
+    # The owner's latest personal KYC attempt, or null if they never started one.
+    kyc_verification_id: UUID | None = None
+    kyc_status: str | None = None
+
+
 class AdminProjectDetail(BaseModel):
     """BFF payload for the admin's project preview, in the same spirit as
     AdminOverview: the whole panel in one response rather than the client
@@ -533,6 +549,8 @@ class AdminProjectDetail(BaseModel):
     # preview shows both halves of the gate side by side, so the operator can
     # see WHY an application is stuck without leaving the panel.
     kyb: AdminKybVerificationOut | None
+    # Null only for a project with no ownership row, which creation never makes.
+    owner: AdminProjectOwnerOut | None = None
 
 
 class ActorOut(BaseModel):
