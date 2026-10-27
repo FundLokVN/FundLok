@@ -290,7 +290,7 @@ async def create_file_presign(
     body: FilePresignRequest,
     current_user: User,
 ) -> tuple[Document, str]:
-    if current_user.role not in (Role.SME.value, Role.ADMIN.value):
+    if current_user.role not in (Role.SME.value, Role.ADMIN.value, Role.SYSTEM_ADMIN.value):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
     if not _file_purpose_allowed(body.purpose):
         raise HTTPException(status_code=400, detail="Invalid purpose")
@@ -338,7 +338,7 @@ async def _check_document_owner(db: AsyncSession, doc: Document, current_user: U
     """
     if doc.entity_type != "PROJECT":
         raise HTTPException(status_code=403, detail="Not authorized")
-    if current_user.role == Role.ADMIN.value:
+    if current_user.role in (Role.ADMIN.value, Role.SYSTEM_ADMIN.value):
         return
     if current_user.role == Role.SME.value and await user_owns_project(db, current_user.id, doc.entity_id):
         return

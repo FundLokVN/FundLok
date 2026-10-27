@@ -10,7 +10,7 @@ from app.utils.rbac import require_roles
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 
-require_admin = require_roles(Role.ADMIN)
+require_admin = require_roles(Role.ADMIN, Role.SYSTEM_ADMIN)
 
 
 @router.post("/", response_model=ContractOut, status_code=201)

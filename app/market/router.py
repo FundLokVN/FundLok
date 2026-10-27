@@ -12,7 +12,7 @@ from app.utils.rbac import require_roles
 
 router = APIRouter(prefix="/market", tags=["market"])
 
-require_admin = require_roles(Role.ADMIN)
+require_admin = require_roles(Role.ADMIN, Role.SYSTEM_ADMIN)
 require_investor = require_roles(Role.INVESTOR)
 
 

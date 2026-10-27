@@ -31,7 +31,7 @@ from app.utils.rbac import require_roles
 
 router = APIRouter(prefix="/underwriting", tags=["underwriting"])
 
-require_admin = require_roles(Role.ADMIN)
+require_admin = require_roles(Role.ADMIN, Role.SYSTEM_ADMIN)
 
 
 @router.get("/industries", response_model=SupportedIndustriesOut)

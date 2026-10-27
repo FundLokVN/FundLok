@@ -21,7 +21,7 @@ from app.utils.rbac import require_roles
 
 router = APIRouter(prefix="/lending", tags=["lending"])
 
-require_admin = require_roles(Role.ADMIN)
+require_admin = require_roles(Role.ADMIN, Role.SYSTEM_ADMIN)
 
 
 @router.post("/documents/{document_id}/approve", response_model=DocumentOut, status_code=200)
