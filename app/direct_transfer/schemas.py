@@ -55,6 +55,30 @@ class TrancheOut(_Out):
     void_reason: str | None = None
 
 
+class BankOut(_Out):
+    """One entry of the bank dropdown. `bin` is what the account is saved and the VietQR is built with."""
+    bin: str
+    code: str
+    short_name: str
+    name: str
+    kind: Literal["BANK", "WALLET"]
+    popular: bool
+
+
+class PaymentAccountOut(_Out):
+    id: UUID
+    holder_role: Literal["SME", "INVESTOR"]
+    holder_type: Literal["INDIVIDUAL", "ENTITY"]
+    bank_bin: str
+    bank_name: str
+    account_number: str
+    account_name: str
+    status: Literal["PENDING", "APPROVED", "REJECTED"]
+    rejection_reason: str | None = None
+    created_at: dt.datetime
+    approved_at: dt.datetime | None = None
+
+
 class PaymentOut(_Out):
     bank_name: str
     bank_bin: str
