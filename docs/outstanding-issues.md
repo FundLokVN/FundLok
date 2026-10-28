@@ -363,6 +363,7 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | Q-D14 | Missed-day report deadline 2 working days; a later report within 5 working days is accepted into reconciliation without changing history, beyond that it is refused | section 6 |
 | Q-D15 | Investor fee invoice due 7 days after issue; unpaid past due blocks new reservations; fee fixed at signing as `amount x rate x term/12` floored per tranche | `Loc.md` fee table |
 | Q-D16 | "Repaid in full" for the one-listing lock means the facility is SETTLED and every instalment row is settled | `Loc.md` rule 1 |
+| Q-D17 | Payment accounts accept banks only: e-wallets (MoMo, ZaloPay, MVAS) are in the bank list but off by default, because the receipt and statement evidence flow has only been designed for bank accounts. Decree 94 Art. 11.1.b allows own e-wallets, so this is a scope choice, not a legal one | Edward, 2026-10-28 |
 
 ---
 

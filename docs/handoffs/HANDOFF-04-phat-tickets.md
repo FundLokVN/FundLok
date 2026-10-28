@@ -23,6 +23,49 @@ Statuses you will render (tranche): `RESERVED`, `SIGNED`, `ATTESTED`, `CONFIRMED
 
 ---
 
+## Epic 0 — Save a bank account first (prerequisite for Epics 1 and 2)
+
+Every investor and every SME must have an **approved** payment account before they can invest or open a window: the SME's account is the payee on the VietQR, and the investor's is the payer we check receipts against. No bank API exists, so staff approve each account from an uploaded bank statement or bank confirmation letter (Epic 3.1). Ask for the account at onboarding so approval is not what delays the first investment.
+
+### 0.1 Bank dropdown
+`GET /direct-transfer/banks?include_wallets=false` -> `[BankOut]`, service `list_banks(include_wallets=False)`. Static data, safe to cache for the session. Any signed-in user.
+
+```json
+{ "bin": "970407", "code": "TCB", "short_name": "Techcombank", "name": "Ngân hàng TMCP Kỹ thương Việt Nam",
+  "kind": "BANK", "popular": true }
+```
+- Already ordered: the 12 `popular` banks first (Vietcombank, VietinBank, BIDV, Agribank, Techcombank, MB, ACB, VPBank, TPBank, Sacombank, HDBank, VIB), then the rest A-Z. Show the popular ones pinned and the rest searchable.
+- `bin` is what you send back when saving the account. Never let the user type a BIN.
+- `kind: "WALLET"` entries (MoMo, ZaloPay, MVAS) are excluded unless `include_wallets=true`. Leave them off: the evidence flow is bank accounts only for now. PROVISIONAL(Q-D17).
+- Logos are not part of the data. VietQR's public CDN serves `https://cdn.vietqr.io/img/{code}.png` if you want them; that is a third-party dependency, your call.
+
+### 0.2 Save an account
+`POST /payment-accounts` (user), body below -> `PaymentAccountOut`, service `register_payment_account`. The router sets `holder_role` from the signed-in user (`SME` or `INVESTOR`).
+```json
+{ "holder_type": "INDIVIDUAL|ENTITY", "bank_bin": "970407", "account_number": "19036789012",
+  "account_name": "NGUYEN VAN A", "evidence_file_id": "uuid" }
+```
+- `bank_bin` must be one from 0.1. The server fills the bank name from the list and **ignores any `bank_name` you send**.
+- `account_name` is the name exactly as registered at the bank (upper-case, no accents is fine; the comparison folds accents and case). Tell the investor: **the name on the transfer receipt must match their KYC name**, so they must pay from this account.
+- `holder_type`: `INDIVIDUAL` for a person, `ENTITY` for a company. It decides tax withholding on interest (individuals only), so ask clearly.
+- `evidence_file_id`: upload the statement or bank confirmation first with `POST /evidence-files` (`purpose` = `BANK_STATEMENT` or `BANK_CONFIRMATION`; any other value is rejected). Staff cannot approve without it.
+- Errors: `400 Unsupported bank`, `400 Invalid account number` (4 to 32 letters/digits), `409 ACCOUNT_EXISTS` (same bank + number already saved by this user).
+- Response `status` starts `PENDING`.
+
+### 0.3 My accounts and their status
+`GET /payment-accounts` -> `[PaymentAccountOut]` (caller's own, oldest first), service `list_payment_accounts`.
+```json
+{ "id": "uuid", "holder_role": "INVESTOR", "holder_type": "INDIVIDUAL", "bank_bin": "970407", "bank_name": "Techcombank",
+  "account_number": "19036789012", "account_name": "NGUYEN VAN A", "status": "PENDING|APPROVED|REJECTED",
+  "rejection_reason": null, "created_at": "...", "approved_at": null }
+```
+Render three states: **Pending** (saved, waiting for staff; cannot be used yet), **Approved** (selectable when investing or opening a window), **Rejected** (show `rejection_reason`; the user saves a corrected account as a new entry).
+- Gate: reserving a ticket (1.3) or opening a window (1.2) with an account that is not `APPROVED` returns `409 ACCOUNT_NOT_APPROVED`. Disable the invest and open-window buttons until the user has an approved account, and link them to this screen.
+- A user may save several accounts and pick one per investment (`payment_account_id`).
+- Not built: edit or delete. A wrong account is fixed by saving a new one.
+
+---
+
 ## Epic 1 — Listing window (start here)
 
 ### 1.1 Listing page: progress and status
@@ -118,9 +161,10 @@ Static content per bank (Techcombank first): how to create a daily standing orde
 
 ## Epic 3 — Staff (admin)
 
-### 3.1 Payment-account approval
-`POST /payment-accounts` (user): `{ "holder_type": "INDIVIDUAL|ENTITY", "bank_bin": "970407", "bank_name": "string", "account_number": "string", "account_name": "string", "evidence_file_id": "uuid" }` -> `PaymentAccountOut { id, status:"PENDING", … }`.
+### 3.1 Payment-account approval (staff)
+The user side (saving an account) is **Epic 0**. Staff queue: service `pending_payment_accounts` (the path is not fixed by the specs; suggested `GET /admin/direct-transfer/payment-accounts/pending`), then:
 Staff: `POST /admin/direct-transfer/payment-accounts/{id}/decision` `{ "decision": "APPROVED|REJECTED", "reason": "string" }`. Service: `decide_payment_account`.
+Show the account, the uploaded statement (`evidence_file_id`) and the holder's KYC name side by side. A reason is required for both outcomes.
 
 ### 3.2 Exceptions queue
 `GET /admin/direct-transfer/exceptions` -> `[ { "kind": "AWAITING_FIELDS|RECEIPT_MISMATCH|LATE_RECEIPT", "tranche_id","transfer_id","amount_vnd","reference_code","failure_codes":[…],"parsed_fields":{…}|null,"file_url","timeline":[ evidence_log rows ] } ]`.
@@ -142,6 +186,7 @@ FundLok's fee account is FundLok's own revenue account, never a customer-money a
 
 ## Order of work suggested
 
+0. **Epic 0** (save a bank account) first: nothing in Epics 1 and 2 works without an approved account.
 1. Epic 1 tickets 1.1 to 1.5 (they unblock end-to-end testing against the mock signer and staff-entered receipts).
 2. 3.1 and 3.2 (staff must approve accounts and enter receipt fields or nothing moves).
 3. 1.6, 1.7, then Epic 2, then 3.3, 3.4.
