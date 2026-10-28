@@ -195,6 +195,15 @@ class Settings(BaseSettings):
     # run through ARQ, never BackgroundTasks (CLAUDE.md). Points at the
     # docker-compose `redis` service locally; a managed Redis URL in prod.
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    # Malware scanning of uploads (compliance audit SEC-04). On: a confirmed
+    # upload waits in SCANNING until the ARQ worker has streamed it through
+    # ClamAV (app/uploads/scanning.py). Off until ClamAV and the worker run in
+    # the environment; uploads then skip the scan, as before SEC-04.
+    UPLOAD_SCAN_ENABLED: bool = False
+    CLAMAV_HOST: str = "localhost"
+    CLAMAV_PORT: int = 3310
+    CLAMAV_TIMEOUT_SECONDS: float = 120.0
     @property
     def webauthn_rp_id(self) -> str:
         """Registrable domain for passkeys, derived from FRONTEND_URL if unset."""

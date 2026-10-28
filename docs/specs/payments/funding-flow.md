@@ -1,5 +1,7 @@
 # Spec: Funding Flow — Ledger Legs for Money Movement
 
+> **Partly superseded 2026-10-28 (ADR-009, D-026).** Every leg table in this spec that touches `OMNIBUS_CASH` (section 6 and the section 3.3 funding/withdrawal legs) is superseded **for the direct-transfer path** by `docs/specs/direct_transfer/ledger-amendment.md`. The `EXTERNAL` account (section 3.3), the `LENDER` claim meaning (Issue 15) and the account-balance-by-sum rule stay valid. The legacy omnibus path is untouched until it is retired.
+
 | Field | Value |
 |---|---|
 | **Status** | ACCEPTED |
