@@ -10,10 +10,12 @@ Architecture:
 - Vectors + metadata (source file, heading, text) live in a Pinecone
   serverless index. Populate/refresh it with build_index.py in this folder
   -- this server only queries, it never writes to the index.
-- This upgrades from an earlier BM25 (keyword) version of this server: BM25
-  only matches literal shared words between query and text; embeddings match
-  on meaning, so e.g. a query about "how lenders get paid back" can find a
-  section that only says "pro-rata distributions" with zero word overlap.
+- Search is HYBRID (ADR-010): the semantic ranking above is merged with an
+  in-memory BM25 keyword ranking (lexical.py) using Reciprocal Rank Fusion
+  (hybrid.py). Embeddings match on meaning ("how lenders get paid back" finds
+  "pro-rata distributions"); BM25 matches exact identifiers that embeddings
+  blur (UNDER_REVIEW, Q-023, a migration hash). SEARCH_MODE=semantic|keyword
+  switches either half off for comparison.
 
 Setup: see README.md in this folder. Requires PINECONE_API_KEY (via .env in
 this folder) and a Pinecone index already populated by build_index.py.
@@ -33,10 +35,18 @@ from mcp.types import TextContent, Tool
 from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
 
+from chunking import build_corpus
+from hybrid import MODES, Hit, format_hit, fuse, hit_from_keyword, hit_from_semantic, semantic_weight_for
+from lexical import BM25Index
+
 load_dotenv()
 
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "fl-knowledge")
+SEARCH_MODE = os.environ.get("SEARCH_MODE", "hybrid")
+if SEARCH_MODE not in MODES:
+    raise SystemExit(f"SEARCH_MODE must be one of {MODES}, got {SEARCH_MODE!r}")
+CANDIDATES = 20  # how many results each engine contributes before fusion
 
 
 class VectorSearch:
@@ -82,8 +92,60 @@ class VectorSearch:
         return self._index.describe_index_stats()
 
 
+class KeywordSearch:
+    """Lazy in-memory BM25 over the current on-disk docs. Rebuilt on demand
+    (see reset()) after a reindex, so keyword results always reflect the docs
+    as they are now, even if Pinecone has not been reindexed yet."""
+
+    def __init__(self):
+        self._chunks = None
+        self._index: BM25Index | None = None
+
+    def reset(self):
+        self._chunks = None
+        self._index = None
+
+    def _ensure_ready(self):
+        if self._index is None:
+            self._chunks = build_corpus()
+            # Source path and heading are searchable too, so "funding-window"
+            # or "Tranche state machine" finds the right file/section.
+            self._index = BM25Index([f"{c.source}\n{c.heading}\n{c.text}" for c in self._chunks])
+
+    def search(self, query: str, limit: int) -> list[Hit]:
+        self._ensure_ready()
+        hits = []
+        for rank, h in enumerate(self._index.search(query, limit), start=1):
+            c = self._chunks[h.doc_index]
+            hits.append(hit_from_keyword(c.source, c.heading, c.text, h.score, rank))
+        return hits
+
+
 search_backend = VectorSearch()
+keyword_backend = KeywordSearch()
 server = Server("fl-knowledge")
+
+
+def run_search(query: str, top_k: int) -> tuple[list[Hit], str]:
+    """Hybrid search with graceful degradation: if the semantic side is
+    unavailable (no API key, index missing, network) the keyword side still
+    answers, and the note says so. Returns (hits, note)."""
+    semantic: list[Hit] = []
+    note = ""
+    if SEARCH_MODE in ("hybrid", "semantic"):
+        try:
+            matches = search_backend.search(query, top_k=max(top_k * 4, CANDIDATES))
+            semantic = [hit_from_semantic(m, rank) for rank, m in enumerate(matches, start=1)]
+        except RuntimeError as e:
+            if SEARCH_MODE == "semantic":
+                raise
+            note = f"(semantic search unavailable, keyword results only: {e})\n\n"
+    keyword = (
+        keyword_backend.search(query, max(top_k * 4, CANDIDATES))
+        if SEARCH_MODE in ("hybrid", "keyword") else []
+    )
+    mode = SEARCH_MODE if (semantic or SEARCH_MODE != "hybrid") else "keyword"
+    return fuse(semantic, keyword, top_k, mode=mode, semantic_weight=semantic_weight_for(query)), note
 
 
 @server.list_tools()
@@ -95,8 +157,10 @@ async def list_tools() -> list[Tool]:
                 "Searches the FundLok project knowledge base -- CLAUDE.md, AGENTS.md, "
                 "README.md, and everything under docs/ (architecture decisions, ADRs, "
                 "spec docs, handoffs, PR writeups, and external source documents like "
-                "regulations under docs/regulatory/) -- indexed as embeddings in "
-                "Pinecone, ranked by meaning rather than exact keyword match. Use this "
+                "regulations under docs/regulatory/) -- searched with hybrid ranking: "
+                "semantic embeddings (Pinecone) merged with BM25 keyword matching, so both "
+                "concept questions and exact identifiers (state names, Q-/D- ids, "
+                "revision hashes) work. Use this "
                 "before answering any question about existing design decisions, prior "
                 "spec iterations, regulatory requirements, or codebase conventions, "
                 "since this information may not be in the current conversation context. "
@@ -110,7 +174,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "A natural-language question or description of what you're looking for, e.g. 'how do lenders get paid after a borrower repays' or 'brankas webhook retry behavior'.",
+                        "description": "A natural-language question, or exact identifiers/keywords, e.g. 'how do lenders get paid after a borrower repays', 'brankas webhook retry behavior' or 'UNDER_REVIEW Q-023'.",
                     },
                     "top_k": {
                         "type": "integer",
@@ -139,6 +203,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Reuse build_index.py's logic rather than duplicating it.
         import build_index
         build_index.main()
+        keyword_backend.reset()
         stats = search_backend.stats()
         return [TextContent(type="text", text=f"Reindexed. Index stats: {stats}")]
 
@@ -146,21 +211,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         query = arguments.get("query", "")
         top_k = int(arguments.get("top_k", 5))
         try:
-            matches = search_backend.search(query, top_k=top_k)
+            hits, note = run_search(query, top_k)
         except RuntimeError as e:
             return [TextContent(type="text", text=str(e))]
 
-        if not matches:
-            return [TextContent(type="text", text="No matching sections found.")]
+        if not hits:
+            return [TextContent(type="text", text=f"{note}No matching sections found.")]
 
-        blocks = []
-        for m in matches:
-            meta = m.get("metadata", {})
-            source = meta.get("source", "unknown")
-            heading = meta.get("heading", "")
-            text = meta.get("text", "")
-            blocks.append(f"### {source} — {heading}  (score: {m['score']:.3f})\n{text}")
-        return [TextContent(type="text", text="\n\n---\n\n".join(blocks))]
+        return [TextContent(type="text", text=note + "\n\n---\n\n".join(format_hit(h) for h in hits))]
 
     raise ValueError(f"Unknown tool: {name}")
 

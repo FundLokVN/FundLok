@@ -144,3 +144,18 @@ def chunk_id(chunk: Chunk, index: int) -> str:
     build_index.py updates existing vectors in place instead of duplicating."""
     safe_source = chunk.source.replace("/", "__")
     return f"{safe_source}::{index}"
+
+
+def assign_ids(chunks: list[Chunk]) -> list[str]:
+    """Vector IDs numbered per source file (`<source>::<n>`), not across the
+    whole corpus. With corpus-wide numbering, adding one document early in the
+    walk shifted every later ID, so each reindex left the old vectors behind
+    as stale duplicates (the index held 4,880 vectors for 2,341 chunks). A
+    chunk's ID now changes only when its own file's chunk order changes."""
+    seen: dict[str, int] = {}
+    ids: list[str] = []
+    for chunk in chunks:
+        n = seen.get(chunk.source, 0)
+        seen[chunk.source] = n + 1
+        ids.append(chunk_id(chunk, n))
+    return ids
