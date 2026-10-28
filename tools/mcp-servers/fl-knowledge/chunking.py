@@ -32,6 +32,19 @@ INDEXED_PATHS = [
     REPO_ROOT / "docs",
 ]
 
+# Left out of the index (ADR-010 follow-up). The VPBank proposal tree alone was
+# 48% of all chunks, mostly the same text several times over, and it describes
+# an escrow model FundLok does not use (ADR-009), so on custody questions it
+# crowded out the current docs.
+#  - any directory named in EXCLUDED_DIR_NAMES, anywhere under the indexed paths
+#  - the VPBank folders whose content is already inside the consolidated
+#    documents (section sources are the parts they were built from; diagrams
+#    and generators are build artefacts)
+# Also skipped: a .pdf with a same-named .md next to it (see is_render_duplicate).
+EXCLUDED_DIR_NAMES = {"_superseded"}
+_VPBANK = REPO_ROOT / "docs" / "specs" / "banking" / "vpbank-proposal"
+EXCLUDED_PATHS = [_VPBANK / "03-section-sources", _VPBANK / "04-diagrams", _VPBANK / "05-generators"]
+
 # all-MiniLM-L6-v2 (the embedding model used in build_index.py/server.py) has
 # a 256-token context window (~1000-1500 characters). PDF pages routinely
 # exceed that, so long pages are split into overlapping windows -- the
@@ -120,13 +133,29 @@ def chunk_pdf(path: Path) -> list[Chunk]:
     return chunks
 
 
+def is_excluded(path: Path) -> bool:
+    """True for files under an excluded directory name or excluded path."""
+    if any(part in EXCLUDED_DIR_NAMES for part in path.parts):
+        return True
+    return any(path.is_relative_to(excluded) for excluded in EXCLUDED_PATHS)
+
+
+def is_render_duplicate(path: Path) -> bool:
+    """A .pdf sitting next to a same-named .md is a rendering of that file;
+    indexing both doubles every chunk."""
+    return path.suffix.lower() == ".pdf" and path.with_suffix(".md").exists()
+
+
 def build_corpus() -> list[Chunk]:
     md_files: list[Path] = []
     pdf_files: list[Path] = []
     for p in INDEXED_PATHS:
         if p.is_dir():
-            md_files.extend(sorted(p.rglob("*.md")))
-            pdf_files.extend(sorted(p.rglob("*.pdf")))
+            md_files.extend(f for f in sorted(p.rglob("*.md")) if not is_excluded(f))
+            pdf_files.extend(
+                f for f in sorted(p.rglob("*.pdf"))
+                if not is_excluded(f) and not is_render_duplicate(f)
+            )
         elif p.is_file():
             (pdf_files if p.suffix.lower() == ".pdf" else md_files).append(p)
 

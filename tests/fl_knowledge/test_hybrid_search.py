@@ -158,3 +158,38 @@ def test_semantic_weight_by_query_type():
     assert semantic_weight_for("Q-023") == LOOKUP_SEMANTIC_WEIGHT
     assert semantic_weight_for("UNDER_REVIEW Q-023") == LOOKUP_SEMANTIC_WEIGHT
     assert semantic_weight_for("stub interest Q-023") == MIXED_SEMANTIC_WEIGHT
+
+
+# --- index exclusions (VPBank / superseded) -------------------------------------
+
+def test_superseded_directories_are_excluded_anywhere():
+    from chunking import REPO_ROOT, is_excluded
+    assert is_excluded(REPO_ROOT / "docs" / "x" / "_superseded" / "a.md")
+    assert not is_excluded(REPO_ROOT / "docs" / "x" / "a.md")
+
+
+def test_vpbank_build_artefact_folders_are_excluded_but_consolidated_docs_are_not():
+    from chunking import REPO_ROOT, is_excluded
+    base = REPO_ROOT / "docs" / "specs" / "banking" / "vpbank-proposal"
+    for folder in ("03-section-sources", "04-diagrams", "05-generators"):
+        assert is_excluded(base / folder / "f.md")
+    assert not is_excluded(base / "02-english-only" / "FundLok-VPBank-Response-Consolidated-EN.md")
+    assert not is_excluded(base / "01-send-to-team" / "FundLok-VPBank-Response-Consolidated-VI.md")
+
+
+def test_pdf_with_same_named_md_is_a_render_duplicate(tmp_path):
+    from chunking import is_render_duplicate
+    (tmp_path / "doc.md").write_text("x")
+    (tmp_path / "doc.pdf").write_text("x")
+    (tmp_path / "lonely.pdf").write_text("x")
+    assert is_render_duplicate(tmp_path / "doc.pdf")
+    assert not is_render_duplicate(tmp_path / "lonely.pdf")
+    assert not is_render_duplicate(tmp_path / "doc.md")
+
+
+def test_real_corpus_has_no_superseded_or_duplicate_vpbank_chunks():
+    from chunking import build_corpus
+    sources = {c.source for c in build_corpus()}
+    assert not any("_superseded" in s for s in sources)
+    assert not any("/03-section-sources/" in s or "/04-diagrams/" in s or "/05-generators/" in s for s in sources)
+    assert not any(s.endswith(".pdf") and s[:-4] + ".md" in sources for s in sources)
