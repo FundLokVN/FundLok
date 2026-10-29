@@ -40,7 +40,7 @@ async def test_project_is_hidden_until_the_owner_saves_a_bank_account(client, ma
     assert not await _listed(client, make_user, project["id"])
 
     account = await _save_account(client, sme)
-    assert account["status"] == "PENDING"  # a pending account is enough until staff approval exists
+    assert account["status"] == "APPROVED"  # approved on save: there is no staff review
     assert await _listed(client, make_user, project["id"])
 
 
