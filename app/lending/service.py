@@ -14,7 +14,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.lending.models import Document
-from app.uploads.scanning import INFECTED, SCAN_FAILED, SCANNING
 from app.utils.audit import append_audit
 
 
@@ -32,13 +31,6 @@ async def approve_document(
         raise HTTPException(status_code=404, detail="Document not found")
     if document.status == "APPROVED":
         raise HTTPException(status_code=400, detail="Document is already APPROVED")
-    if document.status in (SCANNING, INFECTED, SCAN_FAILED):
-        # Scanned before approved (SEC-04): pending, malware or no verdict.
-        raise HTTPException(
-            status_code=409,
-            detail="This document has not passed the malware scan",
-            headers={"X-Error-Code": "DOCUMENT_NOT_SCANNED"},
-        )
 
     before_state = {"status": document.status}
     now = datetime.now(timezone.utc)
