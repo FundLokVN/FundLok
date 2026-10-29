@@ -41,7 +41,9 @@ def test_default_list_has_banks_only_popular_first_then_alphabetical():
 
 
 def test_wallets_are_listed_only_on_request_and_rejected_by_default():
-    assert {b.code for b in list_banks(include_wallets=True) if b.kind == "WALLET"} == {"momo", "ZALOPAY", "MVAS"}
+    assert {b.code for b in list_banks(include_wallets=True) if b.kind == "WALLET"} == {
+        "momo", "ZALOPAY", "MVAS", "VTLMONEY", "VNPTMONEY",
+    }
     assert not any(b.kind == "WALLET" for b in list_banks())
     with pytest.raises(DirectTransferError):
         require_bank("971025")  # MoMo
@@ -74,3 +76,11 @@ async def test_list_payment_accounts_returns_only_the_callers_in_order(world):
     assert [a.id for a in listed] == [mine.account_id, extra.id]
     assert other.account_id not in {a.id for a in listed}
     assert await list_payment_accounts(world.db, user_id=uuid4()) == []
+
+
+def test_every_listed_bank_is_included_and_flagged_for_vietqr():
+    # Banks VietQR cannot pay into are still listed, so their customers can save an account there.
+    assert get_bank("458761").short_name == "HSBC" and get_bank("458761").vietqr is False
+    assert get_bank("970436").vietqr is True  # Vietcombank
+    assert get_bank("977777") is None  # MAFC: a finance company, not a bank account
+    assert any(not b.vietqr for b in list_banks())

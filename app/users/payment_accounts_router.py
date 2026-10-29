@@ -141,10 +141,13 @@ async def read_payment_account_vietqr(
     ).scalar_one_or_none()
     if account is None:
         raise HTTPException(status_code=404, detail="Payment account not found", headers={"X-Error-Code": "NOT_FOUND"})
+    bank = banks.get_bank(account.bank_bin)
     try:
+        if bank is None or not bank.vietqr:
+            raise ValueError("bank does not accept VietQR transfers")
         payload = vietqr.build_account_vietqr_payload(bank_bin=account.bank_bin, account_number=account.account_number)
     except ValueError as exc:
         raise HTTPException(
-            status_code=400, detail="This account number cannot be put in a VietQR", headers={"X-Error-Code": "QR_UNSUPPORTED"}
+            status_code=400, detail="A VietQR cannot be made for this account", headers={"X-Error-Code": "QR_UNSUPPORTED"}
         ) from exc
     return VietQrOut(payload=payload)

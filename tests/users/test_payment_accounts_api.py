@@ -36,6 +36,14 @@ async def test_banks_list_popular_first_and_hides_wallets(make_user, client):
     assert any(b["kind"] == "WALLET" for b in with_wallets)
 
 
+async def test_banks_list_includes_banks_without_vietqr(make_user, client):
+    user = await make_user()
+    banks = (await client.get("/direct-transfer/banks", headers=user["headers"])).json()
+    by_bin = {b["bin"]: b for b in banks}
+    assert by_bin["458761"]["short_name"] == "HSBC" and by_bin["458761"]["vietqr"] is False
+    assert by_bin[TCB]["vietqr"] is True
+
+
 async def test_banks_list_requires_sign_in(client):
     assert (await client.get("/direct-transfer/banks")).status_code == 401
 
@@ -141,6 +149,16 @@ async def test_account_vietqr_is_owner_only(make_user, client):
     account_id = (await _save(client, investor)).json()["id"]
     resp = await client.get(f"/payment-accounts/{account_id}/vietqr", headers=other["headers"])
     assert resp.status_code == 404
+
+
+async def test_account_at_a_bank_without_vietqr_saves_but_has_no_qr(make_user, client):
+    investor = await make_user(role="INVESTOR")
+    saved = await _save(client, investor, bank_bin="458761", account_number="001234567041")  # HSBC
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["bank_name"] == "HSBC"
+    resp = await client.get(f"/payment-accounts/{saved.json()['id']}/vietqr", headers=investor["headers"])
+    assert resp.status_code == 400
+    assert resp.headers["X-Error-Code"] == "QR_UNSUPPORTED"
 
 
 async def test_parse_vietqr_reads_a_static_account_qr(make_user, client):

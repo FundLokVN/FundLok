@@ -63,6 +63,7 @@ class BankOut(_Out):
     name: str
     kind: Literal["BANK", "WALLET"]
     popular: bool
+    vietqr: bool  # False: the account can be saved, but no VietQR can be made for it
 
 
 class PaymentAccountOut(_Out):

@@ -18,7 +18,8 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parents[1] / "app" / "direct_transfer" / "data" / "vn_banks.json"
 VIETQR = "https://api.vietqr.io/v2/banks"
 SEPAY = "https://qr.sepay.vn/banks.json"
-WALLETS = {"momo", "ZALOPAY", "MVAS"}  # not banks: off by default (banks.py)
+WALLETS = {"momo", "ZALOPAY", "MVAS", "VTLMONEY", "VNPTMONEY"}  # not banks: off by default (banks.py)
+NOT_ACCOUNTS = {"MAFC"}  # a consumer-finance company, not somewhere people hold a transfer account
 POPULAR = ["VCB", "ICB", "BIDV", "VBA", "TCB", "MB", "ACB", "VPB", "TPB", "STB", "HDB", "VIB"]
 
 
@@ -50,14 +51,16 @@ def build() -> dict:
     shared = sum(1 for b in vietqr if b["code"] in sepay_bins)
     banks = [
         {"bin": b["bin"], "code": b["code"], "short_name": b["shortName"].strip(), "name": b["name"].strip(),
-         "kind": "WALLET" if b["code"] in WALLETS else "BANK", "popular": b["code"] in POPULAR}
-        for b in vietqr if b["transferSupported"] == 1
+         "kind": "WALLET" if b["code"] in WALLETS else "BANK", "popular": b["code"] in POPULAR,
+         # False for banks VietQR cannot pay into (HSBC, Citibank, ...): they can be saved, but get no QR.
+         "vietqr": b["transferSupported"] == 1}
+        for b in vietqr if b["code"] not in NOT_ACCOUNTS
     ]
     banks.sort(key=lambda x: (not x["popular"], POPULAR.index(x["code"]) if x["popular"] else 0, x["short_name"].lower()))
     return {
-        "_comment": "Vietnamese banks and e-wallets that can receive a VietQR transfer, keyed by NAPAS BIN. "
+        "_comment": "Vietnamese banks and e-wallets, keyed by NAPAS BIN; `vietqr` marks the ones a VietQR can pay into. "
                     "Regenerate with scripts/refresh_vn_banks.py; do not hand-edit.",
-        "source": f"{VIETQR} (transferSupported = 1)",
+        "source": f"{VIETQR} (vietqr = transferSupported)",
         "retrieved": dt.date.today().isoformat(),
         "cross_checked_against": f"{SEPAY}: 0 BIN mismatches across {shared} shared bank codes",
         "banks": banks,
