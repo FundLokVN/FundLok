@@ -1,7 +1,8 @@
 import re
 
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from typing import Literal, Optional
+from uuid import UUID
 from app.auth.password_policy import check_password_strength
 from app.auth.schemas import PHONE_NUMBER_PATTERN
 from app.users.models import Role
@@ -157,3 +158,48 @@ class SecurityPreferencesOut(BaseModel):
 
 class SecurityPreferencesUpdate(BaseModel):
     signin_alerts_enabled: bool
+
+
+# ── Payment accounts (HANDOFF-04 Epic 0) ─────────────────────────────────────
+# Requests only: the response models are app.direct_transfer.schemas.BankOut and
+# PaymentAccountOut, which are the contract in HANDOFF-04-phat-tickets.md.
+
+
+class PaymentAccountCreate(BaseModel):
+    holder_type: Literal["INDIVIDUAL", "ENTITY"]
+    bank_bin: str = Field(min_length=6, max_length=6)
+    account_number: str = Field(min_length=1, max_length=64)
+    account_name: str = Field(min_length=1, max_length=128)
+    evidence_file_id: UUID
+
+    @field_validator("account_number")
+    @classmethod
+    def _drop_spaces(cls, value: str) -> str:
+        # Bank apps print numbers in groups ("1903 6789 012"); the service rejects
+        # anything that is not letters and digits, so take the spaces out here.
+        return re.sub(r"\s+", "", value)
+
+    @field_validator("account_name")
+    @classmethod
+    def _tidy_name(cls, value: str) -> str:
+        return " ".join(value.split())
+
+
+class EvidenceFileOut(BaseModel):
+    file_id: UUID
+    sha256: str
+
+
+class VietQrOut(BaseModel):
+    payload: str
+
+
+class VietQrParseRequest(BaseModel):
+    payload: str = Field(min_length=1, max_length=512)
+
+
+class VietQrParseOut(BaseModel):
+    bank_bin: str
+    bank_name: str
+    account_number: str
+    account_name: Optional[str] = None

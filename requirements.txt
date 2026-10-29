@@ -34,6 +34,7 @@
 # ── Core FastAPI + server ────────────────────────────────────────────────────
 fastapi==0.161.1
 uvicorn[standard]==0.54.0
+python-multipart==0.0.32  # multipart form uploads (POST /evidence-files); no dependencies of its own
 
 # Database (SQLAlchemy 2.x async for the app; psycopg2 stays for Alembic --
 # see app/core/database.py and alembic/env.py, HANDOFF-02 Fix A)
