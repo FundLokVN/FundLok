@@ -636,9 +636,12 @@ def make_listing(client):
 @pytest.fixture
 def make_eligible_investor(db_session):
     """Bring an investor to where the market accepts their orders: email
-    verified and an APPROVED GVerify KYC attempt. Idempotent per investor."""
+    verified, an APPROVED GVerify KYC attempt and a saved bank account.
+    Idempotent per investor. Pass bank_account=False to stop short of the
+    account (the order endpoint refuses an investor without one)."""
 
-    async def _make(investor: dict):
+    async def _make(investor: dict, bank_account: bool = True):
+        from app.direct_transfer.models import PaymentAccount
         from app.gverify.models import STATUS_APPROVED, GVerifyVerification
 
         user = (await db_session.execute(select(User).where(User.id == investor["id"]))).scalar_one()
@@ -660,6 +663,23 @@ def make_eligible_investor(db_session):
                     person_number=uuid.uuid4().hex[:12],
                 )
             )
+        if bank_account:
+            saved = (
+                await db_session.execute(select(PaymentAccount.id).where(PaymentAccount.user_id == user.id))
+            ).first()
+            if saved is None:
+                db_session.add(
+                    PaymentAccount(
+                        user_id=user.id,
+                        holder_role="INVESTOR",
+                        holder_type="INDIVIDUAL",
+                        bank_bin="970436",
+                        bank_name="Vietcombank",
+                        account_number=uuid.uuid4().int.__str__()[:12],
+                        account_name="TEST INVESTOR",
+                        status="APPROVED",
+                    )
+                )
         await db_session.commit()
         return investor
 
