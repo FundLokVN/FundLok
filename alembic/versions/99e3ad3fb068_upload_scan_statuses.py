@@ -13,7 +13,7 @@ scanner behind it) and gains INFECTED and SCAN_FAILED; loan application
 documents gain all three. Existing rows are valid under the wider checks.
 
 Revision ID: 99e3ad3fb068
-Revises: ac9f152fa24e
+Revises: 6fad6630401b
 Create Date: 2026-10-20 16:10:00.000000
 
 """
@@ -24,7 +24,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '99e3ad3fb068'
-down_revision: Union[str, None] = 'ac9f152fa24e'
+down_revision: Union[str, None] = '6fad6630401b'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
