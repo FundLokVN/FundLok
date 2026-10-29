@@ -1,7 +1,7 @@
 """direct transfer funding window evidence
 
 Revision ID: ac9f152fa24e
-Revises: 5e1f0b7c9a24, 99e3ad3fb068
+Revises: 5e1f0b7c9a24
 Create Date: 2026-10-27 23:08:07.182692
 
 """
@@ -13,7 +13,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'ac9f152fa24e'
-down_revision: Union[str, Sequence[str], None] = ('5e1f0b7c9a24', '99e3ad3fb068')
+down_revision: Union[str, Sequence[str], None] = '5e1f0b7c9a24'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
