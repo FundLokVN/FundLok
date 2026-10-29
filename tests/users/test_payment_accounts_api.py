@@ -3,41 +3,17 @@ import pytest
 from sqlalchemy import select
 
 from app.direct_transfer import vietqr
-from app.direct_transfer.storage import InMemoryStorage
 from app.lending.models import AuditLog
-from app.main import app
-from app.users.payment_accounts_router import get_evidence_storage
 
 TCB = "970407"  # Techcombank, in the bank list
-PDF = b"%PDF-1.4 statement"
 
 
-@pytest.fixture(autouse=True)
-def storage():
-    store = InMemoryStorage()
-    app.dependency_overrides[get_evidence_storage] = lambda: store
-    yield store
-    app.dependency_overrides.pop(get_evidence_storage, None)
-
-
-async def _upload(client, user, *, purpose="BANK_STATEMENT", content=PDF, content_type="application/pdf"):
-    return await client.post(
-        "/evidence-files",
-        data={"purpose": purpose},
-        files={"file": ("statement.pdf", content, content_type)},
-        headers=user["headers"],
-    )
-
-
-async def _save(client, user, *, evidence_id=None, **overrides):
-    if evidence_id is None:
-        evidence_id = (await _upload(client, user)).json()["file_id"]
+async def _save(client, user, **overrides):
     body = {
         "holder_type": "INDIVIDUAL",
         "bank_bin": TCB,
         "account_number": "19036789012",
         "account_name": "NGUYEN VAN A",
-        "evidence_file_id": evidence_id,
         **overrides,
     }
     return await client.post("/payment-accounts", json=body, headers=user["headers"])
@@ -62,43 +38,6 @@ async def test_banks_list_popular_first_and_hides_wallets(make_user, client):
 
 async def test_banks_list_requires_sign_in(client):
     assert (await client.get("/direct-transfer/banks")).status_code == 401
-
-
-# --- evidence upload -----------------------------------------------------------
-
-
-async def test_upload_bank_statement(make_user, client, storage):
-    investor = await make_user(role="INVESTOR")
-    resp = await _upload(client, investor)
-    assert resp.status_code == 201, resp.text
-    assert set(resp.json()) == {"file_id", "sha256"}
-    assert len(storage.objects) == 1
-
-
-async def test_upload_rejects_other_purposes(make_user, client):
-    investor = await make_user(role="INVESTOR")
-    resp = await _upload(client, investor, purpose="RECEIPT")
-    assert resp.status_code == 400
-    assert resp.headers["X-Error-Code"] == "INVALID_PURPOSE"
-
-
-async def test_upload_rejects_unsupported_type(make_user, client):
-    investor = await make_user(role="INVESTOR")
-    resp = await _upload(client, investor, content=b"MZ", content_type="application/x-msdownload")
-    assert resp.status_code == 415
-    assert resp.headers["X-Error-Code"] == "UNSUPPORTED_TYPE"
-
-
-async def test_upload_rejects_too_large(make_user, client):
-    investor = await make_user(role="INVESTOR")
-    resp = await _upload(client, investor, content=b"x" * (10 * 1024 * 1024 + 1))
-    assert resp.status_code == 413
-    assert resp.headers["X-Error-Code"] == "FILE_TOO_LARGE"
-
-
-async def test_upload_needs_sme_or_investor(make_user, client):
-    no_role = await make_user()
-    assert (await _upload(client, no_role)).status_code == 403
 
 
 # --- save + list ---------------------------------------------------------------
@@ -139,7 +78,7 @@ async def test_save_account_ignores_client_bank_name(make_user, client):
 
 async def test_save_account_needs_sme_or_investor(make_user, client):
     no_role = await make_user()
-    resp = await _save(client, no_role, evidence_id="00000000-0000-0000-0000-000000000000")
+    resp = await _save(client, no_role)
     assert resp.status_code == 403
 
 
@@ -163,15 +102,6 @@ async def test_save_account_rejects_duplicate(make_user, client):
     resp = await _save(client, investor)
     assert resp.status_code == 409
     assert resp.headers["X-Error-Code"] == "ACCOUNT_EXISTS"
-
-
-async def test_save_account_refuses_someone_elses_statement(make_user, client):
-    owner = await make_user(role="INVESTOR")
-    other = await make_user(role="INVESTOR")
-    evidence_id = (await _upload(client, owner)).json()["file_id"]
-    resp = await _save(client, other, evidence_id=evidence_id)
-    assert resp.status_code == 404
-    assert resp.headers["X-Error-Code"] == "EVIDENCE_NOT_FOUND"
 
 
 async def test_list_returns_only_own_accounts(make_user, client):

@@ -2,7 +2,6 @@ import re
 
 from pydantic import BaseModel, Field, field_validator
 from typing import Literal, Optional
-from uuid import UUID
 from app.auth.password_policy import check_password_strength
 from app.auth.schemas import PHONE_NUMBER_PATTERN
 from app.users.models import Role
@@ -170,7 +169,6 @@ class PaymentAccountCreate(BaseModel):
     bank_bin: str = Field(min_length=6, max_length=6)
     account_number: str = Field(min_length=1, max_length=64)
     account_name: str = Field(min_length=1, max_length=128)
-    evidence_file_id: UUID
 
     @field_validator("account_number")
     @classmethod
@@ -183,11 +181,6 @@ class PaymentAccountCreate(BaseModel):
     @classmethod
     def _tidy_name(cls, value: str) -> str:
         return " ".join(value.split())
-
-
-class EvidenceFileOut(BaseModel):
-    file_id: UUID
-    sha256: str
 
 
 class VietQrOut(BaseModel):

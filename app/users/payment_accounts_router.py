@@ -1,29 +1,25 @@
 """Payment accounts: save the bank account a user pays from or is paid into (HANDOFF-04 Epic 0).
 
-The contract is docs/handoffs/HANDOFF-04-phat-tickets.md section 0. The rules live in Edward's
-app/direct_transfer services; this router adds auth, the owner checks those services leave to the
-caller, auditing and the HTTP error mapping. Accounts start PENDING and only staff can approve
-them, from the bank statement uploaded with them.
+The contract is docs/handoffs/HANDOFF-04-phat-tickets.md section 0, minus the proof upload: accounts
+are saved without a bank statement (Phat's call; #72 had staff approve from one). The rules live in
+Edward's app/direct_transfer services; this router adds auth, auditing and the HTTP error mapping.
+Accounts start PENDING and only staff can approve them.
 """
 import datetime as dt
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.direct_transfer import banks, vietqr
 from app.direct_transfer.accounts import list_payment_accounts, register_payment_account
-from app.direct_transfer.config import resolve
 from app.direct_transfer.errors import DirectTransferError
-from app.direct_transfer.evidence import store_evidence_file
-from app.direct_transfer.models import EvidenceFile, PaymentAccount
+from app.direct_transfer.models import PaymentAccount
 from app.direct_transfer.schemas import BankOut, PaymentAccountOut
-from app.direct_transfer.storage import EvidenceStorage, R2Storage
 from app.users.models import Role, User
 from app.users.schemas import (
-    EvidenceFileOut,
     PaymentAccountCreate,
     VietQrOut,
     VietQrParseOut,
@@ -36,14 +32,6 @@ from app.utils.rbac import require_roles
 router = APIRouter(tags=["payment-accounts"])
 
 authorized = require_roles(Role.SME, Role.INVESTOR)
-
-# Statement types a payment account can be proved with. Receipts and the other
-# evidence purposes are uploaded through their own flows, not this endpoint.
-ACCOUNT_EVIDENCE_PURPOSES = ("BANK_STATEMENT", "BANK_CONFIRMATION")
-
-
-def get_evidence_storage() -> EvidenceStorage:
-    return R2Storage()
 
 
 def _http_error(exc: DirectTransferError) -> HTTPException:
@@ -66,36 +54,6 @@ async def read_banks(
     return [BankOut.model_validate(bank) for bank in banks.list_banks(include_wallets=include_wallets)]
 
 
-@router.post("/evidence-files", response_model=EvidenceFileOut, status_code=201)
-async def upload_evidence_file(
-    purpose: str = Form(...),
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    storage: EvidenceStorage = Depends(get_evidence_storage),
-    current_user: User = Depends(authorized),
-):
-    if purpose not in ACCOUNT_EVIDENCE_PURPOSES:
-        raise HTTPException(status_code=400, detail="Invalid evidence purpose", headers={"X-Error-Code": "INVALID_PURPOSE"})
-    max_bytes = resolve(None).max_evidence_bytes
-    # Read one byte past the limit so an oversized file is refused without
-    # holding more than that in memory.
-    content = await file.read(max_bytes + 1)
-    try:
-        record = await store_evidence_file(
-            db,
-            storage,
-            owner_user_id=current_user.id,
-            purpose=purpose,
-            content=content,
-            content_type=file.content_type or "",
-            filename=file.filename,
-        )
-    except DirectTransferError as exc:
-        await _raise_mapped(db, exc)
-    await db.commit()
-    return EvidenceFileOut(file_id=record.id, sha256=record.sha256)
-
-
 @router.post("/payment-accounts", response_model=PaymentAccountOut, status_code=201)
 async def create_payment_account(
     body: PaymentAccountCreate,
@@ -103,11 +61,6 @@ async def create_payment_account(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authorized),
 ):
-    # register_payment_account takes any evidence id it is given: only accept a
-    # statement this user uploaded for an account, never someone else's file.
-    evidence = await db.get(EvidenceFile, body.evidence_file_id)
-    if evidence is None or evidence.owner_user_id != current_user.id or evidence.purpose not in ACCOUNT_EVIDENCE_PURPOSES:
-        raise HTTPException(status_code=404, detail="Evidence file not found", headers={"X-Error-Code": "EVIDENCE_NOT_FOUND"})
     try:
         account = await register_payment_account(
             db,
@@ -117,7 +70,7 @@ async def create_payment_account(
             bank_bin=body.bank_bin,
             account_number=body.account_number,
             account_name=body.account_name,
-            evidence_file_id=evidence.id,
+            evidence_file_id=None,
             now=dt.datetime.now(dt.timezone.utc),
         )
     except DirectTransferError as exc:
