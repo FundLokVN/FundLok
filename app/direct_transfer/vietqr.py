@@ -4,6 +4,7 @@ Spec: docs/specs/direct_transfer/transfer-and-evidence.md rules 1-2. Pure functi
 """
 from __future__ import annotations
 
+import dataclasses
 import secrets
 import string
 
@@ -94,3 +95,87 @@ def verify_crc(payload: str) -> bool:
     if len(payload) < 8 or payload[-8:-4] != "6304":
         return False
     return f"{crc16_ccitt_false(payload[:-4].encode('ascii')):04X}" == payload[-4:]
+
+
+SERVICE_TO_CARD = "QRIBFTTC"
+MAX_ACCOUNT_NUMBER_LENGTH = 19  # NAPAS beneficiary field; longer numbers cannot be put in a VietQR
+
+
+def build_account_vietqr_payload(*, bank_bin: str, account_number: str) -> str:
+    """Static VietQR to an account: no amount or memo, the payer types both. Same content as a bank app's
+    "receive money" QR, so it is safe to show on the account holder's own profile."""
+    if not (bank_bin.isdigit() and len(bank_bin) == 6):
+        raise ValueError("bank_bin must be a 6-digit NAPAS BIN")
+    if not account_number or len(account_number) > MAX_ACCOUNT_NUMBER_LENGTH or not account_number.isalnum():
+        raise ValueError("invalid account number")
+
+    beneficiary = _tlv("00", bank_bin) + _tlv("01", account_number)
+    merchant_info = _tlv("00", NAPAS_AID) + _tlv("01", beneficiary) + _tlv("02", SERVICE_TO_ACCOUNT)
+    body = (
+        _tlv("00", "01")
+        + _tlv("01", "11")  # static QR: the payer enters the amount
+        + _tlv("38", merchant_info)
+        + _tlv("53", "704")  # VND
+        + _tlv("58", "VN")
+        + "6304"
+    )
+    return body + f"{crc16_ccitt_false(body.encode('ascii')):04X}"
+
+
+class VietQrParseError(ValueError):
+    """`code` is INVALID_QR (not a well-formed VietQR) or NOT_AN_ACCOUNT_QR (a card, merchant or other QR)."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _strict_tlv(payload: str) -> dict[str, str]:
+    """Like `parse_tlv`, but rejects malformed input instead of returning a partial parse: the payload here
+    comes from a QR the user uploaded, not from our own builder."""
+    out: dict[str, str] = {}
+    i = 0
+    while i < len(payload):
+        length_text = payload[i + 2 : i + 4]
+        if len(length_text) != 2 or not length_text.isdigit():
+            raise VietQrParseError("INVALID_QR")
+        end = i + 4 + int(length_text)
+        if end > len(payload):
+            raise VietQrParseError("INVALID_QR")
+        out[payload[i : i + 2]] = payload[i + 4 : end]
+        i = end
+    return out
+
+
+@dataclasses.dataclass(frozen=True)
+class AccountQr:
+    bank_bin: str
+    account_number: str
+    account_name: str | None  # tag 59, which only some banks fill in
+
+
+def parse_account_vietqr(payload: str) -> AccountQr:
+    """Read the bank and account number out of a VietQR to an account, e.g. the one a user's bank app shows.
+
+    Accepts static and dynamic QRs and either CRC hex case. Raises `VietQrParseError` for anything else, including
+    a QR to a card number, since a payment account is a bank account.
+    """
+    payload = payload.strip()
+    if not payload.isascii() or len(payload) < 8:
+        raise VietQrParseError("INVALID_QR")
+    payload = payload[:-4] + payload[-4:].upper()
+    if not verify_crc(payload):
+        raise VietQrParseError("INVALID_QR")
+    top = _strict_tlv(payload)
+    if top.get("00") != "01" or "38" not in top:
+        raise VietQrParseError("NOT_AN_ACCOUNT_QR")
+    merchant = _strict_tlv(top["38"])
+    if merchant.get("00") != NAPAS_AID or merchant.get("02") != SERVICE_TO_ACCOUNT or "01" not in merchant:
+        raise VietQrParseError("NOT_AN_ACCOUNT_QR")
+    beneficiary = _strict_tlv(merchant["01"])
+    bank_bin = beneficiary.get("00", "")
+    account_number = beneficiary.get("01", "")
+    if not (bank_bin.isdigit() and len(bank_bin) == 6) or not account_number.isalnum():
+        raise VietQrParseError("INVALID_QR")
+    name = (top.get("59") or "").strip() or None
+    return AccountQr(bank_bin=bank_bin, account_number=account_number, account_name=name)

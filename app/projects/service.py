@@ -1,10 +1,11 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from fastapi import HTTPException, status
 
+from app.direct_transfer.models import PaymentAccount
 from app.lending.models import LoanApplication, Project, ProjectOwnership
 from app.projects.schemas import ProjectCreate
 from app.users.models import Role, User
@@ -120,6 +121,21 @@ async def user_owns_project(db: AsyncSession, user_id: UUID, project_id: UUID) -
     return result.scalar_one_or_none() is not None
 
 
+# A saved account counts until staff reject it. There is no approval queue yet (HANDOFF-04 Epic 3.1);
+# once there is, this becomes ("APPROVED",) so only checked accounts make a project visible.
+PAYMENT_ACCOUNT_LISTABLE_STATUSES = ("PENDING", "APPROVED")
+
+
+def owner_has_bank_account():
+    """True for a project whose owner has saved a bank account: investors pay the SME directly
+    (ADR-009), so a project with nowhere to pay into is not shown to them."""
+    return exists().where(
+        ProjectOwnership.project_id == Project.id,
+        PaymentAccount.user_id == ProjectOwnership.user_id,
+        PaymentAccount.status.in_(PAYMENT_ACCOUNT_LISTABLE_STATUSES),
+    )
+
+
 async def display_projects(db: AsyncSession, current_user: User):
     if current_user.role != Role.INVESTOR.value:
         raise HTTPException(
@@ -133,7 +149,7 @@ async def display_projects(db: AsyncSession, current_user: User):
     # verified_document_types; the investor schema carries their types alone.
     result = await db.execute(
         select(Project)
-        .where(Project.status == "ACTIVE")
+        .where(Project.status == "ACTIVE", owner_has_bank_account())
         .options(selectinload(Project.loan_applications).selectinload(LoanApplication.documents))
     )
     return result.scalars().all()
