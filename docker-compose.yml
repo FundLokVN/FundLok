@@ -77,6 +77,26 @@ services:
     volumes:
       - minio_data:/data
 
+  # Malware scanner for uploads (compliance audit SEC-04). The ARQ worker
+  # streams each uploaded file to clamd on 3310 (app/uploads/scanning.py).
+  # clamav-debian, not clamav/clamav: the latter has no arm64 build.
+  # The first start downloads the signature database, so allow a few minutes
+  # before scans answer. Limits are raised past the largest upload (200 MB);
+  # AlertExceedsMax makes anything bigger a reported hit instead of a silent
+  # "OK", which the app records as SCAN_FAILED.
+  clamav:
+    image: clamav/clamav-debian:1.4
+    restart: unless-stopped
+    ports:
+      - "3310:3310"
+    environment:
+      CLAMD_CONF_StreamMaxLength: "210M"
+      CLAMD_CONF_MaxFileSize: "210M"
+      CLAMD_CONF_MaxScanSize: "1000M"
+      CLAMD_CONF_AlertExceedsMax: "yes"
+    volumes:
+      - clamav_db:/var/lib/clamav
+
   # Full-container run of the API (used by `bun run docker:up`). For day-to-day
   # dev prefer `bun run dev` (uvicorn on the host with hot reload). The
   # entrypoint runs `alembic upgrade head` before starting uvicorn.
@@ -111,6 +131,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://fundlok:fundlok@postgres:5432/fundlok_dev
       REDIS_URL: redis://redis:6379/0
+      CLAMAV_HOST: clamav
       SMTP_HOST: mailpit
       SMTP_PORT: "1025"
     depends_on:
@@ -118,6 +139,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      clamav:
+        condition: service_started
 
   pgweb:
     image: sosedoff/pgweb:latest
@@ -135,3 +158,4 @@ volumes:
   postgres_data:
   minio_data:
   redis_data:
+  clamav_db:
