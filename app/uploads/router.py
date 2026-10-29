@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.uploads.scanning import SCANNING, queue_scan
 from app.uploads.schemas import (
     DOCUMENT_TYPE_RULES,
     CicPreviewOut,
@@ -194,7 +193,7 @@ async def confirm_upload(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_sme),
 ):
-    docs, to_scan = await confirm_uploads(db, body, current_user)
+    docs = await confirm_uploads(db, body, current_user)
     append_audit(
         db,
         entity_type="LOAN_APPLICATION",
@@ -205,9 +204,6 @@ async def confirm_upload(
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
-    # After the commit, so the worker finds the rows already SCANNING.
-    for doc in to_scan:
-        await queue_scan("application_document", doc.id)
     return UploadConfirmResponse(
         documents=[LoanApplicationDocumentOut.model_validate(d) for d in docs]
     )
@@ -267,6 +263,4 @@ async def commit(
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
-    if doc.status == SCANNING:
-        await queue_scan("document", doc.id)
     return FileCommitResponse(file_id=doc.id, status=doc.status)

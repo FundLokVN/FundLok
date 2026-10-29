@@ -3,7 +3,6 @@
 Locally the same code talks to the minio container from docker-compose.yml.
 """
 
-from collections.abc import Iterator
 from functools import lru_cache
 
 import boto3
@@ -123,30 +122,6 @@ def presign_get(
         },
         ExpiresIn=expires_in or settings.R2_PRESIGN_EXPIRE_SECONDS,
     )
-
-
-def read_prefix(file_key: str, length: int, *, bucket: str | None = None) -> bytes:
-    """The object's first `length` bytes, by a ranged GET: enough to check a
-    file signature without downloading a 200 MB upload (SEC-04)."""
-    resp = _client().get_object(
-        Bucket=bucket or settings.R2_BUCKET, Key=file_key, Range=f"bytes=0-{length - 1}"
-    )
-    body = resp["Body"]
-    try:
-        return body.read(length)
-    finally:
-        body.close()
-
-
-def iter_object(file_key: str, *, chunk_size: int = 1024 * 1024, bucket: str | None = None) -> Iterator[bytes]:
-    """Stream an object in chunks, never holding the whole file in memory.
-    Used to feed uploads to the malware scanner (app/uploads/scanning.py)."""
-    resp = _client().get_object(Bucket=bucket or settings.R2_BUCKET, Key=file_key)
-    body = resp["Body"]
-    try:
-        yield from body.iter_chunks(chunk_size=chunk_size)
-    finally:
-        body.close()
 
 
 def delete_object(file_key: str, *, bucket: str | None = None) -> None:
