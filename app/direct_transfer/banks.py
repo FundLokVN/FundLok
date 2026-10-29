@@ -5,6 +5,9 @@ scripts/refresh_vn_banks.py). The BIN is what goes into the VietQR payload, so a
 send a payer to the wrong bank: registration validates it here and takes the bank name from this list, never from
 the client. E-wallets are listed but off by default (`kind == "WALLET"`): Decree 94 allows them, but the receipt and
 statement evidence flow has only been designed for bank accounts. PROVISIONAL(Q-D17).
+
+Every bank VietQR lists is here, including those it cannot pay into (`vietqr` False: HSBC, Citibank, ...). An account
+at one of those can be saved, but no VietQR can be made for it.
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ class Bank:
     name: str
     kind: str  # "BANK" | "WALLET"
     popular: bool
+    vietqr: bool  # a VietQR can pay into this bank (VietQR's transferSupported)
 
 
 @lru_cache(maxsize=1)

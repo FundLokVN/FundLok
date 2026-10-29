@@ -24,28 +24,36 @@ async def register_payment_account(
     user_id: UUID,
     holder_role: str,
     holder_type: str,
-    bank_bin: str,
+    bank_bin: str | None,
     account_number: str,
     account_name: str,
     evidence_file_id: UUID | None,
     now: dt.datetime,
-    bank_name: str | None = None,  # ignored: the name always comes from the bank list (banks.py)
+    bank_name: str | None = None,  # used only when bank_bin is None; for a listed bank it comes from banks.py
 ) -> PaymentAccount:
+    """`bank_bin` None means a bank outside the NAPAS list: the account is saved under `bank_name` as typed."""
     if holder_role not in ("SME", "INVESTOR") or holder_type not in ("INDIVIDUAL", "ENTITY"):
         raise bad_request("Invalid account holder")
-    if not (bank_bin.isdigit() and len(bank_bin) == 6):
+    if bank_bin is not None and not (bank_bin.isdigit() and len(bank_bin) == 6):
         raise bad_request("Invalid bank code")
     if not account_number.isalnum() or not (4 <= len(account_number) <= 32):
         raise bad_request("Invalid account number")
     if not account_name.strip():
         raise bad_request("Account name is required")
-    bank = require_bank(bank_bin)
+    if bank_bin is None:
+        typed_name = " ".join((bank_name or "").split())
+        if not typed_name or len(typed_name) > 100:
+            raise bad_request("Bank name is required", "BANK_NAME_REQUIRED")
+        resolved_name, bank_code = typed_name, None
+    else:
+        bank = require_bank(bank_bin)
+        resolved_name, bank_code = bank.short_name, bank.code
     account = PaymentAccount(
         user_id=user_id,
         holder_role=holder_role,
         holder_type=holder_type,
         bank_bin=bank_bin,
-        bank_name=bank.short_name,
+        bank_name=resolved_name,
         account_number=account_number,
         account_name=account_name,
         evidence_file_id=evidence_file_id,
@@ -66,7 +74,7 @@ async def register_payment_account(
         now=now,
         actor_id=user_id,
         actor_role=holder_role,
-        payload={"bank_bin": bank_bin, "bank_code": bank.code, "evidence_file_id": str(evidence_file_id) if evidence_file_id else None},
+        payload={"bank_bin": bank_bin, "bank_code": bank_code, "evidence_file_id": str(evidence_file_id) if evidence_file_id else None},
     )
     return account
 
@@ -118,6 +126,9 @@ async def get_usable_account(db: AsyncSession, *, account_id: UUID, user_id: UUI
         raise not_found("Payment account not found")
     if account.holder_role != holder_role or account.status != "APPROVED":
         raise conflict("ACCOUNT_NOT_APPROVED", "The payment account is not approved")
+    if account.bank_bin is None:
+        # A bank outside the NAPAS list: no VietQR can pay into it, so it cannot fund or receive a tranche.
+        raise conflict("ACCOUNT_NOT_NAPAS", "This account's bank cannot be paid by VietQR")
     return account
 
 

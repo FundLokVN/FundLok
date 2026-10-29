@@ -1,7 +1,7 @@
 import re
 
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Literal, Optional
 from app.auth.password_policy import check_password_strength
 from app.auth.schemas import PHONE_NUMBER_PATTERN
 from app.users.models import Role
@@ -157,3 +157,56 @@ class SecurityPreferencesOut(BaseModel):
 
 class SecurityPreferencesUpdate(BaseModel):
     signin_alerts_enabled: bool
+
+
+# ── Payment accounts (HANDOFF-04 Epic 0) ─────────────────────────────────────
+# Requests only: the response models are app.direct_transfer.schemas.BankOut and
+# PaymentAccountOut, which are the contract in HANDOFF-04-phat-tickets.md.
+
+
+class PaymentAccountCreate(BaseModel):
+    """A bank from the list (`bank_bin`) or one outside it (`other_bank_name`, typed by the user): exactly one."""
+
+    holder_type: Literal["INDIVIDUAL", "ENTITY"]
+    bank_bin: Optional[str] = Field(default=None, min_length=6, max_length=6)
+    other_bank_name: Optional[str] = Field(default=None, max_length=100)
+    account_number: str = Field(min_length=1, max_length=64)
+    account_name: str = Field(min_length=1, max_length=128)
+
+    @field_validator("account_number")
+    @classmethod
+    def _drop_spaces(cls, value: str) -> str:
+        # Bank apps print numbers in groups ("1903 6789 012"); the service rejects
+        # anything that is not letters and digits, so take the spaces out here.
+        return re.sub(r"\s+", "", value)
+
+    @field_validator("account_name")
+    @classmethod
+    def _tidy_name(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @field_validator("other_bank_name")
+    @classmethod
+    def _tidy_bank_name(cls, value: Optional[str]) -> Optional[str]:
+        return " ".join(value.split()) or None if value is not None else None
+
+    @model_validator(mode="after")
+    def _one_bank(self) -> "PaymentAccountCreate":
+        if (self.bank_bin is None) == (self.other_bank_name is None):
+            raise ValueError("give either bank_bin or other_bank_name")
+        return self
+
+
+class VietQrOut(BaseModel):
+    payload: str
+
+
+class VietQrParseRequest(BaseModel):
+    payload: str = Field(min_length=1, max_length=512)
+
+
+class VietQrParseOut(BaseModel):
+    bank_bin: str
+    bank_name: str
+    account_number: str
+    account_name: Optional[str] = None
