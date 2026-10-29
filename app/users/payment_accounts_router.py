@@ -3,7 +3,8 @@
 The contract is docs/handoffs/HANDOFF-04-phat-tickets.md section 0, minus the proof upload: accounts
 are saved without a bank statement (Phat's call; #72 had staff approve from one). The rules live in
 Edward's app/direct_transfer services; this router adds auth, auditing and the HTTP error mapping.
-Accounts start PENDING and only staff can approve them.
+There is no staff review either: an account is APPROVED as soon as it is saved (approved_by stays NULL, so it
+is clear no person checked it), which is what lets Edward's funding code use it.
 """
 import datetime as dt
 from uuid import UUID
@@ -61,6 +62,7 @@ async def create_payment_account(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(authorized),
 ):
+    now = dt.datetime.now(dt.timezone.utc)
     try:
         account = await register_payment_account(
             db,
@@ -72,10 +74,14 @@ async def create_payment_account(
             account_number=body.account_number,
             account_name=body.account_name,
             evidence_file_id=None,
-            now=dt.datetime.now(dt.timezone.utc),
+            now=now,
         )
     except DirectTransferError as exc:
         await _raise_mapped(db, exc)
+    # No review step (Phat's call): the account is usable at once. approved_by stays NULL, which is what
+    # tells an auto-approved account apart from one a member of staff decided.
+    account.status = "APPROVED"
+    account.approved_at = now
     append_audit(
         db,
         entity_type="PAYMENT_ACCOUNT",
