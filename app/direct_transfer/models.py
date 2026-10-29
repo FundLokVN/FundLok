@@ -57,7 +57,9 @@ class PaymentAccount(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     holder_role = Column(Text, nullable=False)
     holder_type = Column(Text, nullable=False)
-    bank_bin = Column(Text, nullable=False)
+    # NULL for a bank outside the NAPAS list: bank_name is then the name the user typed, and no VietQR or
+    # direct transfer can use the account (get_usable_account refuses it).
+    bank_bin = Column(Text, nullable=True)
     bank_name = Column(Text, nullable=False)
     account_number = Column(Text, nullable=False)
     account_name = Column(Text, nullable=False)
@@ -74,6 +76,11 @@ class PaymentAccount(Base):
         CheckConstraint("holder_type IN ('INDIVIDUAL','ENTITY')", name="ck_payment_accounts_holder_type"),
         CheckConstraint("bank_bin ~ '^[0-9]{6}$'", name="ck_payment_accounts_bin"),
         CheckConstraint("status IN ('PENDING','APPROVED','REJECTED')", name="ck_payment_accounts_status"),
+        # The constraint above never matches a NULL bin, so banks outside the list dedupe on the typed name.
+        Index(
+            "uq_payment_accounts_user_other_bank_number", "user_id", "bank_name", "account_number",
+            unique=True, postgresql_where=text("bank_bin IS NULL"),
+        ),
     )
 
 

@@ -112,6 +112,38 @@ async def test_save_account_rejects_duplicate(make_user, client):
     assert resp.headers["X-Error-Code"] == "ACCOUNT_EXISTS"
 
 
+async def test_save_account_at_a_bank_outside_the_list(make_user, client):
+    investor = await make_user(role="INVESTOR")
+    resp = await _save(client, investor, bank_bin=None, other_bank_name="  Quỹ tín dụng nhân dân   Phú Thọ ")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["bank_bin"] is None
+    assert body["bank_name"] == "Quỹ tín dụng nhân dân Phú Thọ"
+    assert body["status"] == "PENDING"
+
+    qr = await client.get(f"/payment-accounts/{body['id']}/vietqr", headers=investor["headers"])
+    assert qr.status_code == 400
+    assert qr.headers["X-Error-Code"] == "QR_UNSUPPORTED"
+
+    again = await _save(client, investor, bank_bin=None, other_bank_name="Quỹ tín dụng nhân dân Phú Thọ")
+    assert again.status_code == 409
+    assert again.headers["X-Error-Code"] == "ACCOUNT_EXISTS"
+
+
+@pytest.mark.parametrize(
+    "bank",
+    [
+        {"bank_bin": TCB, "other_bank_name": "Some Bank"},  # both
+        {"bank_bin": None, "other_bank_name": None},  # neither
+        {"bank_bin": None, "other_bank_name": "   "},  # a blank name is no name
+    ],
+)
+async def test_save_account_needs_exactly_one_bank(make_user, client, bank):
+    investor = await make_user(role="INVESTOR")
+    resp = await _save(client, investor, **bank)
+    assert resp.status_code == 422, resp.text
+
+
 async def test_list_returns_only_own_accounts(make_user, client):
     investor = await make_user(role="INVESTOR")
     other = await make_user(role="SME")

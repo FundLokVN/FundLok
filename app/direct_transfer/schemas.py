@@ -70,7 +70,7 @@ class PaymentAccountOut(_Out):
     id: UUID
     holder_role: Literal["SME", "INVESTOR"]
     holder_type: Literal["INDIVIDUAL", "ENTITY"]
-    bank_bin: str
+    bank_bin: str | None  # None: a bank outside the list, named by the user in bank_name
     bank_name: str
     account_number: str
     account_name: str

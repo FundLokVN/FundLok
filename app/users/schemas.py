@@ -1,6 +1,6 @@
 import re
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Literal, Optional
 from app.auth.password_policy import check_password_strength
 from app.auth.schemas import PHONE_NUMBER_PATTERN
@@ -165,8 +165,11 @@ class SecurityPreferencesUpdate(BaseModel):
 
 
 class PaymentAccountCreate(BaseModel):
+    """A bank from the list (`bank_bin`) or one outside it (`other_bank_name`, typed by the user): exactly one."""
+
     holder_type: Literal["INDIVIDUAL", "ENTITY"]
-    bank_bin: str = Field(min_length=6, max_length=6)
+    bank_bin: Optional[str] = Field(default=None, min_length=6, max_length=6)
+    other_bank_name: Optional[str] = Field(default=None, max_length=100)
     account_number: str = Field(min_length=1, max_length=64)
     account_name: str = Field(min_length=1, max_length=128)
 
@@ -181,6 +184,17 @@ class PaymentAccountCreate(BaseModel):
     @classmethod
     def _tidy_name(cls, value: str) -> str:
         return " ".join(value.split())
+
+    @field_validator("other_bank_name")
+    @classmethod
+    def _tidy_bank_name(cls, value: Optional[str]) -> Optional[str]:
+        return " ".join(value.split()) or None if value is not None else None
+
+    @model_validator(mode="after")
+    def _one_bank(self) -> "PaymentAccountCreate":
+        if (self.bank_bin is None) == (self.other_bank_name is None):
+            raise ValueError("give either bank_bin or other_bank_name")
+        return self
 
 
 class VietQrOut(BaseModel):

@@ -84,3 +84,28 @@ def test_every_listed_bank_is_included_and_flagged_for_vietqr():
     assert get_bank("970436").vietqr is True  # Vietcombank
     assert get_bank("977777") is None  # MAFC: a finance company, not a bank account
     assert any(not b.vietqr for b in list_banks())
+
+
+async def test_bank_outside_the_list_saves_under_its_typed_name_but_is_never_usable(world):
+    from app.direct_transfer.accounts import decide_payment_account, get_usable_account
+
+    user = (await make_investor(world)).user
+    with pytest.raises(DirectTransferError) as missing:
+        await register_payment_account(
+            world.db, user_id=user.id, holder_role="INVESTOR", holder_type="INDIVIDUAL", bank_bin=None,
+            account_number="555000111", account_name="LE VAN C", evidence_file_id=None, now=NOW, bank_name="   ",
+        )
+    assert missing.value.code == "BANK_NAME_REQUIRED"
+
+    account = await register_payment_account(
+        world.db, user_id=user.id, holder_role="INVESTOR", holder_type="INDIVIDUAL", bank_bin=None,
+        account_number="555000111", account_name="LE VAN C", evidence_file_id=None, now=NOW,
+        bank_name="  Quỹ tín dụng   nhân dân Phú Thọ ",
+    )
+    assert account.bank_bin is None and account.bank_name == "Quỹ tín dụng nhân dân Phú Thọ"
+
+    # Even once approved it cannot fund or receive a tranche: no VietQR can pay into it.
+    await decide_payment_account(world.db, account_id=account.id, decision="APPROVED", reason="checked", staff_id=user.id, now=NOW)
+    with pytest.raises(DirectTransferError) as refused:
+        await get_usable_account(world.db, account_id=account.id, user_id=user.id, holder_role="INVESTOR")
+    assert refused.value.code == "ACCOUNT_NOT_NAPAS"

@@ -68,6 +68,7 @@ async def create_payment_account(
             holder_role=current_user.role,
             holder_type=body.holder_type,
             bank_bin=body.bank_bin,
+            bank_name=body.other_bank_name,
             account_number=body.account_number,
             account_name=body.account_name,
             evidence_file_id=None,
