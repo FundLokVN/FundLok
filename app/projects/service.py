@@ -121,8 +121,8 @@ async def user_owns_project(db: AsyncSession, user_id: UUID, project_id: UUID) -
     return result.scalar_one_or_none() is not None
 
 
-# A saved account counts until staff reject it. There is no approval queue yet (HANDOFF-04 Epic 3.1);
-# once there is, this becomes ("APPROVED",) so only checked accounts make a project visible.
+# Saved accounts are approved on save (no staff review), so APPROVED is what a live account looks like.
+# PENDING is kept for any account a future review flow holds back; REJECTED never counts.
 PAYMENT_ACCOUNT_LISTABLE_STATUSES = ("PENDING", "APPROVED")
 
 
