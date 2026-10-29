@@ -39,3 +39,18 @@ from app.notifications.models import Notification  # noqa: F401
 from app.rates.models import InvestorRateInquiry, RateInquiry  # noqa: F401
 from app.uploads.models import CicSummary, EInvoiceSummary, TaxFilingSummary  # noqa: F401
 from app.admin.internal_email.models import EmailSettings, InternalEmail  # noqa: F401
+from app.direct_transfer.models import (  # noqa: F401
+    CicEvent,
+    Dispute,
+    DisputeEvidence,
+    EvidenceFile,
+    EvidenceLog,
+    FeeInvoice,
+    FundingWindow,
+    InvestorFeeAccrual,
+    PaymentAccount,
+    RepaymentDay,
+    StandingOffer,
+    Tranche,
+    Transfer,
+)
