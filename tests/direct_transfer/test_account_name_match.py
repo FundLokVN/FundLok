@@ -26,10 +26,10 @@ from app.gverify.models import GVerifyKybVerification
 from .helpers import T0, make_user
 
 
-async def _register(db, user, *, role, name, number="900100200300", lookup=None):
+async def _register(db, user, *, role, name, number="900100200300", lookup=None, now=T0):
     return await register_payment_account(
         db, user_id=user.id, holder_role=role, holder_type="ENTITY" if role == "SME" else "INDIVIDUAL",
-        bank_bin="970407", account_number=number, account_name=name, evidence_file_id=None, now=T0, lookup=lookup,
+        bank_bin="970407", account_number=number, account_name=name, evidence_file_id=None, now=now, lookup=lookup,
     )
 
 
@@ -196,7 +196,8 @@ async def test_queue_and_list_carry_the_expected_name_and_the_hint(world):
     sme = await make_user(world.db, role="SME", full_name="Owner")
     await _kyb(world.db, sme)
     await _register(world.db, sme, role="SME", name="CONG TY TNHH ABC", number="111122223333")
-    await _register(world.db, sme, role="SME", name="OTHER NAME", number="444455556666")
+    # A later time: the list is ordered by created_at, so equal timestamps would tie on a random id.
+    await _register(world.db, sme, role="SME", name="OTHER NAME", number="444455556666", now=T0 + dt.timedelta(minutes=1))
     listed = await list_payment_accounts(world.db, user_id=sme.id)
     assert [(a.status, a.name_match) for a in listed] == [("PENDING", True), ("PENDING", False)]
     queue = await admin.pending_payment_accounts(world.db)
