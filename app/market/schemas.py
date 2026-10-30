@@ -42,3 +42,15 @@ class OrderOut(BaseModel):
     status: str
 
     model_config = {"from_attributes": True}
+
+class ReservationCreate(BaseModel):
+    """An investor's ticket on a funding window: the amount, and their agreement to the investing terms."""
+
+    # Integer VND (CLAUDE.md). The bounds are the window's (minimum ticket, capacity left): reserve_ticket checks them.
+    amount_vnd: int = Field(gt=0)
+    # The risk disclosure and the investing terms are one agreement in the UI; both must be accepted.
+    ack_risk_disclosure: bool = False
+    # funding.INVESTOR_TERMS_VERSION of the text the investor read (409 TERMS_OUTDATED otherwise).
+    terms_version: str = Field(min_length=1, max_length=40)
+    # The investor's account the SME repays to; their latest approved one when omitted.
+    payment_account_id: UUID | None = None

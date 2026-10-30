@@ -77,10 +77,11 @@ from app.notifications.service import create_notification
 from app.projects.service import activate_project_if_approved
 from app.banking.models import LinkedAccount
 from app.direct_transfer.accounts import list_payment_accounts
-from app.direct_transfer.schemas import PaymentAccountOut
+from app.direct_transfer.schemas import FundingWindowOut, PaymentAccountOut
 from app.direct_transfer.accounts import decide_payment_account
 from app.direct_transfer.errors import DirectTransferError
-from app.direct_transfer.models import PaymentAccount
+from app.direct_transfer.models import FundingWindow, PaymentAccount
+from app.direct_transfer.windows import get_window_progress
 from app.users.models import (
     USER_STATUS_ACTIVE,
     RefreshToken,
@@ -506,6 +507,45 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
         applications=[_row(row) for row in rows],
         kyb=kyb,
         owner=await _project_owner(db, project_id),
+        funding_window=await _latest_funding_window(db, project_id),
+    )
+
+
+async def _latest_funding_window(db: AsyncSession, project_id: UUID) -> FundingWindowOut | None:
+    window = (
+        await db.execute(
+            select(FundingWindow)
+            .where(FundingWindow.project_id == project_id)
+            .order_by(FundingWindow.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if window is None:
+        return None
+    progress = await get_window_progress(db, listing_id=window.listing_id, now=datetime.now(timezone.utc))
+    return FundingWindowOut.model_validate(progress)
+
+
+async def open_project_for_funding(
+    db: AsyncSession, project_id: UUID, *, actor: User, ip_address: str | None
+) -> FundingWindowOut:
+    """Open a live project for investment by hand: for one that went live before its SME's bank account was
+    approved on this path, or that could not open then. Returns the live window when it is already open; the
+    error says why it cannot open otherwise (the audit row records who opened it)."""
+    from app.market.funding import publish_project_for_funding
+
+    now = datetime.now(timezone.utc)
+    try:
+        window = await publish_project_for_funding(
+            db, project_id=project_id, now=now, actor_id=actor.id, trigger="ADMIN", ip_address=ip_address
+        )
+    except DirectTransferError as exc:
+        raise HTTPException(
+            status_code=exc.status_code, detail=exc.detail, headers={"X-Error-Code": exc.code}
+        ) from exc
+    await db.commit()
+    return FundingWindowOut.model_validate(
+        await get_window_progress(db, listing_id=window.listing_id, now=now)
     )
 
 
@@ -1530,6 +1570,7 @@ async def decide_payment_account_review(
     if account.user_id == actor.id:
         raise HTTPException(status_code=403, detail="You cannot review your own bank account")
     before = {"status": account.status}
+    now = datetime.now(timezone.utc)
     try:
         account = await decide_payment_account(
             db,
@@ -1538,7 +1579,7 @@ async def decide_payment_account_review(
             # decide_payment_account needs a reason for both outcomes; an approval without a note says so.
             reason=note or "Approved",
             staff_id=actor.id,
-            now=datetime.now(timezone.utc),
+            now=now,
         )
     except DirectTransferError as exc:
         raise HTTPException(
@@ -1561,5 +1602,13 @@ async def decide_payment_account_review(
         },
         ip_address=ip_address,
     )
+    if account.status == "APPROVED" and account.holder_role == "SME":
+        # The business can now be paid, so its live projects open for investment (best effort: the approval
+        # stands even when a project cannot open yet; the project panel says why).
+        from app.market.funding import publish_owner_projects
+
+        await publish_owner_projects(
+            db, user_id=account.user_id, now=now, actor_id=actor.id, trigger="PAYMENT_ACCOUNT_APPROVED"
+        )
     await db.commit()
     return (await _admin_payment_accounts(db, [account]))[0]

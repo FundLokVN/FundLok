@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
-from app.direct_transfer.schemas import PaymentAccountOut
+from app.direct_transfer.schemas import FundingWindowOut, PaymentAccountOut
 
 from app.gverify.normalize import normalize_identifier
 
@@ -575,6 +575,9 @@ class AdminProjectDetail(BaseModel):
     kyb: AdminKybVerificationOut | None
     # Null only for a project with no ownership row, which creation never makes.
     owner: AdminProjectOwnerOut | None = None
+    # The project's latest funding window (live or ended), or null if it never opened one. A live project with an
+    # approved SME bank account opens on its own; the panel offers to open it when that did not happen.
+    funding_window: FundingWindowOut | None = None
 
 
 class ActorOut(BaseModel):
