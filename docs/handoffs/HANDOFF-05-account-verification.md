@@ -38,7 +38,7 @@ PENDING on save · `GET /admin/payment-accounts` queue · `POST /admin/payment-a
 
 **T4. Notify the owner of the decision** (in-app, using the existing notification service): "Your bank account ending 9012 is verified" / "was rejected: <reason>". Staff need not email unless you add it.
 
-**T5. Existing data (decide with Edward, Q-028).** Accounts approved on save earlier have `approved_by` NULL and were never checked, for investors as well as SMEs. If any are real pilot accounts, a one-time migration should set them back to PENDING so staff verify them (this affects investors who have already ordered). If all are test data, nothing to do. Please tell us which it is.
+**T5. Existing data: CLOSED (D-032, Edward 2026-10-30).** The accounts approved on save earlier are test data, not real accounts, so nothing to migrate and nothing for you to do. One reminder for later: before any real user data exists, clear the test data or re-verify any account with `approved_by` NULL.
 
 **T6. Later (not now): rejected accounts.** Loc wants review/re-submission instead of opening a new account. Edward will spec it first (Q-030). It also needs the database rule that stops a rejected account number being saved again.
 

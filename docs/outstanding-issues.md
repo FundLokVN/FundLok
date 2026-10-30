@@ -341,15 +341,6 @@ A decision is blocking for a piece of work only if reversing it would force rewo
 **Owner.** `Loc` (ask CIC).
 **Provenance.** `Loc2.md`; HANDOFF-04 section 6.
 
-
-### Q-028 — Accounts approved on save before verification existed `PENDING-NONBLOCKING`
-**Context.** Until #76/#79, accounts were approved on save (`approved_by` NULL). Under D-031 an account is trusted only after staff checked the bank's holder name against the KYC/KYB name, for investors and SMEs. Any real account in that set was never checked.
-**Options.** A. Leave them. B. Move accounts with `approved_by IS NULL` back to PENDING (data migration) so staff verify them. C. Verify them first, then migrate only those that fail.
-**Default.** A, until Phat says whether any of them are real pilot accounts. If all are test data, nothing to do.
-**Blocks.** Nothing.
-**Owner.** `Phat` (what is in the shared database), `Edward` (decision).
-**Provenance.** `Edward`, 2026-10-29; widened to investors 2026-10-30.
-
 ### Q-029 — Which provider for bank account-holder name lookup (automating the staff check)? `PENDING-NONBLOCKING`
 **Context.** Loc wants the manual check automated. Several providers return the holder name for a bank and account number through the NAPAS account-name inquiry (the bank list marks which banks support it: `lookupSupported`). It returns a name only: no balances or transactions, so it is not the bank-data access ruled out in D-018. `app/direct_transfer/name_lookup.py` has the hook (`BankNameLookup`); today it is `NoLookup`.
 **Options.** A. A payment-QR provider with a lookup API (for example VietQR's). B. A bank-data aggregator (SePay, Casso) if one is chosen later. C. Stay manual until volume justifies it.
@@ -426,6 +417,7 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | D-029 | Edward accepted the remaining HANDOFF-04 section 2 defaults (I-6 to I-9, I-16, I-17, I-24, I-25), staff manual receipt entry, mock signer, and SME early close only at 50% or more confirmed. They are built behind config and tagged PROVISIONAL(Q-D3..Q-D16) until Lok or Legal confirm. | confirmed by Edward, 2026-10-28 (E5) |
 | D-030 | Recommended positions on burden of proof, dispute-window length and late disputes vs CIC are the working rules (timers only, configurable). | confirmed by Edward, 2026-10-28 (E6); Lok to align (Q-026, Q-027) |
 | D-031 | **Payment accounts are verified against the bank, for investors and SMEs alike.** Standard: FundLok name = KYC (investor) or KYB (SME) name = bank account holder name. Every saved account starts PENDING ("waiting verification"); nobody can invest or open a window until it is verified. The name the user types is only a hint (it is self-declared). Staff look up the holder name at the bank (today by typing the bank and account number into a bank app's transfer screen), record it, and approve or reject, with a written reason either way. An **investor** account is approved only if the bank's name equals the KYC name (otherwise reject: AML traceability, disputes and refunds must lead to the KYC-verified person). An **SME** difference (abbreviation, trade name) can be approved only with an explicit acceptance and the reason. A decision is final. Automation (a bank-name lookup returning the holder name) comes later (Q-029). Supersedes the earlier drafts of D-031 (approve on typed-name match) and Phat's #76 (no review). | confirmed by Edward and Loc, 2026-10-30, Slack. Loc: "the standard is FL name = KYC name = bank name" |
+| D-032 | Accounts approved on save before verification existed (`approved_by` NULL, investors and SMEs): **leave them.** They are test data, not real accounts, so no migration is needed. Resolves Q-028 (option A). Before any real user data exists, delete the test data or re-verify any remaining account with `approved_by IS NULL`. | confirmed by Edward, 2026-10-30, Slack |
 
 ---
 
@@ -438,3 +430,4 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | 2026-10-28 | Edward / Claude | HANDOFF-04 Phase A (P-0). Added D-014 to D-030 from Loc.md / Loc2.md and Edward decisions E1 to E6. Superseded Q-001, Q-002, Q-004, Q-006, Q-013, Q-014, Q-015, Q-016 (kept, marked). Added Q-017 to Q-027 for residual questions and the Q-D3 to Q-D16 provisional-rule table. D-023 supersedes S6. |
 | 2026-10-29 | Edward / Claude | Added D-031 (first draft), Q-D18 and Q-028. |
 | 2026-10-30 | Edward / Claude | D-031 replaced after Loc's input: payment accounts are verified against the bank's holder name for investors and SMEs. Q-D18 and Q-028 updated; added Q-029 (lookup provider) and Q-030 (review instead of a new account). |
+| 2026-10-30 | Edward / Claude | Q-028 resolved as D-032: existing accounts are test data, leave them. |
