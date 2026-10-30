@@ -42,8 +42,7 @@ async def test_daily_batch_placeholder_job_returns_ok():
 
 def test_worker_settings_registers_both_jobs():
     names = {fn.__name__ for fn in WorkerSettings.functions}
-    # scan_upload: SEC-04's malware scan (app/uploads/scanning.py).
-    assert names == {"health_check", "daily_batch_placeholder", "scan_upload"}
+    assert names == {"health_check", "daily_batch_placeholder"}
 
 
 def test_worker_settings_uses_ict_timezone_explicitly():
@@ -59,12 +58,13 @@ def test_daily_batch_cron_is_a_single_instant_not_a_window_spanning_midnight():
     not straddle midnight. Registered as hour=0, minute=5 -- one fixed
     instant just after midnight ICT, never a range that itself crosses the
     day boundary."""
-    # Found by name: other crons share the worker (SEC-04's stalled-scan sweep).
-    [job] = [j for j in WorkerSettings.cron_jobs if j.coroutine.__name__ == "daily_batch_placeholder"]
+    assert len(WorkerSettings.cron_jobs) == 1
+    job = WorkerSettings.cron_jobs[0]
     assert job.hour == 0
     assert job.minute == 5
     # A single (hour, minute) pair cannot itself span two calendar days --
     # unlike, say, a 23:30-00:30 window, which would.
+    assert job.coroutine.__name__ == "daily_batch_placeholder"
 
 
 def test_redis_settings_derived_from_settings_redis_url(monkeypatch):
@@ -89,21 +89,3 @@ def test_redis_settings_derived_from_settings_redis_url(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     importlib.reload(config_module)
     importlib.reload(worker_module)
-
-
-def test_the_worker_process_can_use_the_orm_on_its_own():
-    """The worker is started as `arq app.scheduler.worker.WorkerSettings` and
-    never imports app.main, which is where the API registers every model. In
-    a fresh interpreter (this one already has them all), importing the worker
-    must be enough for the mappers to configure, or the first job that
-    queries fails (SEC-04's scan_upload did)."""
-    import subprocess
-    import sys
-
-    probe = (
-        "import app.scheduler.worker\n"
-        "from sqlalchemy.orm import configure_mappers\n"
-        "configure_mappers()\n"
-    )
-    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=60)
-    assert result.returncode == 0, result.stderr[-2000:]

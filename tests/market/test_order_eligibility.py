@@ -134,3 +134,28 @@ async def test_the_same_investor_still_gets_a_replay(open_listing, make_user, pl
 
     assert again.json()["id"] == first.json()["id"]
     assert len(await _orders(db_session)) == 1
+
+
+async def test_an_investor_without_a_bank_account_cannot_order(
+    open_listing, make_user, place_order, make_eligible_investor, client, db_session
+):
+    # Repayments go back to the investor's own bank account, so one must be saved first.
+    setup = await open_listing()
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"), bank_account=False)
+
+    resp = await place_order(investor, setup["listing"]["id"], eligible=False)
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json() == {"detail": "Add a bank account before investing"}
+    assert resp.headers["X-Error-Code"] == "BANK_ACCOUNT_REQUIRED"
+    assert await _orders(db_session) == []
+
+    saved = await client.post(
+        "/payment-accounts",
+        json={"holder_type": "INDIVIDUAL", "bank_bin": "970407", "account_number": "19036789012", "account_name": "TEST"},
+        headers={"Authorization": investor["headers"]["Authorization"]},
+    )
+    assert saved.status_code == 201, saved.text
+
+    resp = await place_order(investor, setup["listing"]["id"], eligible=False)
+    assert resp.status_code == 201, resp.text

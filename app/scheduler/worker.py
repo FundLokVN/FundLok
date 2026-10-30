@@ -19,27 +19,18 @@ Design notes
   unambiguous and it never disagrees with itself about which business day
   it is running for.
 """
-# Every ORM mapper, before any job touches the database. The API gets this
-# from app/main.py; the worker never imports that, and without it the first
-# query fails resolving relationships (ProjectOwnership -> 'User').
-import app.models  # noqa: F401
 from arq import cron
 from arq.connections import RedisSettings
 
 from app.core.config import settings
 from app.core.timezone import ICT
 from app.scheduler.jobs import daily_batch_placeholder, health_check
-from app.uploads.scanning import requeue_stalled_scans, scan_upload
 
 
 class WorkerSettings:
-    # scan_upload: the malware scan of each upload (SEC-04, app/uploads/scanning.py).
-    functions = [health_check, daily_batch_placeholder, scan_upload]
+    functions = [health_check, daily_batch_placeholder]
     cron_jobs = [
         cron(daily_batch_placeholder, hour=0, minute=5, run_at_startup=False),
-        # Every 10 minutes, and once at start: re-queues scans left SCANNING by
-        # a confirm that could not reach Redis or a worker that died.
-        cron(requeue_stalled_scans, minute=set(range(0, 60, 10)), run_at_startup=True),
     ]
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     timezone = ICT

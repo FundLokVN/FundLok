@@ -3,13 +3,15 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.direct_transfer.models import PaymentAccount
 from app.gverify.models import STATUS_APPROVED as KYC_APPROVED
 from app.gverify.service import latest_for_user
 from app.lending.kyc import project_has_verified_kyc
 from app.lending.models import Contract, Holding, Listing, LoanApplication, Order
+from app.projects.service import PAYMENT_ACCOUNT_LISTABLE_STATUSES
 from app.users.models import User
 
 
@@ -97,6 +99,24 @@ async def _require_eligible_investor(db: AsyncSession, investor_id: UUID) -> Non
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Complete identity verification before investing",
+        )
+    # Money moves between the investor's and the SME's own bank accounts (ADR-009), and repayments come back
+    # to the investor's. With no account saved there is nowhere for them to come back to, so no order.
+    has_account = (
+        await db.execute(
+            select(
+                exists().where(
+                    PaymentAccount.user_id == investor_id,
+                    PaymentAccount.status.in_(PAYMENT_ACCOUNT_LISTABLE_STATUSES),
+                )
+            )
+        )
+    ).scalar()
+    if not has_account:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Add a bank account before investing",
+            headers={"X-Error-Code": "BANK_ACCOUNT_REQUIRED"},
         )
 
 
