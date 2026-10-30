@@ -14,11 +14,16 @@ section instead of re-reading whole files into context every session.
 - **Vector store:** [Pinecone](https://www.pinecone.io) serverless (free
   tier). Stores each chunk's vector plus its source file, heading, and text
   as metadata, so results are readable without a second lookup.
-- **Retrieval is semantic, not keyword-based** — a query like "how do lenders
-  get paid back" can match a section that only says "pro-rata distributions",
-  with zero literal word overlap. (An earlier version of this server used
-  BM25 keyword search; this replaces it. See ADR-006 in `docs/adr/` for why
-  and when that tradeoff was made.)
+- **Retrieval is hybrid (ADR-010).** Every search runs the semantic engine
+  (embeddings + Pinecone: "how do lenders get paid back" finds
+  "pro-rata distributions") and a BM25 keyword engine (`lexical.py`, in
+  memory: finds exact identifiers such as `UNDER_REVIEW`, `Q-023` or a
+  migration hash), then merges the two rankings with Reciprocal Rank Fusion
+  (`hybrid.py`). Identifier-style queries weight the keyword engine more
+  heavily. If Pinecone is unreachable, keyword results are still returned.
+  `SEARCH_MODE=semantic|keyword` (env) turns one half off for comparison.
+  Keyword results always reflect the docs on disk; semantic results reflect
+  the last reindex.
 - **Two source formats:** `.md` files are chunked on headings; `.pdf` files
   are chunked per-page into overlapping character windows sized for the
   embedding model's context limit (see ADR-007). External source documents
@@ -47,8 +52,12 @@ python3 build_index.py
 ```
 
 Re-run `build_index.py` any time docs/specs/ADRs change materially. It's
-idempotent — chunk IDs are deterministic, so re-running updates existing
-vectors instead of duplicating them.
+idempotent — chunk IDs are deterministic (`<source file>::<n>`), so
+re-running updates existing vectors in place, and it deletes vectors left
+over from removed or renamed documents. File names under `docs/` must be
+ASCII-only (Pinecone vector IDs reject anything else).
+
+Tests (offline, no Pinecone or model needed): `tests/fl_knowledge/`.
 
 ## Register with Claude Code
 

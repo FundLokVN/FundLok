@@ -22,7 +22,7 @@ Requires PINECONE_API_KEY to be set -- see .env.example in this folder.
 import os
 import sys
 
-from chunking import build_corpus, chunk_id
+from chunking import assign_ids, build_corpus
 from dotenv import load_dotenv
 from pinecone import Pinecone, ServerlessSpec
 from sentence_transformers import SentenceTransformer
@@ -65,6 +65,22 @@ def ensure_index(pc: Pinecone):
     return pc.Index(INDEX_NAME)
 
 
+def delete_stale_vectors(index, current_ids: set[str]) -> int:
+    """Delete every vector whose ID is not in this run's corpus (removed or
+    renamed docs, and the leftovers of the old corpus-wide ID scheme). Runs
+    after the upsert, so a failure part-way leaves extra vectors, never a
+    missing index."""
+    stale: list[str] = []
+    for id_page in index.list():
+        # Older Pinecone SDKs yield bare ID strings, newer ones ListItem objects.
+        page_ids = [getattr(item, "id", item) for item in id_page]
+        stale.extend(i for i in page_ids if i not in current_ids)
+    for start in range(0, len(stale), 1000):
+        index.delete(ids=stale[start:start + 1000])
+    print(f"[build_index] Deleted {len(stale)} stale vectors.")
+    return len(stale)
+
+
 def main():
     chunks = build_corpus()
     if not chunks:
@@ -83,9 +99,9 @@ def main():
     embeddings = model.encode(texts, show_progress_bar=True, normalize_embeddings=True)
 
     vectors = []
-    for i, (chunk, vec) in enumerate(zip(chunks, embeddings)):
+    for chunk_vector_id, chunk, vec in zip(assign_ids(chunks), chunks, embeddings):
         vectors.append({
-            "id": chunk_id(chunk, i),
+            "id": chunk_vector_id,
             "values": vec.tolist(),
             "metadata": {
                 "source": chunk.source,
@@ -98,6 +114,8 @@ def main():
         batch = vectors[start:start + BATCH_SIZE]
         index.upsert(vectors=batch)
         print(f"[build_index] Upserted {start + len(batch)}/{len(vectors)}")
+
+    delete_stale_vectors(index, {v["id"] for v in vectors})
 
     print(f"[build_index] Done. Index '{INDEX_NAME}' now has {len(vectors)} vectors "
           f"(stats: {index.describe_index_stats()}).")
