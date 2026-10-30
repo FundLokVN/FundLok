@@ -54,12 +54,18 @@ payment_accounts
 ├── created_at TIMESTAMPTZ
 UNIQUE (user_id, bank_bin, account_number)
 ```
-This is **not** `linked_accounts` (the mock banking table). Who approves an account (D-031, PROVISIONAL(Q-D18); Edward 2026-10-29, Loc's agreement pending):
+This is **not** `linked_accounts` (the mock banking table). Who verifies an account (D-031, PROVISIONAL(Q-D18); Edward and Loc 2026-10-30). The standard is **FundLok name = KYC (investor) or KYB (SME) name = bank account holder name**, for investors and SMEs alike. Money disbursed to an SME, refunds and disputes must lead to the verified party (AML).
 
-- **INVESTOR**: `APPROVED` on save (`approved_by` NULL). The investor is the payer, and a receipt must show their KYC name as payer, so a wrong account cannot fund anything unnoticed. If the account name does not match the KYC name the account is still approved, but flagged: `name_match` is `false` in the response, and a `PAYMENT_ACCOUNT_NAME_MISMATCH` event is logged. The flag never blocks.
-- **SME**: `APPROVED` on save only when the account name matches the **verified KYB business name** (newest eKYB attempt, status `APPROVED`; the project's own `legal_name` is self-declared and is not used). Otherwise, or when the SME has no approved KYB, it saves `PENDING` and waits for staff (`decide_payment_account`, from a bank statement or bank confirmation). The SME's account is where investors' money goes, and nothing else checks that it belongs to the SME.
-- Names are compared with the receipt check's normalization (case, accents, punctuation and spacing ignored, `normalize_name`). Anything unusual (abbreviations, "CTY" for "CONG TY") is a mismatch and goes to staff.
-- `PaymentAccountOut` carries `name_match` (`true`, `false`, or `null` when there is no verified name to compare with) and `expected_name`. Both are computed on read, not stored; the decision at save time is in the evidence log.
+- Every saved account starts `PENDING` ("waiting verification"). Nobody can reserve a ticket or open a window with it until it is `APPROVED`.
+- The account name the user typed is **self-declared and proves nothing**. It only produces a hint: `name_match` (does the typed name equal the KYC/KYB name) and `expected_name`, and a `PAYMENT_ACCOUNT_NAME_MISMATCH` log entry when it differs.
+- Staff verify it: they look up the holder name at the bank (today: type the bank and account number into a bank app's transfer screen, which shows the holder without moving money), compare it with the KYC/KYB name, and approve or reject. A written reason is required **either way**. To approve, staff record `verified_holder_name`, the name exactly as the bank shows it.
+  - **INVESTOR**: `verified_holder_name` must equal the KYC name (`409 HOLDER_NAME_MISMATCH` otherwise; reject the account instead). With no KYC name on file: `409 KYC_NAME_MISSING`.
+  - **SME**: the same, but a difference (an abbreviation, a trade name) can be approved with `accept_difference: true` and a reason saying why. The SME's KYB name is the newest APPROVED eKYB attempt's business name; the project's own `legal_name` is self-declared and not used. With no approved KYB there is nothing to compare, so approval also needs `accept_difference`.
+- A decision is final (`409 ALREADY_DECIDED`). A rejected account number cannot be saved again for now (Q-030).
+- Everything is in the append-only evidence log: who decided, when, the reason, the holder name seen, the expected name, whether they matched, and whether a difference was accepted.
+- **Automatic verification (later, Q-029):** `name_lookup.BankNameLookup` returns the holder name from the bank. An account is auto-approved (`approved_by` NULL) only if the name the **bank** returns equals the KYC/KYB name. No provider is connected; the default `NoLookup` leaves every account to staff.
+- Names are compared with the receipt check's normalization (`normalize_name`: case, accents, punctuation and spacing ignored). Anything else, such as "CTY" for "CONG TY", is a difference.
+- `PaymentAccountOut` carries `name_match` (`true`, `false`, or `null` when there is no verified name) and `expected_name`. Both are computed on read, not stored; the staff queue carries them too.
 
 ### New table: `evidence_files`
 

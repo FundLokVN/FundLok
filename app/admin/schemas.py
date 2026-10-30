@@ -282,8 +282,13 @@ class AdminPaymentAccountOut(PaymentAccountOut):
 
 
 class AdminPaymentAccountDecisionRequest(AdminDecisionRequest):
-    """Approve or reject a saved bank account. A rejection needs a note (the
-    user sees it as the reason); an approval may have one."""
+    """Approve or reject a saved bank account. A note is required either way (D-031): the user sees it as the
+    reason for a rejection, and for an approval it records what was checked. To APPROVE, record the account
+    holder name exactly as the bank shows it (``verified_holder_name``): an investor's must equal their KYC name;
+    for an SME a difference needs ``accept_difference`` and a note saying why."""
+
+    verified_holder_name: str | None = Field(default=None, max_length=200)
+    accept_difference: bool = False
 
 
 class AdminUserFullDetail(AdminUserDetail):

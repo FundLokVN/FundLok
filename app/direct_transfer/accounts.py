@@ -1,13 +1,18 @@
 """Registered payment accounts (HANDOFF-04 I-15). Spec: transfer-and-evidence.md section 3.
 
-Who approves an account (Edward, 2026-10-29; Loc's agreement pending, PROVISIONAL(Q-D18)):
-- INVESTOR accounts are approved on save. The investor is the payer, and a tranche's receipt must show the
-  investor's KYC name as payer, so a wrong account cannot fund anything unnoticed. A name that does not match
-  is only FLAGGED (`name_match` False, a log event), never blocking.
-- SME accounts are approved on save only when the account name matches the SME's verified KYB business name.
-  A mismatch, or an SME with no approved KYB (no verified name to compare against), saves PENDING and waits
-  for staff (`decide_payment_account`). The SME's account is where investors' money goes, and nothing else
-  checks that it belongs to the SME.
+Who verifies an account (Edward and Loc, 2026-10-30; PROVISIONAL(Q-D18)). The standard is FundLok name = KYC/KYB
+name = BANK account holder name, for investors and SMEs alike:
+- Every saved account starts PENDING ("waiting verification"). The account name the user typed is self-declared,
+  so it never approves anything; `name_match` / `expected_name` are only a hint for staff.
+- Staff verify it: they look up the holder name at the bank, compare it with the KYC name (investor) or KYB
+  business name (SME), and approve or reject, with a written reason either way. When approving they record the
+  holder name they saw (`verified_holder_name`):
+    * INVESTOR: it must equal the KYC name, or the account cannot be approved (reject it). Money disbursed to
+      an investor, refunds and disputes must trace back to the KYC-verified person (AML).
+    * SME: a difference (an abbreviation, a trade name) can be accepted only with an explicit
+      `accept_difference` and the reason saying why.
+- A `BankNameLookup` (name_lookup.py) can later do the lookup automatically: an account is auto-approved only if
+  the name the BANK returns equals the verified name. No provider is connected yet.
 An auto-approved account has `approved_by` NULL; one a person decided carries their id.
 This is NOT the mock `linked_accounts` table.
 """
@@ -23,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.direct_transfer.banks import require_bank
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event
+from app.direct_transfer.name_lookup import BankNameLookup
 from app.direct_transfer.models import PaymentAccount
 
 
@@ -38,6 +44,7 @@ async def register_payment_account(
     evidence_file_id: UUID | None,
     now: dt.datetime,
     bank_name: str | None = None,  # used only when bank_bin is None; for a listed bank it comes from banks.py
+    lookup: BankNameLookup | None = None,  # None: no automatic verification, every account waits for staff
 ) -> PaymentAccount:
     """`bank_bin` None means a bank outside the NAPAS list: the account is saved under `bank_name` as typed."""
     if holder_role not in ("SME", "INVESTOR") or holder_type not in ("INDIVIDUAL", "ENTITY"):
@@ -69,8 +76,11 @@ async def register_payment_account(
         created_at=now,  # injected clock, so listing order is deterministic (server now() ties within a transaction)
     )
     expected = await expected_holder_name(db, user_id=user_id, holder_role=holder_role)
-    matched = names_match(account_name, expected)
-    auto_approved = holder_role == "INVESTOR" or matched is True
+    matched = names_match(account_name, expected)  # a hint for staff: the typed name is self-declared
+    bank_name_returned: str | None = None
+    if lookup is not None and bank_bin is not None:
+        bank_name_returned = await lookup.lookup(bank_bin=bank_bin, account_number=account_number)
+    auto_approved = names_match(bank_name_returned or "", expected) is True
     if auto_approved:
         account.status = "APPROVED"
         account.approved_at = now
@@ -95,10 +105,12 @@ async def register_payment_account(
             "evidence_file_id": str(evidence_file_id) if evidence_file_id else None,
             "name_match": matched,
             "auto_approved": auto_approved,
+            "verified_holder_name": bank_name_returned if auto_approved else None,
+            "verified_by": "BANK_LOOKUP" if auto_approved else None,
         },
     )
     if matched is False:
-        # The flag (Edward, 2026-10-29): visible to staff, never blocking for an investor.
+        # A hint for the staff reviewing it (the typed name differs from the KYC/KYB name).
         await log_event(
             db,
             entity_type="PAYMENT_ACCOUNT",
@@ -120,7 +132,11 @@ async def decide_payment_account(
     reason: str,
     staff_id: UUID,
     now: dt.datetime,
+    verified_holder_name: str | None = None,
+    accept_difference: bool = False,
 ) -> PaymentAccount:
+    """Staff decision on a PENDING account. A reason is required either way. To APPROVE, staff record the account
+    holder name they saw at the bank (`verified_holder_name`); see the module docstring for what must match."""
     if decision not in ("APPROVED", "REJECTED"):
         raise bad_request("Invalid decision")
     if not reason or not reason.strip():
@@ -130,6 +146,33 @@ async def decide_payment_account(
         raise not_found("Payment account not found")
     if account.status != "PENDING":
         raise conflict("ALREADY_DECIDED", "This account has already been decided")
+    payload: dict = {"decision": decision}
+    if decision == "APPROVED":
+        expected = await expected_holder_name(db, user_id=account.user_id, holder_role=account.holder_role)
+        if not (verified_holder_name or "").strip():
+            raise DirectTransferError(422, "Record the account holder name as the bank shows it", "HOLDER_NAME_REQUIRED")
+        same = names_match(verified_holder_name, expected)
+        if account.holder_role == "INVESTOR":
+            if same is None:
+                raise conflict("KYC_NAME_MISSING", "This investor has no verified KYC name to check the account against")
+            if same is False:
+                raise conflict(
+                    "HOLDER_NAME_MISMATCH",
+                    "The bank's holder name must equal the investor's KYC name. Reject this account instead",
+                )
+        elif same is not True and not accept_difference:
+            raise conflict(
+                "HOLDER_NAME_MISMATCH",
+                "The bank's holder name differs from the company's verified name (or there is none). "
+                "Approve only if you have confirmed the difference, with accept_difference and the reason",
+            )
+        payload.update(
+            verified_holder_name=verified_holder_name.strip(),
+            expected_name=expected,
+            holder_name_matches=same,
+            accept_difference=bool(accept_difference and same is not True),
+            verified_by="STAFF_LOOKUP",
+        )
     account.status = decision
     account.approved_by = staff_id
     account.approved_at = now
@@ -143,7 +186,7 @@ async def decide_payment_account(
         actor_id=staff_id,
         actor_role="ADMIN",
         reason=reason,
-        payload={"decision": decision},
+        payload=payload,
     )
     return account
 

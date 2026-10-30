@@ -184,7 +184,10 @@ async def test_payment_account_requires_staff_approval_before_use(world):
     with pytest.raises(DirectTransferError) as info2:
         await decide_payment_account(world.db, account_id=pending.id, decision="APPROVED", reason=" ", staff_id=world.admin.id, now=T0)
     assert info2.value.status_code == 422
-    await decide_payment_account(world.db, account_id=pending.id, decision="APPROVED", reason="statement checked", staff_id=world.admin.id, now=T0)
+    await decide_payment_account(
+        world.db, account_id=pending.id, decision="APPROVED", reason="statement checked", staff_id=world.admin.id, now=T0,
+        verified_holder_name=user.full_name, accept_difference=True,  # no approved KYB to compare with
+    )
     usable = await get_usable_account(world.db, account_id=pending.id, user_id=user.id, holder_role="SME")
     assert usable.status == "APPROVED" and usable.approved_by == world.admin.id
 

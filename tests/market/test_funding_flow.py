@@ -51,8 +51,12 @@ async def _save_sme_account(client, sme):
 
 
 async def _approve(client, admin, account_id):
+    # Staff record the holder name the bank shows (the SME has no approved KYB here, so the difference from a
+    # missing company name is accepted explicitly; D-031).
     resp = await client.post(
-        f"/admin/payment-accounts/{account_id}/decision", json={"decision": "APPROVED"}, headers=admin["headers"]
+        f"/admin/payment-accounts/{account_id}/decision",
+        json={"decision": "APPROVED", "note": "looked up at the bank", "verified_holder_name": "CONG TY ABC", "accept_difference": True},
+        headers=admin["headers"],
     )
     assert resp.status_code == 200, resp.text
     return resp.json()

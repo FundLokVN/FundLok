@@ -353,14 +353,17 @@ async def decide_payment_account(
     current_user: User = Depends(require_admin),
 ):
     """Approve or reject a saved bank account. Only an approved account lists an
-    SME's project or lets an investor invest. Rejecting needs a note, which the
-    user sees. The decision is final and lands in the audit log with the admin
-    who made it."""
+    SME's project or lets an investor invest. A note is required either way.
+    Approving also needs the holder name as the bank shows it (must equal the
+    KYC name for an investor). The decision is final and lands in the audit log
+    with the admin who made it."""
     return await service.decide_payment_account_review(
         db,
         account_id,
         decision=body.decision.value,
         note=body.note,
+        verified_holder_name=body.verified_holder_name,
+        accept_difference=body.accept_difference,
         actor=current_user,
         ip_address=request.client.host if request.client else None,
     )

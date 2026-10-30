@@ -76,7 +76,7 @@ from app.utils.jwt import create_password_reset_token
 from app.notifications.service import create_notification
 from app.projects.service import activate_project_if_approved
 from app.banking.models import LinkedAccount
-from app.direct_transfer.accounts import list_payment_accounts
+from app.direct_transfer.accounts import annotate_name_match, list_payment_accounts
 from app.direct_transfer.schemas import FundingWindowOut, PaymentAccountOut
 from app.direct_transfer.accounts import decide_payment_account
 from app.direct_transfer.errors import DirectTransferError
@@ -1517,6 +1517,7 @@ async def _admin_payment_accounts(db: AsyncSession, accounts: list) -> list[Admi
     """The admin view of each account: its owner and the member of staff who decided it, in two queries."""
     if not accounts:
         return []
+    await annotate_name_match(db, accounts)  # name_match / expected_name: the KYC/KYB name to check the bank's name against
     user_ids = {a.user_id for a in accounts} | {a.approved_by for a in accounts if a.approved_by}
     users = {
         u.id: u
@@ -1556,12 +1557,15 @@ async def decide_payment_account_review(
     note: str | None,
     actor: User,
     ip_address: str | None,
+    verified_holder_name: str | None = None,
+    accept_difference: bool = False,
 ) -> AdminPaymentAccountOut:
     note = (note or "").strip() or None
-    if decision == "REJECTED" and not note:
+    if not note:
+        # Required either way (D-031): a rejection's note is the user's reason, an approval's records what was checked.
         raise HTTPException(
             status_code=422,
-            detail="Give the reason for rejecting this bank account",
+            detail="Give the reason for this decision" + (" (what you checked)" if decision == "APPROVED" else ""),
             headers={"X-Error-Code": "REASON_REQUIRED"},
         )
     account = await db.get(PaymentAccount, account_id)
@@ -1576,10 +1580,11 @@ async def decide_payment_account_review(
             db,
             account_id=account_id,
             decision=decision,
-            # decide_payment_account needs a reason for both outcomes; an approval without a note says so.
-            reason=note or "Approved",
+            reason=note,
             staff_id=actor.id,
             now=now,
+            verified_holder_name=verified_holder_name,
+            accept_difference=accept_difference,
         )
     except DirectTransferError as exc:
         raise HTTPException(

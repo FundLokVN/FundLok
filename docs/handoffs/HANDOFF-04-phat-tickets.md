@@ -118,13 +118,8 @@ Static content per bank (Techcombank first): how to create a daily standing orde
 
 ## Epic 3 — Staff (admin)
 
-### 3.1 Payment-account review (staff, SME accounts only)
-Users save accounts through `POST /payment-accounts` (built, #75). An investor's account is approved on save; an **SME** account is approved on save only when its account name matches the verified KYB business name, otherwise it is `PENDING` until staff decide (D-031, PROVISIONAL(Q-D18)). The route must **not** set the status itself: `register_payment_account` decides it.
-
-Staff queue: service `pending_payment_accounts` (path not fixed by the specs; suggested `GET /admin/direct-transfer/payment-accounts/pending`). Each row is a `PaymentAccountOut` with `name_match` (false = the name differs from the verified one; null = the SME has no approved KYB) and `expected_name`: show `account_name` and `expected_name` side by side, with the uploaded statement.
-Decision: `POST /admin/direct-transfer/payment-accounts/{id}/decision` `{ "decision": "APPROVED|REJECTED", "reason": "string" }`. Service: `decide_payment_account`. A reason is required for both outcomes.
-
-User screens: an SME sees **Pending** (waiting for staff; cannot open a funding window yet) and, if rejected, the `rejection_reason`. An investor never sees Pending. If `name_match` is `false` on an investor account, show a warning at save time and in the list: "This name doesn't match your verified name, so payments from this account will be held for review." It never blocks.
+### 3.1 Payment-account verification (staff, investors and SMEs)
+Built by Phat on `main` (`GET /admin/payment-accounts`, `POST /admin/payment-accounts/{id}/decision`, audit rows). The rule that applies is **HANDOFF-05** (`docs/handoffs/HANDOFF-05-account-verification.md`, D-031): every account is verified against the bank's holder name, for investors and SMEs. Use HANDOFF-05 for the decision body, the error codes and the screens.
 
 ### 3.2 Exceptions queue
 `GET /admin/direct-transfer/exceptions` -> `[ { "kind": "AWAITING_FIELDS|RECEIPT_MISMATCH|LATE_RECEIPT", "tranche_id","transfer_id","amount_vnd","reference_code","failure_codes":[…],"parsed_fields":{…}|null,"file_url","timeline":[ evidence_log rows ] } ]`.
