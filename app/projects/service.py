@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import exists, select
@@ -316,6 +317,13 @@ async def activate_project_if_approved(
         },
     )
     await db.flush()
+    # Live with an approved bank account: open it for investment too (best effort; when the account is approved
+    # later, that approval opens it instead). Imported here: app.market imports this module.
+    from app.market.funding import publish_if_ready
+
+    await publish_if_ready(
+        db, project_id=project.id, now=datetime.now(timezone.utc), actor_id=actor_id, trigger="PROJECT_ACTIVATED"
+    )
     return True
 
 

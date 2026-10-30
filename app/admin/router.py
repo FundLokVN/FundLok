@@ -31,6 +31,7 @@ from app.admin.schemas import (
     Page,
 )
 from app.core.database import get_db
+from app.direct_transfer.schemas import FundingWindowOut
 from app.loans import grading_inputs
 from app.loans.schemas import GradingInputsOut
 from app.users.models import Role, User
@@ -85,6 +86,23 @@ async def get_project_detail(
     made. Admin-only, like every route on this router — SMEs read their own
     applications through /loans, never through here."""
     return await service.get_project_detail(db, project_id)
+
+
+@router.post("/projects/{project_id}/funding-window", response_model=FundingWindowOut)
+async def open_project_for_funding(
+    project_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Open a live project for investment. It normally opens on its own once the project is live and its SME's
+    bank account is approved; this is for one that did not (the error says why it still cannot)."""
+    return await service.open_project_for_funding(
+        db,
+        project_id,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
 
 
 @router.post(
