@@ -32,7 +32,7 @@ async def _save_account(client, sme) -> dict:
     return resp.json()
 
 
-async def test_project_is_hidden_until_the_owner_saves_a_bank_account(client, make_user, make_project, db_session):
+async def test_project_is_hidden_until_the_owners_bank_account_is_approved(client, make_user, make_project, db_session):
     sme = await make_user(role="SME", bank_account=False)
     project = await make_project(sme)
     await _activate(db_session, project["id"])
@@ -40,9 +40,13 @@ async def test_project_is_hidden_until_the_owner_saves_a_bank_account(client, ma
     assert not await _listed(client, make_user, project["id"])
 
     account = await _save_account(client, sme)
-    # An SME account with no approved KYB name to match saves PENDING (staff review). A pending account still
-    # counts here: only a rejected one hides the project.
     assert account["status"] == "PENDING"
+    assert not await _listed(client, make_user, project["id"])  # waiting for an admin
+
+    await db_session.execute(
+        update(PaymentAccount).where(PaymentAccount.id == uuid.UUID(account["id"])).values(status="APPROVED")
+    )
+    await db_session.commit()
     assert await _listed(client, make_user, project["id"])
 
 

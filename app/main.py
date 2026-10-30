@@ -25,6 +25,7 @@ from app.core.database import get_db
 from app.lending.router import router as lending_router
 from app.loans.router import router as loans_router
 from app.market.router import router as market_router
+from app.market.funding_router import router as funding_router
 from app.oauth.router import router as oauth_router
 from app.payments.router import router as payments_router
 from app.projects.router import router as projects_router
@@ -226,6 +227,7 @@ app.include_router(underwriting_router)
 app.include_router(uploads_router)
 app.include_router(contracts_router)
 app.include_router(market_router)
+app.include_router(funding_router)
 app.include_router(payments_router)
 app.include_router(banking_router)
 app.include_router(admin_router)

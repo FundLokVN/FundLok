@@ -324,6 +324,11 @@ def _mock_external_io(monkeypatch):
         return ""
 
     monkeypatch.setattr("app.auth.password_policy._fetch_range", _no_breaches)
+
+    # Opening a funding window and signing an investor's acceptance store the signed documents in R2.
+    from app.direct_transfer.storage import InMemoryStorage
+
+    monkeypatch.setattr("app.market.funding.evidence_storage", InMemoryStorage)
     yield
 
 

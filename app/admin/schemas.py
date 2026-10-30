@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from app.direct_transfer.schemas import FundingWindowOut, PaymentAccountOut
+
 from app.gverify.normalize import normalize_identifier
 
 T = TypeVar("T")
@@ -267,6 +269,23 @@ class AdminUserInvestmentSummary(BaseModel):
     holdings_principal: int
 
 
+class AdminPaymentAccountOut(PaymentAccountOut):
+    """A saved bank account as an admin reviews it: whose it is, in full, and
+    who decided it. ``approved_by_email`` is the member of staff who approved
+    or rejected it; None while PENDING and for accounts approved on save while
+    there was no review step (approved_by NULL)."""
+
+    user_id: UUID
+    user_email: str
+    user_full_name: str | None = None
+    approved_by_email: str | None = None
+
+
+class AdminPaymentAccountDecisionRequest(AdminDecisionRequest):
+    """Approve or reject a saved bank account. A rejection needs a note (the
+    user sees it as the reason); an approval may have one."""
+
+
 class AdminUserFullDetail(AdminUserDetail):
     """The user preview panel's payload, in the spirit of AdminProjectDetail:
     the whole panel in one response instead of the client stitching a list row
@@ -299,7 +318,12 @@ class AdminUserFullDetail(AdminUserDetail):
 
     # Verification & banking insights
     kyc_status: str | None = None
+    # The mock app/banking table (linked_accounts), kept for older clients.
     linked_accounts_count: int = 0
+    # The bank accounts the user saved on their profile (payment_accounts),
+    # oldest first: what investors pay into and repayments go back to. Admin
+    # only, so the full number is shown. Empty when they have saved none.
+    payment_accounts: list[AdminPaymentAccountOut] = []
 
     # Empty for a user with no project ownerships, not an error.
     projects: list[AdminUserProjectRef] = []
@@ -551,6 +575,9 @@ class AdminProjectDetail(BaseModel):
     kyb: AdminKybVerificationOut | None
     # Null only for a project with no ownership row, which creation never makes.
     owner: AdminProjectOwnerOut | None = None
+    # The project's latest funding window (live or ended), or null if it never opened one. A live project with an
+    # approved SME bank account opens on its own; the panel offers to open it when that did not happen.
+    funding_window: FundingWindowOut | None = None
 
 
 class ActorOut(BaseModel):

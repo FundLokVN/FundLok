@@ -6,7 +6,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.direct_transfer.models import PaymentAccount
+from app.direct_transfer.models import FundingWindow, PaymentAccount
 from app.gverify.models import STATUS_APPROVED as KYC_APPROVED
 from app.gverify.service import latest_for_user
 from app.lending.kyc import project_has_verified_kyc
@@ -156,6 +156,17 @@ async def place_order(
         raise HTTPException(status_code=404, detail="Listing not found")
     if lst.status != "OPEN":
         raise HTTPException(status_code=400, detail="Listing is not open for funding")
+    # A listing with a funding window takes money only through it (ADR-009): an order here would fill with no
+    # payment and the window's close would then overwrite funded_amount.
+    has_window = (
+        await db.execute(select(FundingWindow.id).where(FundingWindow.listing_id == lst.id))
+    ).first()
+    if has_window is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Invest in this listing through its funding window",
+            headers={"X-Error-Code": "USE_FUNDING_WINDOW"},
+        )
 
     amount = _dec(amount)
     target_amt = _dec(lst.target_amount)

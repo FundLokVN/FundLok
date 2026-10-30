@@ -1,7 +1,7 @@
 # FundLok — Claude Session Bootstrap
 
 > Read this file at the start of every session. It is the single source of truth for project context.
-> Last updated: July 2026 | Version: 1.2
+> Last updated: October 2026 | Version: 1.3
 
 ---
 
@@ -10,9 +10,9 @@
 FundLok (FL) is a Vietnam-registered P2P lending platform connecting SMB borrowers with lenders.
 
 - **FL does NOT take a position.** It is a marketplace — it matches borrowers and lenders only.
-- **Revenue model:** FL charges a fee percentage deducted from each disbursement/distribution, processed through the omnibus account.
-- **Omnibus/custodial account:** FL holds a custodial account at a licensed Vietnamese bank. All fund movements (lender → FL, FL → borrower, borrower → FL, FL → lender) flow through this account. The Open API middleware is partner-TBD (a Brankas-style aggregator or the custodial bank direct). Per ADR-003, the ledger is built omnibus-first but escrow-compatible in case only a per-project escrow account can be signed.
-- **Ledger:** FL maintains an internal append-only ledger that mirrors every bank movement. The ledger is the legal record. It is immutable at both the application layer and the database layer (PostgreSQL trigger).
+- **Revenue model:** FL charges two fees, each invoiced separately and paid into FL's own account after the fact (ADR-009, D-023): an SME activation fee of 3% of confirmed principal (VAT invoice, due 7 days, never netted from principal) and an investor service fee of 2.5% a year (accrued monthly, invoiced).
+- **No custody (ADR-009):** FL never holds money. Money moves directly between the investor's and the SME's own bank accounts (Decree 94 Art. 11.1.b). FL issues a dynamic VietQR, collects uploaded receipts, records evidence, computes schedules and reports. There is no FL cash account, no bank API and no CIC connection yet; confirmations rest on uploaded documents reviewed by staff. ADR-002/003's omnibus account and ADR-008's GPay rail are superseded for all new paths.
+- **Ledger:** FL maintains an internal append-only ledger. On the direct-transfer path it is a confirmed-transfer model: `transfers` is the evidence record and claim legs post against a platform-level `EXTERNAL` account; no `OMNIBUS_CASH` legs (D-026, `docs/specs/direct_transfer/ledger-amendment.md`). It is immutable at both the application layer and the database layer (PostgreSQL trigger).
 - **Borrower journey:** SMB registers → 3rd-party KYC → describes project/enterprise → applies for loan → ML grading engine assigns interest rate tier → listed on marketplace → lenders fund → disbursement → scheduled repayments → lenders receive pro-rata distributions + converted shares after repayment.
 - **Early repayment** is encouraged as a platform value — better practice, better outcomes.
 - **Regulatory framework:** Vietnam Decree No. 94/2025/ND-CP (fintech/P2P regulatory sandbox) and Circular 64/2024/TT-NHNN (banking Open API technical standard). See ADR-004.
@@ -27,7 +27,7 @@ FundLok (FL) is a Vietnam-registered P2P lending platform connecting SMB borrowe
 | Database | PostgreSQL (SQLAlchemy 2.x async, Alembic migrations) |
 | File storage | Cloudflare R2 (S3-compatible) |
 | Auth | JWT (access + refresh), Argon2 password hashing, Google OAuth |
-| Banking | Open API — custodial partner TBD (Brankas aggregator or direct bank); must meet Circular 64 (OAuth2, TLS 1.2+, ISO 20022) |
+| Payments | Direct bank-to-bank transfer by VietQR (NAPAS 247 / EMVCo). No payment-initiation or bank-data partner today; `app/banking/` stays mocked. A partner may be added later behind the transfer `rail` and `confirmation_level` fields. |
 | Frontend | React (Phat owns — Edward does not touch UI) |
 | Deployment | Docker, Google Cloud Run |
 | CI/CD | GitHub Actions |
@@ -61,7 +61,8 @@ Key carry-forwards:
 - `app/share_conversion/` — post-repayment share issuance
 - `app/compliance/` — Decree 94 reporting, exposure cap enforcement
 - `app/ledger/` — double-entry ledger, custodial/ledger accounts, balance-by-sum (see ADR-003, docs/specs/ledger/ledger-foundation.md)
-- `app/payments/` — disbursement/repayment posting (currently a stopgap shim over `app/ledger/`, not yet its own spec'd flow)
+- `app/direct_transfer/` — funding window, tranches, transfers and evidence, disputes, repayment collection, fees, CIC event log (ADR-009). Phat's routers call its service functions.
+- `app/payments/` — legacy omnibus disbursement/repayment shim over `app/ledger/` (deprecated behind a flag once `app/direct_transfer/` is wired)
 - `app/system/` — platform/ops settings (e.g. maintenance mode)
 - `app/core/` — database session, config, async migration
 - `app/utils/` — shared utilities (jwt, rbac, audit, r2, password)
@@ -158,13 +159,12 @@ All specs live in `docs/specs/<module>/<feature>.md`. See `docs/specs/_TEMPLATE.
 
 ## Architecture Quick Reference
 
-### Omnibus Money Flow
+### Direct-Transfer Money Flow (ADR-009)
 ```
-Lender          → [Brankas inbound]  → FL Omnibus Account  → ledger: FUNDING
-Borrower        → [Brankas inbound]  → FL Omnibus Account  → ledger: REPAYMENT
-FL Omnibus Acct → [Brankas outbound] → Borrower            → ledger: DISBURSEMENT
-FL Omnibus Acct → [Brankas outbound] → Lender              → ledger: DISTRIBUTION
-FL Omnibus Acct → [internal]         → FL Revenue           → ledger: FEE
+Investor → [own bank, VietQR]  → SME's own account   evidence: transfer (receipt)   ledger on confirmation
+SME      → [own bank, VietQR]  → Investor's account  evidence: repayment day        ledger on settlement
+SME      → [own bank]          → FL's own account    FL fee invoices (separate, never netted)
+FL holds no money; receipts, statements and staff review are the evidence.
 ```
 
 ### Core Lending State Machine
@@ -173,7 +173,9 @@ LoanApplication:  DRAFT → SUBMITTED → UNDER_REVIEW → APPROVED | REJECTED
 ScoreRun:         RUNNING → READY → LOCKED
 Contract:         DRAFT → SIGNED → ACTIVE_PENDING_FUNDING → ACTIVE_FUNDED → CLOSED
 Listing:          DRAFT → OPEN → FUNDED → CLOSED
-Order:            PENDING_PAYMENT → FILLED | CANCELLED | EXPIRED
+Order:            legacy omnibus path only (deprecated behind a flag)
+Tranche:          RESERVED → SIGNED → ATTESTED → CONFIRMED → ACTIVE
+                  RESERVED|SIGNED → EXPIRED; SIGNED|ATTESTED → UNDER_REVIEW → CONFIRMED | VOID; CONFIRMED → VOID (before ACTIVE)
 ```
 
 ### User Roles
@@ -188,12 +190,15 @@ Order:            PENDING_PAYMENT → FILLED | CANCELLED | EXPIRED
 | ID | Title | Status |
 |---|---|---|
 | ADR-001 | Modify MVP codebase, do not rebuild | Accepted |
-| ADR-002 | Omnibus/custodial account via Brankas | Accepted |
-| ADR-003 | Omnibus-first with escrow-compatible ledger seam | Accepted |
+| ADR-002 | Omnibus/custodial account via Brankas | Superseded by ADR-009 for new paths |
+| ADR-003 | Omnibus-first with escrow-compatible ledger seam | Accepted (seam kept; no new path posts cash to it) |
 | ADR-004 | Vietnam regulatory compliance (Decree 94 + Circular 64) | Draft |
 | ADR-005 | Permanent local dev environment + local knowledge MCP server | Accepted |
 | ADR-006 | fl-knowledge: BM25 → Pinecone + local embeddings | Accepted |
 | ADR-007 | fl-knowledge: PDF ingestion (regulatory source documents) | Accepted |
+| ADR-008 | Payment rails and custody model (GPay) | Superseded by ADR-009 |
+| ADR-009 | Direct-transfer custody model, funding window, evidence-based confirmation | Accepted |
+| ADR-010 | fl-knowledge: hybrid search (semantic + BM25) and stale-vector cleanup | Accepted |
 
 Full ADRs in `docs/adr/`.
 
@@ -209,7 +214,7 @@ Edward is CTO and backend/architecture owner. **Edward does not write UI code.**
 
 **Standing local stack (ADR-005):** run the repo's `docker-compose.yml` services — `postgres`, `mailpit`, `minio` — as a long-lived environment (`docker compose up -d`); app code runs on the host via `.venv` + `uvicorn` for hot reload. The dev database is standardized on the compose Postgres: `postgresql+psycopg2://fundlok:fundlok@localhost:5433/fundlok_dev`. Run `docker compose up -d postgres` before `alembic upgrade head` or starting the app.
 
-**fl-knowledge MCP server (ADR-005 → ADR-006 → ADR-007):** a project-scoped MCP server at `tools/mcp-servers/fl-knowledge/`, registered via `.mcp.json`, that indexes `CLAUDE.md`, `AGENTS.md`, `README.md`, and everything under `docs/` — both `.md` and `.pdf` — exposing `search_fl_docs` and `reindex_fl_docs`. It began on BM25 lexical search (ADR-005), moved to local `sentence-transformers` embeddings + Pinecone (ADR-006), then added PDF ingestion via `pypdf` for external source documents like regulations (ADR-007). **Prefer `search_fl_docs` over re-reading whole specs/ADRs** — it's the token-efficient way to pull context. Requires a one-time `build_index.py` run and a `PINECONE_API_KEY` in a gitignored local `.env`; the server points you at `build_index.py` if the index is missing. External source documents (regulations, standards) go under `docs/regulatory/` — e.g. `docs/regulatory/circular-64-open-api.pdf`. `docs/` stays the source of truth — the server only reads it.
+**fl-knowledge MCP server (ADR-005 → ADR-006 → ADR-007 → ADR-010):** a project-scoped MCP server at `tools/mcp-servers/fl-knowledge/`, registered via `.mcp.json`, that indexes `CLAUDE.md`, `AGENTS.md`, `README.md`, and everything under `docs/` — both `.md` and `.pdf` — exposing `search_fl_docs` and `reindex_fl_docs`. It began on BM25 lexical search (ADR-005), moved to local `sentence-transformers` embeddings + Pinecone (ADR-006), then added PDF ingestion via `pypdf` for external source documents like regulations (ADR-007), and now ranks results by hybrid search — semantic embeddings merged with BM25 keyword matching, so exact identifiers like `UNDER_REVIEW` or `Q-023` are found as well as concepts (ADR-010). **Prefer `search_fl_docs` over re-reading whole specs/ADRs** — it's the token-efficient way to pull context. Requires a one-time `build_index.py` run and a `PINECONE_API_KEY` in a gitignored local `.env`; the server points you at `build_index.py` if the index is missing. External source documents (regulations, standards) go under `docs/regulatory/` — e.g. `docs/regulatory/circular-64-open-api.pdf`. `docs/` stays the source of truth — the server only reads it.
 
 ---
 
@@ -224,7 +229,8 @@ Edward is CTO and backend/architecture owner. **Edward does not write UI code.**
 
 **Phase 1 — Ledger & Banking (in progress)**
 - [x] Internal ledger foundation — double-entry ledger, custodial/ledger accounts, immutability trigger (spec ACCEPTED `docs/specs/ledger/ledger-foundation.md`, ADR-003; implemented in `app/ledger/` + migration `862160bce972`, merged PR #18)
-- [ ] Banking Open API integration (Circular 64) + `bank_transactions` + reconciliation
+- [ ] ~~Banking Open API integration~~ — dropped for MVP (ADR-009): no bank API; evidence-based direct transfer
+- [x] Direct-transfer disbursement and repayment (HANDOFF-04, `docs/specs/direct_transfer/`, `app/direct_transfer/`)
 - [ ] Compliance module — Decree 94 exposure caps, CIC data, reporting (ADR-004)
 
 **MVP scope (decided 27 Sep 2026)**

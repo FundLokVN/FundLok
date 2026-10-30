@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import exists, select
@@ -121,9 +122,9 @@ async def user_owns_project(db: AsyncSession, user_id: UUID, project_id: UUID) -
     return result.scalar_one_or_none() is not None
 
 
-# Saved accounts are approved on save (no staff review), so APPROVED is what a live account looks like.
-# PENDING is kept for any account a future review flow holds back; REJECTED never counts.
-PAYMENT_ACCOUNT_LISTABLE_STATUSES = ("PENDING", "APPROVED")
+# Only an account an admin approved counts (POST /admin/payment-accounts/{id}/decision): a PENDING one is
+# still waiting, a REJECTED one never will. Accounts saved while there was no review were approved on save.
+PAYMENT_ACCOUNT_LISTABLE_STATUSES = ("APPROVED",)
 
 
 def owner_has_bank_account():
@@ -316,6 +317,13 @@ async def activate_project_if_approved(
         },
     )
     await db.flush()
+    # Live with an approved bank account: open it for investment too (best effort; when the account is approved
+    # later, that approval opens it instead). Imported here: app.market imports this module.
+    from app.market.funding import publish_if_ready
+
+    await publish_if_ready(
+        db, project_id=project.id, now=datetime.now(timezone.utc), actor_id=actor_id, trigger="PROJECT_ACTIVATED"
+    )
     return True
 
 
