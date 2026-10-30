@@ -3,6 +3,7 @@ import pytest
 from sqlalchemy import select
 
 from app.direct_transfer import vietqr
+from app.gverify.models import GVerifyKybVerification
 from app.lending.models import AuditLog
 
 TCB = "970407"  # Techcombank, in the bank list
@@ -292,3 +293,41 @@ async def test_parse_vietqr_rejects_unknown_bank(make_user, client):
     resp = await client.post("/payment-accounts/parse-vietqr", json={"payload": payload}, headers=investor["headers"])
     assert resp.status_code == 400
     assert resp.json()["detail"] == "Unsupported bank"
+
+
+# --- who approves an account (accounts.py, PROVISIONAL(Q-D18)) ------------------------------------------
+
+async def _verified_company(db_session, sme, business_name):
+    db_session.add(GVerifyKybVerification(user_id=sme["id"], status="APPROVED", document_type="COMPANY", business_name=business_name))
+    await db_session.commit()
+
+
+async def test_sme_account_matching_the_verified_company_name_is_approved(make_user, client, db_session):
+    sme = await make_user(role="SME")
+    await _verified_company(db_session, sme, "CÔNG TY TNHH ABC")
+    resp = await _save(client, sme, holder_type="ENTITY", account_name="CONG TY TNHH ABC")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["status"] == "APPROVED" and body["name_match"] is True and body["approved_at"] is not None
+
+
+async def test_sme_account_with_another_name_waits_for_staff(make_user, client, db_session):
+    sme = await make_user(role="SME")
+    await _verified_company(db_session, sme, "CÔNG TY TNHH ABC")
+    body = (await _save(client, sme, holder_type="ENTITY", account_name="NGUYEN VAN MULE")).json()
+    assert body["status"] == "PENDING" and body["approved_at"] is None
+    assert body["name_match"] is False and body["expected_name"] == "CÔNG TY TNHH ABC"
+
+
+async def test_investor_account_with_another_name_is_approved_but_flagged(make_user, client):
+    investor = await make_user(role="INVESTOR", full_name="Nguyen Van A")
+    body = (await _save(client, investor, account_name="TRAN THI B")).json()
+    assert body["status"] == "APPROVED"  # the flag never blocks an investor
+    assert body["name_match"] is False and body["expected_name"] == "Nguyen Van A"
+
+
+async def test_listing_shows_the_flag_to_the_owner(make_user, client):
+    investor = await make_user(role="INVESTOR", full_name="Nguyen Van A")
+    await _save(client, investor, account_name="NGUYEN VAN A")
+    listed = (await client.get("/payment-accounts", headers=investor["headers"])).json()
+    assert [(a["status"], a["name_match"]) for a in listed] == [("APPROVED", True)]

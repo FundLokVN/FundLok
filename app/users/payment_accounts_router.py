@@ -78,10 +78,9 @@ async def create_payment_account(
         )
     except DirectTransferError as exc:
         await _raise_mapped(db, exc)
-    # No review step (Phat's call): the account is usable at once. approved_by stays NULL, which is what
-    # tells an auto-approved account apart from one a member of staff decided.
-    account.status = "APPROVED"
-    account.approved_at = now
+    # register_payment_account decides the status (accounts.py): investors are approved on save; an SME is
+    # approved only when its account name matches the verified KYB name, otherwise it waits for staff. Do not
+    # set it here.
     append_audit(
         db,
         entity_type="PAYMENT_ACCOUNT",

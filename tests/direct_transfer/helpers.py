@@ -81,7 +81,7 @@ async def make_account(
         db, user_id=user.id, holder_role=role, holder_type=holder_type, bank_bin=bin_, bank_name="Techcombank",
         account_number=number, account_name=name or user.full_name, evidence_file_id=None, now=T0,
     )
-    if approve_by is not None:
+    if approve_by is not None and account.status == "PENDING":  # investors are approved on save (accounts.py)
         await decide_payment_account(db, account_id=account.id, decision="APPROVED", reason="statement checked", staff_id=approve_by.id, now=T0)
     return account
 

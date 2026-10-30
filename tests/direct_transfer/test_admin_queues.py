@@ -36,8 +36,9 @@ async def test_fee_blocks_view_lists_unpaid_smes_and_investors(loan):
 
 
 async def test_pending_payment_accounts_listed_until_decided(world):
-    user = await make_user(world.db, role="INVESTOR", full_name="Le Van C")
-    account = await make_account(world.db, user, role="INVESTOR")
+    # An SME account with no approved KYB name to match waits for staff (accounts.py); investors never do.
+    user = await make_user(world.db, role="SME", full_name="Le Van C")
+    account = await make_account(world.db, user, role="SME", holder_type="ENTITY")
     assert [a.id for a in await admin.pending_payment_accounts(world.db)] == [account.id]
     await admin.decide_payment_account(world.db, account_id=account.id, decision="REJECTED", reason="name does not match the statement", staff_id=world.admin.id, now=at())
     assert await admin.pending_payment_accounts(world.db) == []

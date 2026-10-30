@@ -63,7 +63,7 @@ async def test_register_rejects_unknown_bin_and_takes_name_from_list(world):
         account_number="123456789", account_name="NGUYEN VAN A", evidence_file_id=None, now=NOW,
         bank_name="whatever the client typed",
     )
-    assert account.bank_name == "Vietcombank" and account.status == "PENDING"
+    assert account.bank_name == "Vietcombank" and account.status == "APPROVED"  # investors: approved on save
 
 
 async def test_list_payment_accounts_returns_only_the_callers_in_order(world):
@@ -87,7 +87,7 @@ def test_every_listed_bank_is_included_and_flagged_for_vietqr():
 
 
 async def test_bank_outside_the_list_saves_under_its_typed_name_but_is_never_usable(world):
-    from app.direct_transfer.accounts import decide_payment_account, get_usable_account
+    from app.direct_transfer.accounts import get_usable_account
 
     user = (await make_investor(world)).user
     with pytest.raises(DirectTransferError) as missing:
@@ -104,8 +104,8 @@ async def test_bank_outside_the_list_saves_under_its_typed_name_but_is_never_usa
     )
     assert account.bank_bin is None and account.bank_name == "Quỹ tín dụng nhân dân Phú Thọ"
 
-    # Even once approved it cannot fund or receive a tranche: no VietQR can pay into it.
-    await decide_payment_account(world.db, account_id=account.id, decision="APPROVED", reason="checked", staff_id=user.id, now=NOW)
+    # Approved on save (investor), yet it cannot fund or receive a tranche: no VietQR can pay into it.
+    assert account.status == "APPROVED"
     with pytest.raises(DirectTransferError) as refused:
         await get_usable_account(world.db, account_id=account.id, user_id=user.id, holder_role="INVESTOR")
     assert refused.value.code == "ACCOUNT_NOT_NAPAS"

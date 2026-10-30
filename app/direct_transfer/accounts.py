@@ -1,7 +1,15 @@
 """Registered payment accounts (HANDOFF-04 I-15). Spec: transfer-and-evidence.md section 3.
 
-An SME's (or investor's) account is only usable after staff approve it from a bank statement or bank
-confirmation: account ownership is otherwise unproven. This is NOT the mock `linked_accounts` table.
+Who approves an account (Edward, 2026-10-29; Loc's agreement pending, PROVISIONAL(Q-D18)):
+- INVESTOR accounts are approved on save. The investor is the payer, and a tranche's receipt must show the
+  investor's KYC name as payer, so a wrong account cannot fund anything unnoticed. A name that does not match
+  is only FLAGGED (`name_match` False, a log event), never blocking.
+- SME accounts are approved on save only when the account name matches the SME's verified KYB business name.
+  A mismatch, or an SME with no approved KYB (no verified name to compare against), saves PENDING and waits
+  for staff (`decide_payment_account`). The SME's account is where investors' money goes, and nothing else
+  checks that it belongs to the SME.
+An auto-approved account has `approved_by` NULL; one a person decided carries their id.
+This is NOT the mock `linked_accounts` table.
 """
 from __future__ import annotations
 
@@ -60,6 +68,13 @@ async def register_payment_account(
         status="PENDING",
         created_at=now,  # injected clock, so listing order is deterministic (server now() ties within a transaction)
     )
+    expected = await expected_holder_name(db, user_id=user_id, holder_role=holder_role)
+    matched = names_match(account_name, expected)
+    auto_approved = holder_role == "INVESTOR" or matched is True
+    if auto_approved:
+        account.status = "APPROVED"
+        account.approved_at = now
+    account.name_match, account.expected_name = matched, expected
     db.add(account)
     try:
         await db.flush()
@@ -74,8 +89,26 @@ async def register_payment_account(
         now=now,
         actor_id=user_id,
         actor_role=holder_role,
-        payload={"bank_bin": bank_bin, "bank_code": bank_code, "evidence_file_id": str(evidence_file_id) if evidence_file_id else None},
+        payload={
+            "bank_bin": bank_bin,
+            "bank_code": bank_code,
+            "evidence_file_id": str(evidence_file_id) if evidence_file_id else None,
+            "name_match": matched,
+            "auto_approved": auto_approved,
+        },
     )
+    if matched is False:
+        # The flag (Edward, 2026-10-29): visible to staff, never blocking for an investor.
+        await log_event(
+            db,
+            entity_type="PAYMENT_ACCOUNT",
+            entity_id=account.id,
+            event_type="PAYMENT_ACCOUNT_NAME_MISMATCH",
+            now=now,
+            actor_id=user_id,
+            actor_role=holder_role,
+            payload={"holder_role": holder_role, "auto_approved": auto_approved},
+        )
     return account
 
 
@@ -133,8 +166,59 @@ async def get_usable_account(db: AsyncSession, *, account_id: UUID, user_id: UUI
 
 
 async def list_payment_accounts(db: AsyncSession, *, user_id: UUID) -> list[PaymentAccount]:
-    """The caller's own accounts, oldest first, with their approval status (spec: GET /payment-accounts)."""
+    """The caller's own accounts, oldest first, with their approval status (spec: GET /payment-accounts).
+    Each carries `name_match` / `expected_name` (see annotate_name_match)."""
     rows = await db.execute(
         select(PaymentAccount).where(PaymentAccount.user_id == user_id).order_by(PaymentAccount.created_at, PaymentAccount.id)
     )
-    return list(rows.scalars().all())
+    accounts = list(rows.scalars().all())
+    await annotate_name_match(db, accounts)
+    return accounts
+
+
+async def expected_holder_name(db: AsyncSession, *, user_id: UUID, holder_role: str) -> str | None:
+    """The verified name an account should be held in, or None when there is none to compare against.
+
+    INVESTOR: the KYC name (the same name the receipt check uses). SME: the business name from the newest
+    eKYB attempt, and only if that attempt was APPROVED: the project's own `legal_name` is self-declared, so it
+    is not used here."""
+    from app.gverify.models import STATUS_APPROVED, GVerifyKybVerification
+
+    if holder_role == "INVESTOR":
+        from app.direct_transfer.tranches import resolve_kyc_name
+
+        return (await resolve_kyc_name(db, user_id)) or None
+    row = (
+        await db.execute(
+            select(GVerifyKybVerification.status, GVerifyKybVerification.business_name)
+            .where(GVerifyKybVerification.user_id == user_id)
+            .order_by(GVerifyKybVerification.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None or row.status != STATUS_APPROVED or not (row.business_name or "").strip():
+        return None
+    return row.business_name
+
+
+def names_match(account_name: str, expected: str | None) -> bool | None:
+    """True/False on the receipt check's normalization (case, accents, punctuation, spacing ignored); None when
+    there is no verified name to compare with."""
+    from app.direct_transfer.receipts import normalize_name
+
+    if not expected:
+        return None
+    return normalize_name(account_name) == normalize_name(expected)
+
+
+async def annotate_name_match(db: AsyncSession, accounts: list[PaymentAccount]) -> None:
+    """Set the non-persisted `name_match` and `expected_name` on each account (for the owner's screen and the
+    staff queue). Computed on read, so it follows the owner's current KYC/KYB; the decision at save time is in the
+    evidence log."""
+    cache: dict[tuple[UUID, str], str | None] = {}
+    for account in accounts:
+        key = (account.user_id, account.holder_role)
+        if key not in cache:
+            cache[key] = await expected_holder_name(db, user_id=account.user_id, holder_role=account.holder_role)
+        account.expected_name = cache[key]
+        account.name_match = names_match(account.account_name, cache[key])

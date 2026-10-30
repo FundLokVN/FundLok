@@ -341,6 +341,14 @@ A decision is blocking for a piece of work only if reversing it would force rewo
 **Owner.** `Loc` (ask CIC).
 **Provenance.** `Loc2.md`; HANDOFF-04 section 6.
 
+
+### Q-028 — Existing SME accounts approved by migration `099de0f5b480` `PENDING-NONBLOCKING`
+**Context.** Phat's #76 approved every account saved while staff review was the rule, including SME accounts, with `approved_by` NULL. Under D-031 an SME account is approved on save only on a name match, so any real SME accounts in that set were never checked.
+**Options.** A. Leave them. B. Move SME accounts with `approved_by IS NULL` back to PENDING (data migration) so staff review them. C. Re-run the name check on them and move only the mismatches back to PENDING.
+**Default.** A, until Phat says whether any of them are real pilot accounts. If none, nothing to do.
+**Blocks.** Nothing.
+**Owner.** `Phat` (what is in the database), `Edward` (decision).
+**Provenance.** `Edward`, 2026-10-29.
 ---
 
 ## Provisional rules from HANDOFF-04 (`Q-D` series)
@@ -363,6 +371,7 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | Q-D14 | Missed-day report deadline 2 working days; a later report within 5 working days is accepted into reconciliation without changing history, beyond that it is refused | section 6 |
 | Q-D15 | Investor fee invoice due 7 days after issue; unpaid past due blocks new reservations; fee fixed at signing as `amount x rate x term/12` floored per tranche | `Loc.md` fee table |
 | Q-D16 | "Repaid in full" for the one-listing lock means the facility is SETTLED and every instalment row is settled | `Loc.md` rule 1 |
+| Q-D18 | Payment-account approval: investors approved on save with a non-blocking name-mismatch flag; SMEs approved on save only when the account name matches the verified KYB business name, else staff review (D-031). May be relaxed or tightened once there is pilot experience | Edward, 2026-10-29; Loc's agreement pending |
 
 ---
 
@@ -400,6 +409,7 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | D-028 | Tranche state machine: Lok's 8 states and 9 transitions plus `SIGNED -> EXPIRED` and `CONFIRMED -> VOID` before ACTIVE. | confirmed by Edward, 2026-10-28 (E4) |
 | D-029 | Edward accepted the remaining HANDOFF-04 section 2 defaults (I-6 to I-9, I-16, I-17, I-24, I-25), staff manual receipt entry, mock signer, and SME early close only at 50% or more confirmed. They are built behind config and tagged PROVISIONAL(Q-D3..Q-D16) until Lok or Legal confirm. | confirmed by Edward, 2026-10-28 (E5) |
 | D-030 | Recommended positions on burden of proof, dispute-window length and late disputes vs CIC are the working rules (timers only, configurable). | confirmed by Edward, 2026-10-28 (E6); Lok to align (Q-026, Q-027) |
+| D-031 | Payment-account approval: **investor** accounts are approved on save (a name that differs from the KYC name is flagged, never blocking); **SME** accounts are approved on save only when the account name matches the verified KYB business name, otherwise they wait for staff review. Supersedes both the earlier rule that staff approve every account (HANDOFF-04 I-15) and the "no review at all" change in #76. Reason: the SME's account is where investors' money goes, and the investor side is already checked at payment time by the receipt's payer name. | confirmed by Edward, 2026-10-29, Slack. Loc's agreement requested, pending |
 
 ---
 
@@ -410,3 +420,4 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | 2026-10-16 | Edward / Claude | Created. Seeded from the Decree 94 plan, ADR-008 and Loc's replies of 2026-10-12, 10-13 and 10-16. |
 | 2026-10-22 | Edward / Claude | Reframed Q-001, Q-002 and Q-004 around the rule that FundLok holds no money (D-011). Added Q-013 to Q-016 and D-011 to D-013. Updated Q-003 with the working GPay fee. |
 | 2026-10-28 | Edward / Claude | HANDOFF-04 Phase A (P-0). Added D-014 to D-030 from Loc.md / Loc2.md and Edward decisions E1 to E6. Superseded Q-001, Q-002, Q-004, Q-006, Q-013, Q-014, Q-015, Q-016 (kept, marked). Added Q-017 to Q-027 for residual questions and the Q-D3 to Q-D16 provisional-rule table. D-023 supersedes S6. |
+| 2026-10-29 | Edward / Claude | Added D-031 (payment-account approval rule), Q-D18 and Q-028. |

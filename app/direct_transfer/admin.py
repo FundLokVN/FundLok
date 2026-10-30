@@ -122,4 +122,10 @@ async def dispute_queue(db: AsyncSession, *, only_open: bool = True) -> list[dic
 
 
 async def pending_payment_accounts(db: AsyncSession) -> list[PaymentAccount]:
-    return list((await db.execute(select(PaymentAccount).where(PaymentAccount.status == "PENDING").order_by(PaymentAccount.created_at))).scalars())
+    """The staff review queue. With the name-match rule (accounts.py) this holds SME accounts whose name did not
+    match the verified KYB name, or that have no approved KYB. Each carries `name_match` and `expected_name`."""
+    from app.direct_transfer.accounts import annotate_name_match
+
+    accounts = list((await db.execute(select(PaymentAccount).where(PaymentAccount.status == "PENDING").order_by(PaymentAccount.created_at))).scalars())
+    await annotate_name_match(db, accounts)
+    return accounts

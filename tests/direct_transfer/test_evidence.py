@@ -171,28 +171,22 @@ async def test_receipt_on_unsigned_tranche_rejected(world):
 
 
 async def test_payment_account_requires_staff_approval_before_use(world):
-    await open_window(world)
-    user = await make_user(world.db, role="INVESTOR", full_name="Tran Van B")
-    pending = await make_account(world.db, user, role="INVESTOR")  # not approved
-    with pytest.raises(DirectTransferError) as info:
-        from app.direct_transfer import reservation
+    # An SME account with no approved KYB name to match is PENDING until staff decide (accounts.py).
+    user = await make_user(world.db, role="SME", full_name="Tran Van B")
+    pending = await make_account(world.db, user, role="SME", holder_type="ENTITY")
+    assert pending.status == "PENDING"
+    from app.direct_transfer.accounts import decide_payment_account, get_usable_account
 
-        await reservation.reserve_ticket(
-            world.db, window_id=world.window.id, investor_id=user.id, amount_vnd=10 * M, ack_risk_disclosure=True,
-            payment_account_id=pending.id, idempotency_key="k", now=T0, params=world.params,
-        )
+    with pytest.raises(DirectTransferError) as info:
+        await get_usable_account(world.db, account_id=pending.id, user_id=user.id, holder_role="SME")
     assert info.value.code == "ACCOUNT_NOT_APPROVED"
-    from app.direct_transfer.accounts import decide_payment_account
 
     with pytest.raises(DirectTransferError) as info2:
         await decide_payment_account(world.db, account_id=pending.id, decision="APPROVED", reason=" ", staff_id=world.admin.id, now=T0)
     assert info2.value.status_code == 422
     await decide_payment_account(world.db, account_id=pending.id, decision="APPROVED", reason="statement checked", staff_id=world.admin.id, now=T0)
-    t = await reservation.reserve_ticket(
-        world.db, window_id=world.window.id, investor_id=user.id, amount_vnd=10 * M, ack_risk_disclosure=True,
-        payment_account_id=pending.id, idempotency_key="k2", now=T0, params=world.params,
-    )
-    assert t.status == "RESERVED"
+    usable = await get_usable_account(world.db, account_id=pending.id, user_id=user.id, holder_role="SME")
+    assert usable.status == "APPROVED" and usable.approved_by == world.admin.id
 
 
 async def test_payment_instructions_carry_a_valid_vietqr(world):
