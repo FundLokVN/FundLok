@@ -269,6 +269,23 @@ class AdminUserInvestmentSummary(BaseModel):
     holdings_principal: int
 
 
+class AdminPaymentAccountOut(PaymentAccountOut):
+    """A saved bank account as an admin reviews it: whose it is, in full, and
+    who decided it. ``approved_by_email`` is the member of staff who approved
+    or rejected it; None while PENDING and for accounts approved on save while
+    there was no review step (approved_by NULL)."""
+
+    user_id: UUID
+    user_email: str
+    user_full_name: str | None = None
+    approved_by_email: str | None = None
+
+
+class AdminPaymentAccountDecisionRequest(AdminDecisionRequest):
+    """Approve or reject a saved bank account. A rejection needs a note (the
+    user sees it as the reason); an approval may have one."""
+
+
 class AdminUserFullDetail(AdminUserDetail):
     """The user preview panel's payload, in the spirit of AdminProjectDetail:
     the whole panel in one response instead of the client stitching a list row
@@ -306,7 +323,7 @@ class AdminUserFullDetail(AdminUserDetail):
     # The bank accounts the user saved on their profile (payment_accounts),
     # oldest first: what investors pay into and repayments go back to. Admin
     # only, so the full number is shown. Empty when they have saved none.
-    payment_accounts: list[PaymentAccountOut] = []
+    payment_accounts: list[AdminPaymentAccountOut] = []
 
     # Empty for a user with no project ownerships, not an error.
     projects: list[AdminUserProjectRef] = []

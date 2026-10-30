@@ -14,6 +14,7 @@ from sqlalchemy.sql import Select
 from fastapi import BackgroundTasks, HTTPException
 
 from app.admin.schemas import (
+    AdminPaymentAccountOut,
     ActorOut,
     AdminDecision,
     AdminDocumentUrlResponse,
@@ -77,6 +78,9 @@ from app.projects.service import activate_project_if_approved
 from app.banking.models import LinkedAccount
 from app.direct_transfer.accounts import list_payment_accounts
 from app.direct_transfer.schemas import PaymentAccountOut
+from app.direct_transfer.accounts import decide_payment_account
+from app.direct_transfer.errors import DirectTransferError
+from app.direct_transfer.models import PaymentAccount
 from app.users.models import (
     USER_STATUS_ACTIVE,
     RefreshToken,
@@ -357,7 +361,7 @@ async def get_user_detail(db: AsyncSession, user_id: UUID) -> AdminUserFullDetai
         unused_recovery_codes_count=unused_recovery_codes_count,
         kyc_status=kyc_status,
         linked_accounts_count=linked_accounts_count,
-        payment_accounts=[PaymentAccountOut.model_validate(a) for a in payment_accounts],
+        payment_accounts=await _admin_payment_accounts(db, payment_accounts),
         projects=projects,
         investments=AdminUserInvestmentSummary(
             orders_count=orders_count,
@@ -1453,3 +1457,109 @@ async def resolve_kyc_verification(
     await db.commit()
     await db.refresh(row)
     return await _kyc_verification_out(db, row)
+
+
+
+# --------------------------------------------------------------------------- #
+# Bank account review
+#
+# A user's saved bank account (payment_accounts) is what an SME is paid into
+# and an investor is repaid to. It starts PENDING; only an APPROVED account
+# lists the SME's project or lets the investor invest. Each decision is a
+# recorded event in the audit log: who decided, what, why, and on which
+# account. Decisions are final (decide_payment_account refuses a second);
+# a user whose account was rejected saves a corrected one.
+# --------------------------------------------------------------------------- #
+PAYMENT_ACCOUNT_REVIEW_STATUSES = ("PENDING", "APPROVED", "REJECTED")
+
+
+async def _admin_payment_accounts(db: AsyncSession, accounts: list) -> list[AdminPaymentAccountOut]:
+    """The admin view of each account: its owner and the member of staff who decided it, in two queries."""
+    if not accounts:
+        return []
+    user_ids = {a.user_id for a in accounts} | {a.approved_by for a in accounts if a.approved_by}
+    users = {
+        u.id: u
+        for u in (await db.execute(select(User).where(User.id.in_(user_ids)))).scalars().all()
+    }
+    out = []
+    for account in accounts:
+        owner = users.get(account.user_id)
+        decider = users.get(account.approved_by) if account.approved_by else None
+        out.append(
+            AdminPaymentAccountOut(
+                **PaymentAccountOut.model_validate(account).model_dump(),
+                user_id=account.user_id,
+                user_email=owner.email if owner else "",
+                user_full_name=owner.full_name if owner else None,
+                approved_by_email=decider.email if decider else None,
+            )
+        )
+    return out
+
+
+async def list_payment_accounts_for_review(db: AsyncSession, status_filter: str) -> list[AdminPaymentAccountOut]:
+    """Saved bank accounts for the review queue, oldest first so the longest-waiting comes up first.
+    ``status_filter`` is one of PAYMENT_ACCOUNT_REVIEW_STATUSES or ALL."""
+    stmt = select(PaymentAccount).order_by(PaymentAccount.created_at, PaymentAccount.id)
+    if status_filter != "ALL":
+        stmt = stmt.where(PaymentAccount.status == status_filter)
+    accounts = (await db.execute(stmt)).scalars().all()
+    return await _admin_payment_accounts(db, list(accounts))
+
+
+async def decide_payment_account_review(
+    db: AsyncSession,
+    account_id: UUID,
+    *,
+    decision: str,
+    note: str | None,
+    actor: User,
+    ip_address: str | None,
+) -> AdminPaymentAccountOut:
+    note = (note or "").strip() or None
+    if decision == "REJECTED" and not note:
+        raise HTTPException(
+            status_code=422,
+            detail="Give the reason for rejecting this bank account",
+            headers={"X-Error-Code": "REASON_REQUIRED"},
+        )
+    account = await db.get(PaymentAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Bank account not found")
+    if account.user_id == actor.id:
+        raise HTTPException(status_code=403, detail="You cannot review your own bank account")
+    before = {"status": account.status}
+    try:
+        account = await decide_payment_account(
+            db,
+            account_id=account_id,
+            decision=decision,
+            # decide_payment_account needs a reason for both outcomes; an approval without a note says so.
+            reason=note or "Approved",
+            staff_id=actor.id,
+            now=datetime.now(timezone.utc),
+        )
+    except DirectTransferError as exc:
+        raise HTTPException(
+            status_code=exc.status_code, detail=exc.detail, headers={"X-Error-Code": exc.code}
+        ) from exc
+    append_audit(
+        db,
+        entity_type="PAYMENT_ACCOUNT",
+        entity_id=account.id,
+        action=f"PAYMENT_ACCOUNT_{decision}",
+        actor_id=actor.id,
+        before_state=before,
+        after_state={
+            "status": account.status,
+            "note": note,
+            "user_id": str(account.user_id),
+            "holder_role": account.holder_role,
+            "bank_name": account.bank_name,
+            "account_last4": account.account_number[-4:],
+        },
+        ip_address=ip_address,
+    )
+    await db.commit()
+    return (await _admin_payment_accounts(db, [account]))[0]

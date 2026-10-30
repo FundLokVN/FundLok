@@ -121,9 +121,9 @@ async def user_owns_project(db: AsyncSession, user_id: UUID, project_id: UUID) -
     return result.scalar_one_or_none() is not None
 
 
-# Saved accounts are approved on save (no staff review), so APPROVED is what a live account looks like.
-# PENDING is kept for any account a future review flow holds back; REJECTED never counts.
-PAYMENT_ACCOUNT_LISTABLE_STATUSES = ("PENDING", "APPROVED")
+# Only an account an admin approved counts (POST /admin/payment-accounts/{id}/decision): a PENDING one is
+# still waiting, a REJECTED one never will. Accounts saved while there was no review were approved on save.
+PAYMENT_ACCOUNT_LISTABLE_STATUSES = ("APPROVED",)
 
 
 def owner_has_bank_account():

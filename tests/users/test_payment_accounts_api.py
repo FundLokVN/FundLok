@@ -57,8 +57,8 @@ async def test_save_account_as_investor(make_user, client, db_session):
     assert resp.status_code == 201, resp.text
     body = resp.json()
     assert body["holder_role"] == "INVESTOR"
-    assert body["status"] == "APPROVED"
-    assert body["approved_at"] is not None  # usable at once: there is no staff review
+    assert body["status"] == "PENDING"  # until an admin approves it
+    assert body["approved_at"] is None
     assert body["bank_name"] == "Techcombank"
     assert body["account_number"] == "19036789012"
 
@@ -70,21 +70,32 @@ async def test_save_account_as_investor(make_user, client, db_session):
     assert "19036789012" not in str(audit.after_state)
 
 
-async def test_saved_account_is_usable_by_the_funding_code_at_once(make_user, client, db_session):
+async def test_saved_account_is_not_usable_until_an_admin_approves_it(make_user, make_admin, client, db_session):
     from uuid import UUID
 
+    import pytest
+
     from app.direct_transfer.accounts import get_usable_account
-    from app.direct_transfer.models import PaymentAccount
+    from app.direct_transfer.errors import DirectTransferError
 
     investor = await make_user(role="INVESTOR")
     body = (await _save(client, investor)).json()
+    with pytest.raises(DirectTransferError) as pending:
+        await get_usable_account(
+            db_session, account_id=UUID(body["id"]), user_id=UUID(investor["id"]), holder_role="INVESTOR"
+        )
+    assert pending.value.code == "ACCOUNT_NOT_APPROVED"
+
+    admin = await make_admin()
+    decided = await client.post(
+        f"/admin/payment-accounts/{body['id']}/decision", json={"decision": "APPROVED"}, headers=admin["headers"]
+    )
+    assert decided.status_code == 200, decided.text
+    db_session.expire_all()
     account = await get_usable_account(
         db_session, account_id=UUID(body["id"]), user_id=UUID(investor["id"]), holder_role="INVESTOR"
     )
     assert account.status == "APPROVED"
-    # Nobody reviewed it: approved_by stays empty, unlike an account a member of staff decided.
-    stored = await db_session.get(PaymentAccount, UUID(body["id"]))
-    assert stored.approved_by is None
 
 
 async def test_save_account_as_sme_stamps_role(make_user, client):
@@ -137,7 +148,7 @@ async def test_save_account_at_a_bank_outside_the_list(make_user, client):
     body = resp.json()
     assert body["bank_bin"] is None
     assert body["bank_name"] == "Quỹ tín dụng nhân dân Phú Thọ"
-    assert body["status"] == "APPROVED"
+    assert body["status"] == "PENDING"
 
     qr = await client.get(f"/payment-accounts/{body['id']}/vietqr", headers=investor["headers"])
     assert qr.status_code == 400
