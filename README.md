@@ -157,6 +157,10 @@ docker compose exec -T postgres psql -U fundlok -d fundlok_dev < scripts/Setup_T
 
 The seed file is useful for reference data and relationship testing. The API smoke test still creates fresh users dynamically.
 
+## Running the tests
+
+See [`docs/testing.md`](docs/testing.md): `./scripts/docker_test.sh` runs the whole suite in Docker with no setup, and the file covers running from your venv, the dev database reset, and fixes for the common setup errors.
+
 ## Common Docker Commands
 
 Start PostgreSQL:
