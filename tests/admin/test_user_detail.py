@@ -219,3 +219,29 @@ async def test_user_detail_includes_project_application_aggregates(
     assert proj["applications_count"] == 2
     assert proj["total_requested_amount"] == 80000000
     assert isinstance(proj["total_requested_amount"], int)
+
+
+async def test_user_detail_lists_the_bank_accounts_the_user_saved(client, make_admin, make_user):
+    admin = await make_admin()
+    investor = await make_user(role="INVESTOR")
+    nobody = await make_user(role="SME")
+    for body in (
+        {"holder_type": "INDIVIDUAL", "bank_bin": "970415", "account_number": "123123123123", "account_name": "HUYNH TAN PHAT"},
+        {"holder_type": "INDIVIDUAL", "bank_bin": None, "other_bank_name": "Quỹ tín dụng nhân dân Phú Thọ",
+         "account_number": "555000111", "account_name": "HUYNH TAN PHAT"},
+    ):
+        saved = await client.post("/payment-accounts", json=body, headers=investor["headers"])
+        assert saved.status_code == 201, saved.text
+
+    data = (await client.get(f"/admin/users/{investor['id']}", headers=admin["headers"])).json()
+    accounts = data["payment_accounts"]
+    # Oldest first, in full: an admin checks the account an investor is paid into.
+    assert [(a["bank_name"], a["account_number"]) for a in accounts] == [
+        ("VietinBank", "123123123123"),
+        ("Quỹ tín dụng nhân dân Phú Thọ", "555000111"),
+    ]
+    assert accounts[0]["bank_bin"] == "970415" and accounts[1]["bank_bin"] is None
+    assert all(a["status"] == "APPROVED" and a["account_name"] == "HUYNH TAN PHAT" for a in accounts)
+
+    none = (await client.get(f"/admin/users/{nobody['id']}", headers=admin["headers"])).json()
+    assert none["payment_accounts"] == []
