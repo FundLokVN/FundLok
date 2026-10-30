@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from app.direct_transfer.schemas import PaymentAccountOut
+
 from app.gverify.normalize import normalize_identifier
 
 T = TypeVar("T")
@@ -299,7 +301,12 @@ class AdminUserFullDetail(AdminUserDetail):
 
     # Verification & banking insights
     kyc_status: str | None = None
+    # The mock app/banking table (linked_accounts), kept for older clients.
     linked_accounts_count: int = 0
+    # The bank accounts the user saved on their profile (payment_accounts),
+    # oldest first: what investors pay into and repayments go back to. Admin
+    # only, so the full number is shown. Empty when they have saved none.
+    payment_accounts: list[PaymentAccountOut] = []
 
     # Empty for a user with no project ownerships, not an error.
     projects: list[AdminUserProjectRef] = []
