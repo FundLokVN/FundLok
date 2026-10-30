@@ -75,6 +75,8 @@ from app.utils.jwt import create_password_reset_token
 from app.notifications.service import create_notification
 from app.projects.service import activate_project_if_approved
 from app.banking.models import LinkedAccount
+from app.direct_transfer.accounts import list_payment_accounts
+from app.direct_transfer.schemas import PaymentAccountOut
 from app.users.models import (
     USER_STATUS_ACTIVE,
     RefreshToken,
@@ -326,6 +328,7 @@ async def get_user_detail(db: AsyncSession, user_id: UUID) -> AdminUserFullDetai
             )
         )
     ).scalar() or 0
+    payment_accounts = await list_payment_accounts(db, user_id=user_id)
 
     return AdminUserFullDetail(
         id=user.id,
@@ -354,6 +357,7 @@ async def get_user_detail(db: AsyncSession, user_id: UUID) -> AdminUserFullDetai
         unused_recovery_codes_count=unused_recovery_codes_count,
         kyc_status=kyc_status,
         linked_accounts_count=linked_accounts_count,
+        payment_accounts=[PaymentAccountOut.model_validate(a) for a in payment_accounts],
         projects=projects,
         investments=AdminUserInvestmentSummary(
             orders_count=orders_count,

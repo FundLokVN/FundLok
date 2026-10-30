@@ -79,9 +79,6 @@ os.environ["RATE_LIMIT_ENABLED"] = "False"
 # .env has them configured.
 os.environ["R2_ENDPOINT_URL"] = ""
 os.environ["DIDIT_API_KEY"] = ""
-# Uploads go straight to UPLOADED unless a test turns the malware scan on
-# (SEC-04, tests/uploads/test_upload_scanning.py); a local .env must not.
-os.environ["UPLOAD_SCAN_ENABLED"] = "False"
 
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy import select, text  # noqa: E402
@@ -319,20 +316,6 @@ def _mock_external_io(monkeypatch):
 
     monkeypatch.setattr("app.gverify.storage.store_kyc_documents", _no_store)
     monkeypatch.setattr("app.gverify.storage.store_kyb_document", _no_store)
-
-    # Upload confirm reads each object's first bytes to check its signature
-    # (SEC-04). Storage holds what each key's extension says unless a test
-    # says otherwise; the scan job queue is never reached.
-    signatures = {"pdf": b"%PDF-1.7\n", "zip": b"PK\x03\x04", "xlsx": b"PK\x03\x04", "xml": b"<?xml version='1.0'?>"}
-    monkeypatch.setattr(
-        "app.uploads.service.read_prefix",
-        lambda key, length, **kw: signatures.get(key.rsplit(".", 1)[-1].lower(), b""),
-    )
-
-    async def _no_queue(kind, document_id):
-        return None
-
-    monkeypatch.setattr("app.uploads.router.queue_scan", _no_queue)
 
     # Breached-password lookups (app/auth/password_policy.py) see an empty
     # Have I Been Pwned range: no password is breached. The SEC-03 tests
@@ -653,9 +636,12 @@ def make_listing(client):
 @pytest.fixture
 def make_eligible_investor(db_session):
     """Bring an investor to where the market accepts their orders: email
-    verified and an APPROVED GVerify KYC attempt. Idempotent per investor."""
+    verified, an APPROVED GVerify KYC attempt and a saved bank account.
+    Idempotent per investor. Pass bank_account=False to stop short of the
+    account (the order endpoint refuses an investor without one)."""
 
-    async def _make(investor: dict):
+    async def _make(investor: dict, bank_account: bool = True):
+        from app.direct_transfer.models import PaymentAccount
         from app.gverify.models import STATUS_APPROVED, GVerifyVerification
 
         user = (await db_session.execute(select(User).where(User.id == investor["id"]))).scalar_one()
@@ -677,6 +663,23 @@ def make_eligible_investor(db_session):
                     person_number=uuid.uuid4().hex[:12],
                 )
             )
+        if bank_account:
+            saved = (
+                await db_session.execute(select(PaymentAccount.id).where(PaymentAccount.user_id == user.id))
+            ).first()
+            if saved is None:
+                db_session.add(
+                    PaymentAccount(
+                        user_id=user.id,
+                        holder_role="INVESTOR",
+                        holder_type="INDIVIDUAL",
+                        bank_bin="970436",
+                        bank_name="Vietcombank",
+                        account_number=uuid.uuid4().int.__str__()[:12],
+                        account_name="TEST INVESTOR",
+                        status="APPROVED",
+                    )
+                )
         await db_session.commit()
         return investor
 
