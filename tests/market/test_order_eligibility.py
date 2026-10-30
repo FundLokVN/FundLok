@@ -157,5 +157,16 @@ async def test_an_investor_without_a_bank_account_cannot_order(
     )
     assert saved.status_code == 201, saved.text
 
+    # Saved but not yet approved by an admin: still refused.
+    resp = await place_order(investor, setup["listing"]["id"], eligible=False)
+    assert resp.status_code == 403, resp.text
+    assert resp.headers["X-Error-Code"] == "BANK_ACCOUNT_REQUIRED"
+
+    from app.direct_transfer.models import PaymentAccount
+
+    account = await db_session.get(PaymentAccount, uuid.UUID(saved.json()["id"]))
+    account.status = "APPROVED"
+    await db_session.commit()
+
     resp = await place_order(investor, setup["listing"]["id"], eligible=False)
     assert resp.status_code == 201, resp.text

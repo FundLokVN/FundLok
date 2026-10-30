@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.admin import service
 from app.admin.access_log import audit_admin_read
 from app.admin.schemas import (
+    AdminPaymentAccountDecisionRequest,
+    AdminPaymentAccountOut,
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
     AdminInviteRequest,
@@ -306,6 +308,44 @@ async def get_user_detail(
     owns, its investor activity and its security posture. Admin-only and
     read-only — changing what the account may do lives on the status route."""
     return await service.get_user_detail(db, user_id)
+
+
+@router.get(
+    "/payment-accounts",
+    response_model=list[AdminPaymentAccountOut],
+    dependencies=[Depends(audit_admin_read("PAYMENT_ACCOUNT"))],
+)
+async def list_payment_accounts(
+    status: Literal["PENDING", "APPROVED", "REJECTED", "ALL"] = "PENDING",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The bank-account review queue: saved accounts with their owner, in full,
+    oldest first. Defaults to those waiting for a decision. Reads are logged
+    (full account numbers)."""
+    return await service.list_payment_accounts_for_review(db, status)
+
+
+@router.post("/payment-accounts/{account_id}/decision", response_model=AdminPaymentAccountOut)
+async def decide_payment_account(
+    account_id: UUID,
+    body: AdminPaymentAccountDecisionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Approve or reject a saved bank account. Only an approved account lists an
+    SME's project or lets an investor invest. Rejecting needs a note, which the
+    user sees. The decision is final and lands in the audit log with the admin
+    who made it."""
+    return await service.decide_payment_account_review(
+        db,
+        account_id,
+        decision=body.decision.value,
+        note=body.note,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
 
 
 @router.patch("/users/{user_id}/status", response_model=AdminUserDetail)

@@ -241,7 +241,8 @@ async def test_user_detail_lists_the_bank_accounts_the_user_saved(client, make_a
         ("Quỹ tín dụng nhân dân Phú Thọ", "555000111"),
     ]
     assert accounts[0]["bank_bin"] == "970415" and accounts[1]["bank_bin"] is None
-    assert all(a["status"] == "APPROVED" and a["account_name"] == "HUYNH TAN PHAT" for a in accounts)
+    assert all(a["status"] == "PENDING" and a["account_name"] == "HUYNH TAN PHAT" for a in accounts)
+    assert all(a["user_email"] == investor["email"] and a["approved_by_email"] is None for a in accounts)
 
     none = (await client.get(f"/admin/users/{nobody['id']}", headers=admin["headers"])).json()
     assert none["payment_accounts"] == []
