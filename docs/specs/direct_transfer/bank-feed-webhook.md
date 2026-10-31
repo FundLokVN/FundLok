@@ -19,6 +19,12 @@ Today every confirmation rests on an uploaded receipt checked by staff (D-018). 
 
 **Goal:** define the webhook receiver, the event record, the matching rules, and the idempotency contract between the receiver (Phat) and the steps (Edward), so a duplicate or retried event can never confirm a tranche or post to the ledger twice. Day 1 is synchronous for the money steps; the switch to ARQ is a documented later step (D-034).
 
+**Two different "accounts" are involved; keep them apart.**
+- The **watched bank account**: the SME's bank account, the one an investor pays into. SePay watches it for incoming transfers.
+- The **SePay account**: the login on SePay's service in which that bank account is connected. It is not a bank account.
+
+Who owns the SePay account is a design choice with legal and security consequences (§6, "SePay set-up"). Until it is answered, this spec does not assume either.
+
 What SePay does **not** do: it does not check anything. It reports transactions on the connected account; **the matching is our code.** It also does not tell us who paid (§6).
 
 ## 2. Out of Scope
@@ -95,6 +101,13 @@ A retry of a `RECEIVED` event **resumes** it. A retry of a finished event only i
 
 **AML: who paid (Q-032).** The payload has **no payer name or account field**. `description` ("full description from the bank") sometimes carries the sender's name (SePay's sample shows `"NGUYEN VAN A chuyen tien"`) but is empty for banks that do not support it, and the docs do not say where it comes from. So the feed proves the **money arrived**, not **who sent it**. Default: **keep the receipt** for the payer-name check against the KYC name (Loc's standard: KYC name = bank name). Where `description` is present, cross-check it against the receipt's payer name and send a difference to staff. The spike must measure which banks fill `description`.
 
+**SePay set-up: whose SePay account holds the connection (open, Q-031; default B).**
+- **A. FundLok's single SePay account.** FundLok connects each SME's bank account under it. FundLok then effectively holds every SME's bank connection, which is heavier legally and in security (Loc's rule: never handle an SME's banking password), and FundLok pays SePay.
+- **B. Each SME has its own SePay account.** The SME connects its own bank account and authorizes FundLok through SePay's OAuth with **read** permission (`bank-account:read`, `transaction:read`). The SME can revoke it; FundLok never touches bank credentials. More onboarding for the SME. Who pays SePay is unknown. Under B, the webhook is registered on the SME's SePay account (the OAuth `webhook:write` scope) or by the SME, pointing at our endpoint, so the receiver must tell SMEs apart: by the connected `accountNumber`, which must equal the SME's registered payee account.
+- **Default and recommendation: B**, pending Loc and IBL (consent wording, "holding" question). The receiver in §4 works for either; only the onboarding and the authentication secret per SePay account differ.
+
+**How the bank is connected to SePay (open).** Only banks that SePay connects through the bank's own OAuth or official API are acceptable. A bank that needs the SME's internet-banking login to be handed to SePay is excluded (Loc's rule). SePay's docs name some official-API banks (ACB, VietinBank, SHB in the changelog) and I could not find a complete list: Phat to establish it.
+
 **Data minimization.** `accumulated` is the SME's account balance after each transaction. Strip it before storing and logging. Say so in the consent wording (Q-031).
 
 **Security.** Authenticate every call: SePay supports HMAC-SHA256, an API key and OAuth 2.0 for webhook calls; we prefer HMAC-SHA256; compare in constant time over HTTPS; reject and store nothing otherwise. Rate-limit the route. The endpoint URL is not a secret. Never put an SME's banking password anywhere: only banks connected through OAuth or an official API (Loc's design document, "Security of a bank feed"). The OAuth webhook scopes (`webhook:write`, `webhook:delete`) can change webhooks: request only the read scopes we need.
@@ -139,8 +152,8 @@ A retry of a `RECEIVED` event **resumes** it. A retry of a finished event only i
 |---|---|---|
 | 1 | **Q-031:** approve the bank feed for SME accounts (amends D-018): vendor, price, consent wording, IBL's "holding" answer, OAuth/official-API banks only | Loc |
 | 2 | **Q-032:** keep the receipt for the payer-name check (default yes) or accept a weaker payer check | Edward, Loc |
-| 3 | Phat's flow diagram: which account is connected (the SME's), and whose SePay account owns the link (FundLok's, or each SME's)? | Phat |
-| 4 | How an SME connects (OAuth or its banking login), and which banks work that way | Phat |
+| 3 | Which **SePay set-up** is assumed: A (FundLok's one SePay account) or B (each SME's own SePay account, FundLok authorized by OAuth)? Default B. And his flow diagram | Phat |
+| 4 | How the SME's **bank** is connected to SePay: the bank's OAuth or official API, or the SME's internet-banking login (excluded)? Which banks work the acceptable way? | Phat |
 | 5 | Which banks fill `description` with the sender's name (spike measurement) | Phat, Edward |
 | 6 | Where the receiver lives (a new `app/bank_feed/`, or under `app/market/`) | Edward, Phat |
 | 7 | Repayments: confirming `out` events (phase 2) | Edward |
@@ -148,7 +161,7 @@ A retry of a `RECEIVED` event **resumes** it. A retry of a finished event only i
 ## 10. Handoff: the spike (D-033), who does what
 
 **Phat (webhook receiver, sandbox only):**
-1. Reply to Edward with the flow diagram and answers to §9 items 3 and 4 (which account is connected; whose SePay account owns the link; how an SME connects).
+1. Reply to Edward with the flow diagram and answers to §9 items 3 and 4: which SePay set-up you assume (A: FundLok's one SePay account, or B: each SME's own SePay account with FundLok authorized by OAuth), and how an SME's bank is connected to SePay (the bank's OAuth or official API, or the SME's banking login) and for which banks.
 2. Create the event table (§3) with `UNIQUE(provider, provider_event_id)` and an Alembic migration (chain it off the current head; run `scripts/premerge_check.sh <PR>` before merging).
 3. Build `POST /webhooks/sepay` (§4): authenticate (HMAC-SHA256 or API key), strip `accumulated`, store, call the steps with the key `sepay:<id>`, mark `PROCESSED` only after they return, reply 200 `{"success": true}`; non-2xx on any failure. Day-1 design: money steps in one transaction, side effects to ARQ after commit (D-034).
 4. Use SePay's **test mode** ("simulate bank transactions"): no real bank account, no production URL.
