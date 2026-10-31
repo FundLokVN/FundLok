@@ -154,6 +154,7 @@ All specs live in `docs/specs/<module>/<feature>.md`. See `docs/specs/_TEMPLATE.
 - Branch naming: `feature/<module>/<short-description>` (e.g. `feature/banking/brankas-disbursement`)
 - PR must include: link to spec, passing tests, updated migration if schema changed
 - Specs are reviewed and merged before implementation PRs are opened
+- **Before merging any PR that adds a migration** (and whenever `main` has moved since the PR's checks ran), run `scripts/premerge_check.sh <PR number>`. `main` has no branch protection (free GitHub plan), so GitHub will not stop a merge on stale checks; #64 merged that way and left `main` with two Alembic heads. The script trial-merges the PR into the current `main` and prints GO or NO-GO (conflicts, a single migration chain, an empty-database upgrade). It changes nothing in your folder.
 
 ---
 
