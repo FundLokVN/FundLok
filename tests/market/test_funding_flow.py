@@ -435,3 +435,107 @@ async def test_the_legacy_order_path_refuses_a_listing_with_a_funding_window(
 
     assert resp.status_code == 409, resp.text
     assert resp.headers["X-Error-Code"] == "USE_FUNDING_WINDOW"
+
+
+# --------------------------------------------------------------------------- #
+# receipt
+# --------------------------------------------------------------------------- #
+PNG = b"\x89PNG\r\n\x1a\n" + b"receipt-bytes"
+
+
+async def _upload(client, investor, tranche_id, content=PNG, *, name="receipt.png", kind="image/png", key=None):
+    headers = investor["headers"] | ({"Idempotency-Key": key} if key else {})
+    return await client.post(
+        f"/funding/tranches/{tranche_id}/receipt", files={"file": (name, content, kind)}, headers=headers
+    )
+
+
+async def test_the_investor_uploads_their_transfer_receipt(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    tranche = (await _reserve(client, investor, setup["window"].id)).json()
+    assert tranche["receipt_submitted_at"] is None
+
+    resp = await _upload(client, investor, tranche["id"], key=str(uuid.uuid4()))
+
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["tranche_status"] == "SIGNED"
+    assert body["check_status"] == "AWAITING_FIELDS"  # staff read it (MVP)
+    assert body["confirmation_level"] == "REPORTED"
+
+    mine = (await client.get("/funding/me/tranches", headers=investor["headers"])).json()
+    assert mine[0]["receipt_submitted_at"] is not None
+    audit = (
+        await db_session.execute(select(AuditLog).where(AuditLog.action == "INVESTMENT_RECEIPT_UPLOADED"))
+    ).scalar_one()
+    assert str(audit.actor_id) == investor["id"] and audit.after_state["check_status"] == "AWAITING_FIELDS"
+
+    again = await _upload(client, investor, tranche["id"], PNG + b"-2")
+    assert again.status_code == 409 and again.headers["X-Error-Code"] == "RECEIPT_ALREADY_SUBMITTED"
+
+
+async def test_a_receipt_must_be_a_pdf_or_an_image(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    tranche = (await _reserve(client, investor, setup["window"].id)).json()
+
+    # Typed by its bytes, not by what the browser claims.
+    resp = await _upload(client, investor, tranche["id"], b"<html>not a receipt</html>", kind="image/png")
+    assert resp.status_code == 415 and resp.headers["X-Error-Code"] == "UNSUPPORTED_TYPE"
+
+    pdf = await _upload(client, investor, tranche["id"], b"%PDF-1.7 receipt", name="r.pdf", kind="application/pdf")
+    assert pdf.status_code == 202, pdf.text
+
+
+async def test_a_receipt_over_10_mb_is_refused(client, db_session, make_admin, make_user, make_eligible_investor):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    tranche = (await _reserve(client, investor, setup["window"].id)).json()
+
+    resp = await _upload(client, investor, tranche["id"], PNG + b"0" * (10 * 1024 * 1024))
+    assert resp.status_code == 413 and resp.headers["X-Error-Code"] == "FILE_TOO_LARGE"
+
+
+async def test_one_receipt_cannot_fund_two_tickets(client, db_session, make_admin, make_user, make_eligible_investor):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    first = await make_eligible_investor(await make_user(role="INVESTOR"))
+    second = await make_eligible_investor(await make_user(role="INVESTOR"))
+    a = (await _reserve(client, first, setup["window"].id)).json()
+    b = (await _reserve(client, second, setup["window"].id)).json()
+
+    assert (await _upload(client, first, a["id"])).status_code == 202
+    reused = await _upload(client, second, b["id"])
+    assert reused.status_code == 409 and reused.headers["X-Error-Code"] == "DUPLICATE_FILE"
+
+
+async def test_only_the_investor_who_reserved_uploads_its_receipt(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    other = await make_eligible_investor(await make_user(role="INVESTOR"))
+    tranche = (await _reserve(client, investor, setup["window"].id)).json()
+
+    assert (await _upload(client, other, tranche["id"])).status_code == 404
+
+
+async def test_a_receipt_after_the_hold_lapsed_goes_to_staff_review(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    tranche = (await _reserve(client, investor, setup["window"].id)).json()
+    row = await db_session.get(Tranche, uuid.UUID(tranche["id"]))
+    row.hold_expires_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)
+    await db_session.commit()
+
+    resp = await _upload(client, investor, tranche["id"])
+
+    # The money may already have moved: taken, and staff decide.
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["tranche_status"] == "UNDER_REVIEW"

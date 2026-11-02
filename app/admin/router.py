@@ -5,11 +5,18 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin import funding as admin_funding
 from app.admin import service
 from app.admin.access_log import audit_admin_read
 from app.admin.schemas import (
+    AdminFundingActivityOut,
+    AdminFundingRoundOut,
+    AdminInvestorTransferOut,
     AdminPaymentAccountDecisionRequest,
     AdminPaymentAccountOut,
+    AdminReceiptFieldsRequest,
+    AdminReceiptUrlResponse,
+    AdminTransferDecisionRequest,
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
     AdminInviteRequest,
@@ -361,6 +368,127 @@ async def decide_payment_account(
         account_id,
         decision=body.decision.value,
         note=body.note,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.get(
+    "/funding/rounds",
+    response_model=list[AdminFundingRoundOut],
+    dependencies=[Depends(audit_admin_read("FUNDING_WINDOW"))],
+)
+async def list_funding_rounds(
+    status: Literal["OPEN", "ALL"] = "OPEN",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The Transactions tab's rounds: by default the ones taking or settling investment (OPEN, FULL, CLOSING),
+    closing soonest first, with their totals and how many tickets wait on staff."""
+    return await admin_funding.list_rounds(db, open_only=status == "OPEN")
+
+
+@router.get(
+    "/funding/transfers",
+    response_model=Page[AdminInvestorTransferOut],
+    dependencies=[Depends(audit_admin_read("TRANCHE"))],
+)
+async def list_investor_transfers(
+    status: Literal["ALL", "NEEDS_ACTION", "AWAITING_TRANSFER", "RECEIVED", "ENDED"] = "ALL",
+    window_id: UUID | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Investor tickets and the transfers reported for them, those waiting on staff first. Reads are logged
+    (investor names and the business's account)."""
+    return await admin_funding.list_transfers(
+        db, status=status, window_id=window_id, page=page, page_size=page_size
+    )
+
+
+@router.get(
+    "/funding/activity",
+    response_model=Page[AdminFundingActivityOut],
+    dependencies=[Depends(audit_admin_read("AUDIT_LOG"))],
+)
+async def list_funding_activity(
+    group: Literal["DECISIONS", "INVESTOR", "VIEWS", "ALL"] = "DECISIONS",
+    tranche_id: UUID | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The Transactions tab's audit trail, newest first. DECISIONS (the default): receipts checked, rejected, and
+    reviews settled as received or not. INVESTOR: reservations and uploads. VIEWS: who opened which receipt.
+    ``tranche_id`` narrows it to one ticket (the review panel's history)."""
+    return await admin_funding.list_activity(db, group=group, tranche_id=tranche_id, page=page, page_size=page_size)
+
+
+@router.get(
+    "/funding/transfers/{tranche_id}",
+    response_model=AdminInvestorTransferOut,
+    dependencies=[Depends(audit_admin_read("TRANCHE", id_param="tranche_id"))],
+)
+async def get_investor_transfer(
+    tranche_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """One investor ticket for the review panel: the transfer reported for it, what a matching receipt shows,
+    and any open review."""
+    return await admin_funding.get_transfer(db, tranche_id)
+
+
+@router.get(
+    "/funding/transfers/{transfer_id}/receipt-url",
+    response_model=AdminReceiptUrlResponse,
+    dependencies=[Depends(audit_admin_read("TRANSFER", id_param="transfer_id"))],
+)
+async def get_transfer_receipt_url(
+    transfer_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A 10-minute link to the receipt the investor uploaded. Each view is audited."""
+    return await admin_funding.get_receipt_url(
+        db, transfer_id, actor=current_user, ip_address=request.client.host if request.client else None
+    )
+
+
+@router.post("/funding/transfers/{transfer_id}/fields", response_model=AdminInvestorTransferOut)
+async def enter_transfer_receipt_fields(
+    transfer_id: UUID,
+    body: AdminReceiptFieldsRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Record what the receipt shows. If it all matches the QR FundLok issued, the ticket is attested and the
+    business has two working days to dispute; otherwise it goes to review. Once per transfer."""
+    return await admin_funding.enter_receipt_fields(
+        db, transfer_id, body, actor=current_user, ip_address=request.client.host if request.client else None
+    )
+
+
+@router.post("/funding/reviews/{dispute_id}/decision", response_model=AdminInvestorTransferOut)
+async def decide_investor_transfer(
+    dispute_id: UUID,
+    body: AdminTransferDecisionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Settle a ticket under review: RECEIVED (it counts toward the round) or NOT_RECEIVED (void, its place
+    freed). Needs a reason; final, and audited with the admin who made it."""
+    return await admin_funding.decide_transfer(
+        db,
+        dispute_id,
+        outcome=body.outcome,
+        reason=body.reason,
         actor=current_user,
         ip_address=request.client.host if request.client else None,
     )

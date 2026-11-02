@@ -604,3 +604,132 @@ class AuditLogOut(BaseModel):
     created_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+# --------------------------------------------------------------------------- #
+# Transactions tab: funding rounds and investor transfers (app/admin/funding.py)
+# --------------------------------------------------------------------------- #
+class AdminFundingRoundOut(FundingWindowOut):
+    """A funding round as staff see it: its progress plus whose project it is, and how many of its tickets wait
+    on staff (a receipt to read, or a review to decide)."""
+
+    project_id: UUID
+    project_name: str
+    sme_email: str
+    sme_full_name: str | None = None
+    needs_action: int
+
+
+class AdminTransferReceiptOut(BaseModel):
+    """The investor's reported transfer. ``parsed_fields`` is what staff read off the receipt (null until then);
+    ``failure_codes`` are the checks it failed against the QR FundLok issued."""
+
+    id: UUID
+    check_status: str
+    failure_codes: list[str]
+    parsed_fields: dict[str, Any] | None = None
+    has_file: bool
+    original_filename: str | None = None
+    content_type: str | None = None
+    created_at: datetime | None = None
+
+
+class AdminTransferDisputeOut(BaseModel):
+    id: UUID
+    cause: str
+    status: str
+    outcome: str | None = None
+
+
+class AdminTransferExpectedOut(BaseModel):
+    """What a matching receipt shows: the business's account the QR paid into, and the investor's KYC name."""
+
+    payee_bank_name: str | None = None
+    payee_account_number: str | None = None
+    payee_account_name: str | None = None
+    payer_kyc_name: str
+
+
+class AdminInvestorTransferOut(BaseModel):
+    """One investor ticket and the transfer reported for it. ``needs_action``: a receipt waits to be read, or a
+    review waits for a decision."""
+
+    id: UUID
+    window_id: UUID
+    project_id: UUID
+    project_name: str
+    investor_id: UUID
+    investor_email: str
+    investor_full_name: str | None = None
+    amount_vnd: int
+    reference_code: str
+    status: str
+    review_cause: str | None = None
+    void_reason: str | None = None
+    reserved_at: datetime
+    hold_expires_at: datetime
+    receipt_submitted_at: datetime | None = None
+    attested_at: datetime | None = None
+    confirmed_at: datetime | None = None
+    needs_action: bool
+    transfer: AdminTransferReceiptOut | None = None
+    dispute: AdminTransferDisputeOut | None = None
+    expected: AdminTransferExpectedOut
+
+
+class AdminReceiptUrlResponse(BaseModel):
+    """A short-lived read URL for an investor's transfer receipt."""
+
+    url: str
+    expires_in: int
+    content_type: str
+    original_filename: str | None = None
+
+
+class AdminReceiptFieldsRequest(BaseModel):
+    """What the receipt shows. Leave a field blank when the receipt does not show it: the checks then fail and
+    the ticket goes to review. ``reason`` is recorded with the entry."""
+
+    amount_vnd: int = Field(gt=0, le=10**13)
+    transferred_at: datetime
+    payer_name: str | None = Field(default=None, max_length=200)
+    payer_account: str | None = Field(default=None, max_length=40)
+    payee_account: str | None = Field(default=None, max_length=40)
+    memo: str | None = Field(default=None, max_length=300)
+    bank_txn_id: str | None = Field(default=None, max_length=100)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("transferred_at")
+    @classmethod
+    def _aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("transferred_at needs a timezone")
+        return value
+
+
+class AdminTransferDecisionRequest(BaseModel):
+    """Settle a ticket under review: whether the money reached the business's account."""
+
+    outcome: Literal["RECEIVED", "NOT_RECEIVED"]
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class AdminFundingActivityOut(BaseModel):
+    """One entry of the transfers' audit trail: who did what to which ticket, and why. ``check_status`` and
+    ``failure_codes`` come with a receipt check (MATCHED: recorded as paid; MISMATCH: sent to review; REJECTED);
+    ``reason`` is the note staff gave. ``actor`` is null for an action no signed-in person took."""
+
+    id: UUID
+    action: str
+    created_at: datetime | None = None
+    ip_address: str | None = None
+    actor: ActorOut | None = None
+    tranche_id: UUID | None = None
+    reference_code: str | None = None
+    amount_vnd: int | None = None
+    project_name: str | None = None
+    investor: ActorOut | None = None
+    check_status: str | None = None
+    failure_codes: list[str] = []
+    tranche_status: str | None = None
+    reason: str | None = None
