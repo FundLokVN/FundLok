@@ -361,6 +361,70 @@ async def test_one_live_ticket_per_investor_per_window(
     assert second.status_code == 409 and second.headers["X-Error-Code"] == "ALREADY_HAS_LIVE_TRANCHE"
 
 
+async def _lapse(db_session, tranche_id):
+    """The ticket's hold ran out an hour ago, and no expiry job has run since."""
+    db_session.expire_all()
+    row = await db_session.get(Tranche, uuid.UUID(tranche_id))
+    row.hold_expires_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
+    await db_session.commit()
+
+
+async def test_an_investor_whose_hold_lapsed_can_reserve_again(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id, listing_id = setup["window"].id, setup["window"].listing_id  # read before _lapse expires them
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    first = (await _reserve(client, investor, window_id, 20_000_000)).json()
+    await _lapse(db_session, first["id"])
+
+    again = await _reserve(client, investor, window_id, 20_000_000)
+
+    assert again.status_code == 201, again.text
+    ticket = again.json()
+    assert ticket["id"] != first["id"] and ticket["status"] == "SIGNED"
+    assert ticket["reference_code"] != first["reference_code"]  # a new memo for the new transfer
+    db_session.expire_all()
+    assert (await db_session.get(Tranche, uuid.UUID(first["id"]))).status == "EXPIRED"
+    window = (await client.get(f"/funding/listings/{listing_id}/window", headers=investor["headers"])).json()
+    assert window["reserved_vnd"] == 20_000_000 and window["capacity_vnd"] == 60_000_000
+
+
+async def test_reading_the_window_releases_lapsed_holds(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id, listing_id = setup["window"].id, setup["window"].listing_id
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    tranche = (await _reserve(client, investor, window_id, 80_000_000)).json()
+    assert (await _window(db_session, setup["project"])).status == "FULL"
+    await _lapse(db_session, tranche["id"])
+
+    resp = await client.get(f"/funding/listings/{listing_id}/window", headers=investor["headers"])
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "OPEN"  # the lapse reopens a window that was full
+    assert body["reserved_vnd"] == 0 and body["capacity_vnd"] == 80_000_000
+    mine = (await client.get("/funding/me/tranches", headers=investor["headers"])).json()
+    assert [t["status"] for t in mine] == ["EXPIRED"]
+
+
+async def test_replaying_the_key_of_a_lapsed_reservation_says_it_expired(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    window_id = setup["window"].id
+    key = str(uuid.uuid4())
+    first = (await _reserve(client, investor, window_id, key=key)).json()
+    await _lapse(db_session, first["id"])
+
+    replay = await _reserve(client, investor, window_id, key=key)
+
+    assert replay.status_code == 409 and replay.headers["X-Error-Code"] == "HOLD_EXPIRED"
+
+
 async def test_the_legacy_order_path_refuses_a_listing_with_a_funding_window(
     client, db_session, make_admin, make_user, place_order
 ):

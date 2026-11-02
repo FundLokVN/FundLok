@@ -30,8 +30,9 @@ from app.direct_transfer.models import FundingWindow, PaymentAccount, Tranche
 from app.direct_transfer.reservation import reserve_ticket
 from app.direct_transfer.signing import MockSigner, Signer
 from app.direct_transfer.storage import EvidenceStorage, R2Storage
+from app.direct_transfer.tranche_state import transition_tranche
 from app.direct_transfer.tranches import accept_tranche
-from app.direct_transfer.windows import open_funding_window
+from app.direct_transfer.windows import lock_window, open_funding_window, refresh_window_fullness
 from app.lending.models import Contract, Listing, LoanApplication, Project, ProjectOwnership, ScoreRun
 from app.utils.audit import append_audit
 
@@ -264,6 +265,30 @@ async def _investor_payout_account(db: AsyncSession, investor_id: UUID) -> UUID 
     ).scalar_one_or_none()
 
 
+async def expire_lapsed_holds(db: AsyncSession, *, window_id: UUID, now: dt.datetime) -> int:
+    """The window's RESERVED and SIGNED tickets whose hold has lapsed with no receipt -> EXPIRED, freeing their
+    capacity so their investors (and others) can reserve again (funding-window.md rule 9). How many expired.
+
+    Edward's `expire_holds_job` does this for every window on a timer, but only `app/direct_transfer/worker.py`
+    schedules it and nothing runs that worker yet, so a lapsed hold would otherwise block its investor
+    (ALREADY_HAS_LIVE_TRANCHE) and the window's capacity for good. Same rule as the job, so both can run.
+    """
+    lapsed = (
+        Tranche.window_id == window_id,
+        Tranche.status.in_(("RESERVED", "SIGNED")),
+        Tranche.receipt_submitted_at.is_(None),
+        Tranche.hold_expires_at <= now,
+    )
+    if (await db.execute(select(Tranche.id).where(*lapsed).limit(1))).first() is None:
+        return 0
+    window = await lock_window(db, window_id)
+    rows = (await db.execute(select(Tranche).where(*lapsed))).scalars().all()
+    for tranche in rows:
+        await transition_tranche(db, tranche, "EXPIRED", now=now, reason="HOLD_LAPSED")
+    await refresh_window_fullness(db, window, now)
+    return len(rows)
+
+
 async def reserve_and_accept(
     db: AsyncSession,
     *,
@@ -281,13 +306,16 @@ async def reserve_and_accept(
     investing terms once, and the tranche comes back SIGNED, ready for payment instructions.
 
     One transaction: if signing fails the reservation is not kept either. Replaying the Idempotency-Key returns
-    the same tranche (reserve_ticket and accept_tranche are both idempotent).
+    the same tranche (reserve_ticket and accept_tranche are both idempotent), unless its hold has since lapsed:
+    then 409 HOLD_EXPIRED, and the investor reserves again with a new key.
     """
     if terms_version != INVESTOR_TERMS_VERSION:
         raise conflict("TERMS_OUTDATED", "The investing terms have changed; read them again before investing")
     account_id = payment_account_id or await _investor_payout_account(db, investor_id)
     if account_id is None:
         raise conflict("ACCOUNT_NOT_APPROVED", "Add a bank account at a listed bank before investing")
+    # A lapsed hold no longer counts as the investor's live ticket, nor against the window's capacity.
+    await expire_lapsed_holds(db, window_id=window_id, now=now)
     tranche = await reserve_ticket(
         db,
         window_id=window_id,
@@ -299,6 +327,8 @@ async def reserve_and_accept(
         now=now,
         params=params,
     )
+    if tranche.status == "EXPIRED":
+        raise conflict("HOLD_EXPIRED", "The reservation hold has expired; reserve again")
     window = await db.get(FundingWindow, tranche.window_id)
     # What the investor signs: the terms they read, by version, and the ticket they are taking.
     document = json.dumps(

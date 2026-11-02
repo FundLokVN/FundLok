@@ -13,11 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.direct_transfer.errors import DirectTransferError
-from app.direct_transfer.models import Tranche
+from app.direct_transfer.models import FundingWindow, Tranche
 from app.direct_transfer.schemas import FundingWindowOut, PaymentOut, TrancheOut
 from app.direct_transfer.tranches import list_investor_tranches, payment_instructions
 from app.direct_transfer.windows import get_window_progress
-from app.market.funding import reserve_and_accept
+from app.market.funding import expire_lapsed_holds, reserve_and_accept
 from app.market.schemas import ReservationCreate
 from app.market.service import _require_eligible_investor
 from app.users.models import Role, User
@@ -48,8 +48,15 @@ async def read_window(
     current_user: User = Depends(get_current_user),
 ):
     """Progress of the listing's funding window: totals only, never another investor's name or amount."""
+    now = _now()
+    # Lapsed holds are released first, so the capacity shown is what a reservation would get.
+    window_id = (
+        await db.execute(select(FundingWindow.id).where(FundingWindow.listing_id == listing_id))
+    ).scalar_one_or_none()
+    if window_id is not None and await expire_lapsed_holds(db, window_id=window_id, now=now):
+        await db.commit()
     try:
-        progress = await get_window_progress(db, listing_id=listing_id, now=_now())
+        progress = await get_window_progress(db, listing_id=listing_id, now=now)
     except DirectTransferError as exc:
         await _raise_mapped(db, exc)
     return FundingWindowOut.model_validate(progress)
