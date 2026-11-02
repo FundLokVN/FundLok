@@ -1,6 +1,9 @@
+import datetime as dt
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.direct_transfer.schemas import TrancheOut
 
 
 class ListingCreate(BaseModel):
@@ -54,3 +57,10 @@ class ReservationCreate(BaseModel):
     terms_version: str = Field(min_length=1, max_length=40)
     # The investor's account the SME repays to; their latest approved one when omitted.
     payment_account_id: UUID | None = None
+
+
+class InvestorTrancheOut(TrancheOut):
+    """An investor's own ticket. Adds when they uploaded their transfer receipt: null until they do, so the page
+    knows whether to ask for one."""
+
+    receipt_submitted_at: dt.datetime | None = None

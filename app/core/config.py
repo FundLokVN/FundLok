@@ -195,6 +195,30 @@ class Settings(BaseSettings):
     # run through ARQ, never BackgroundTasks (CLAUDE.md). Points at the
     # docker-compose `redis` service locally; a managed Redis URL in prod.
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    # SePay OAuth2 (docs/specs/oauth/sepay-connect.md, ADR-011). A user may
+    # connect their own SePay account so FundLok can read their linked bank
+    # accounts. Off unless the client ID, secret and encryption key are all
+    # set. The token key is its own secret, like TOTP_ENCRYPTION_KEY.
+    SEPAY_CLIENT_ID: str | None = None
+    SEPAY_CLIENT_SECRET: str | None = None
+    SEPAY_TOKEN_ENCRYPTION_KEY: str | None = None
+    SEPAY_BASE_URL: str = "https://my.sepay.vn"
+    # Must match the redirect URL registered with SePay exactly. Defaults to
+    # the frontend callback page.
+    SEPAY_REDIRECT_URI: str | None = None
+    SEPAY_SCOPES: str = "bank-account:read transaction:read webhook:read webhook:write webhook:delete"
+
+    @property
+    def sepay_configured(self) -> bool:
+        return bool(self.SEPAY_CLIENT_ID and self.SEPAY_CLIENT_SECRET and self.SEPAY_TOKEN_ENCRYPTION_KEY)
+
+    @property
+    def sepay_redirect_uri(self) -> str:
+        if self.SEPAY_REDIRECT_URI:
+            return self.SEPAY_REDIRECT_URI.strip()
+        return f"{self.FRONTEND_URL.strip().rstrip('/')}/dashboard/settings/profile/sepay-callback"
+
     @property
     def webauthn_rp_id(self) -> str:
         """Registrable domain for passkeys, derived from FRONTEND_URL if unset."""
