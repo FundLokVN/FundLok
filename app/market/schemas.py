@@ -1,5 +1,6 @@
 import datetime as dt
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -213,3 +214,98 @@ class InvestmentDueOut(BaseModel):
     vietqr_payload: str | None
     # Set when a day due here is due again because staff denied its receipt.
     rejection: RepaymentRejectionOut | None = None
+
+
+class TransactionOut(BaseModel):
+    """One movement of the caller's money, signed from their side: out is negative. The investor: INVESTMENT (out)
+    and RETURN (in: what reached them, after the tax the business keeps back). The business: DISBURSEMENT (an
+    investment in), REPAYMENT (out: what it transferred an investor) and FEE (a FundLok invoice). ``status``:
+    COMPLETED (received, matched by FundLok, or paid), PENDING (being checked, the business's word that it paid, or
+    an invoice unpaid), FAILED (voided, or the investor reported the repayment never arrived). ``method_key`` names
+    how it moved, for the page's copy."""
+
+    id: str
+    tranche_id: UUID | None = None
+    reference: str
+    type: Literal["INVESTMENT", "RETURN", "DISBURSEMENT", "REPAYMENT", "FEE"]
+    status: Literal["COMPLETED", "PENDING", "FAILED"]
+    created_at: dt.datetime
+    amount: int
+    currency: Literal["VND"] = "VND"
+    counterparty: str
+    method_key: str
+
+
+class InvestorMonthlyPointOut(BaseModel):
+    """One month of the portfolio: capital invested to date, and what came back (capital returned plus earnings
+    after tax; ``principal_monthly + yield_monthly == returns_monthly``)."""
+
+    month: str
+    deployed_cumulative: int
+    returns_cumulative: int
+    returns_monthly: int
+    principal_monthly: int
+    yield_monthly: int
+
+
+class IndustryAllocationOut(BaseModel):
+    industry: str
+    deployed: int
+
+
+class CapitalStatusOut(BaseModel):
+    """Where the invested capital stands: received but not repaying yet (active), out and repaying (repaying),
+    returned (completed), or written down."""
+
+    statusKey: Literal["active", "repaying", "completed", "writtenDown"]
+    amount: int
+
+
+class InvestorAnalyticsOut(BaseModel):
+    monthly: list[InvestorMonthlyPointOut]
+    allocation: list[IndustryAllocationOut]
+    capital_status: list[CapitalStatusOut]
+    active_positions: int
+
+
+class SmeFacilityOut(BaseModel):
+    """The business's loan: the sum of its investments, each repaying on its own. ``total_obligation`` is every
+    repayment day tax included (the investors' tax is kept back by the business but owed all the same);
+    ``interest_rate_pct`` is the investors' yearly rate (FundLok's fee is invoiced separately). ``target_daily`` is
+    the next unpaid day; the period is this month's days. ``score`` is the business score the round was offered on."""
+
+    principal: int
+    total_obligation: int
+    interest_rate_pct: float
+    term_months: int
+    disbursed_at: dt.date
+    days_remaining: int
+    target_daily: int
+    current_period_total: int
+    current_period_end_date: dt.date
+    on_time_streak: int
+    score: float | None = None
+
+
+class SmeRepaymentMonthOut(BaseModel):
+    """One month of repayment, tax included. ``revenue_share``: that against the average monthly revenue the loan
+    was sized on (0 when there is none)."""
+
+    month: str
+    repaid: int
+    repaid_cumulative: int
+    revenue_share: float
+
+
+class ScoreFactorOut(BaseModel):
+    key: Literal["bcq", "rsg", "sector", "behavioral"]
+    score: float
+    weight: float
+
+
+class BusinessAnalyticsOut(BaseModel):
+    facility: SmeFacilityOut | None
+    months: list[SmeRepaymentMonthOut]
+    score_factors: list[ScoreFactorOut]
+    # The average monthly revenue (last 12 months filed) the revenue share is measured against; null without one.
+    revenue_basis_vnd: int | None

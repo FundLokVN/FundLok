@@ -32,13 +32,17 @@ from app.lending.models import Project
 from app.market import funding
 from app.market.emails import receipt_notice, send_investment_receipt_email
 from app.market.funding import expire_lapsed_holds, reserve_and_accept
+from app.market.portfolio import business_analytics, business_transactions, investor_analytics, investor_transactions
 from app.market.projection import project_ticket, sum_by_day
 from app.market.schemas import (
+    BusinessAnalyticsOut,
+    InvestorAnalyticsOut,
     InvestorTrancheOut,
     ReservationCreate,
     SmeRepaymentPlanOut,
     SmeRoundOut,
     SmeTicketOut,
+    TransactionOut,
 )
 from app.market.service import _require_eligible_investor
 from app.users.models import Role, User
@@ -146,6 +150,50 @@ async def read_payment(
     except DirectTransferError as exc:
         await _raise_mapped(db, exc)
     return PaymentOut.model_validate(instructions)
+
+
+@router.get("/me/transactions", response_model=list[TransactionOut])
+async def read_my_transactions(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The investor's money in and out, newest first: each investment transferred, and each day the business repaid
+    them (what reached them, after the tax the business keeps back)."""
+    return [TransactionOut.model_validate(row) for row in await investor_transactions(db, investor_id=current_user.id)]
+
+
+@router.get("/me/analytics", response_model=InvestorAnalyticsOut)
+async def read_my_analytics(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The investor's portfolio: monthly capital invested and returned (capital and earnings after tax apart), by
+    industry, and where the capital stands."""
+    return InvestorAnalyticsOut.model_validate(
+        await investor_analytics(db, investor_id=current_user.id, today=ict_date(_now()))
+    )
+
+
+@router.get("/me/business-transactions", response_model=list[TransactionOut])
+async def read_business_transactions(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The business's money in and out, newest first: each investment received, each day it repaid an investor
+    (what it transferred), and FundLok's fee invoices. Investors are masked."""
+    return [TransactionOut.model_validate(row) for row in await business_transactions(db, sme_user_id=current_user.id)]
+
+
+@router.get("/me/business-analytics", response_model=BusinessAnalyticsOut)
+async def read_business_analytics(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The business's loan: what it owes and has repaid, its daily amount, month by month against its verified
+    revenue, and the four groups of its business score."""
+    return BusinessAnalyticsOut.model_validate(
+        await business_analytics(db, sme_user_id=current_user.id, today=ict_date(_now()))
+    )
 
 
 @router.get("/me/tranches", response_model=list[InvestorTrancheOut])
