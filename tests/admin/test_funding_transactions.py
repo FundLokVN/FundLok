@@ -464,3 +464,57 @@ async def test_denying_a_ticket_left_waiting_voids_it(
     assert resp.json()["status"] == "VOID" and resp.json()["needs_action"] is False
     [round_] = (await client.get("/admin/funding/rounds", headers=s["admin"]["headers"])).json()
     assert round_["capacity_vnd"] == 80_000_000
+
+
+async def test_the_approval_panel_works_out_the_repayment_approving_starts(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    """Before approving, staff see the days the investment gets if approved today, step by step; after, the days
+    it got."""
+    from app.direct_transfer.calendar_utils import first_working_day_after, ict_date
+
+    s = await _paid(client, db_session, make_admin, make_user, make_eligible_investor, amount=20_000_000)
+    preview_url = f"/admin/funding/transfers/{s['tranche']['id']}/repayment"
+
+    preview = await client.get(preview_url, headers=s["admin"]["headers"])
+
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()
+    basis = plan["basis"]
+    today = ict_date(dt.datetime.now(dt.timezone.utc))
+    assert plan["kind"] == "PREVIEW"
+    # Approved today, it repays from the next working day.
+    assert basis["approved_on"] == today.isoformat()
+    assert basis["start_date"] == plan["start_date"] == first_working_day_after(today).isoformat()
+    # 2.5% over the 4-month loan (7.5% a year), 84 working days, the leftover on the last.
+    assert float(basis["investor_return_pct"]) == 2.5 and float(basis["investor_rate_pct"]) == 7.5
+    assert basis["interest_vnd"] == 500_000 and basis["total_vnd"] == 20_500_000
+    assert basis["business_day_count"] == 84 == basis["term_months"] * basis["working_days_per_month"]
+    assert basis["daily_vnd"] == 20_500_000 // 84 and basis["final_vnd"] == 20_500_000 - 83 * basis["daily_vnd"]
+    # The first-period interest: from the money's arrival (today, on approval) to day one.
+    assert basis["received_on"] == today.isoformat() and basis["stub_days"] >= 1
+    assert basis["stub_interest_vnd"] == round(20_000_000 * 0.075 * basis["stub_days"] / 252)
+    assert plan["totals"]["tax_withheld_vnd"] == basis["tax_vnd"]
+    assert [d["kind"] for d in plan["days"]].count("INSTALMENT") == 84
+
+    approved = await _decide(client, s["admin"], s["transfer_id"], "APPROVED")
+    assert approved.json()["status"] == "ACTIVE"
+
+    after = (await client.get(preview_url, headers=s["admin"]["headers"])).json()
+    assert after["kind"] == "ACTUAL"
+    # What it got is what staff were shown.
+    key = lambda d: (d["kind"], d["due_date"], d["gross_vnd"], d["net_vnd"])
+    assert sorted(map(key, after["days"])) == sorted(map(key, plan["days"]))
+    assert after["basis"]["start_date"] == basis["start_date"]
+
+
+async def test_a_ticket_with_no_money_has_no_repayment_to_work_out(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    held = (await _reserve(client, investor, setup["window"].id, 10_000_000)).json()
+
+    resp = await client.get(f"/admin/funding/transfers/{held['id']}/repayment", headers=setup["admin"]["headers"])
+
+    assert resp.status_code == 409 and resp.headers["X-Error-Code"] == "NO_PREVIEW"

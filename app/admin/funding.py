@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -21,6 +22,7 @@ from app.admin.schemas import (
     AdminInvestorTransferOut,
     AdminReceiptFieldsRequest,
     AdminReceiptUrlResponse,
+    AdminRepaymentPreviewOut,
     AdminTransferDisputeOut,
     AdminTransferExpectedOut,
     AdminTransferReceiptOut,
@@ -30,9 +32,18 @@ from app.direct_transfer.admin import decide_dispute, staff_enter_receipt_fields
 from app.direct_transfer.close import advance_window, form_investment_loan
 from app.direct_transfer.config import resolve
 from app.direct_transfer.disputes import open_tranche_dispute
+from app.direct_transfer.calendar_utils import default_calendar, ict_date
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.evidence import log_event
-from app.direct_transfer.models import Dispute, EvidenceFile, FundingWindow, PaymentAccount, Tranche, Transfer
+from app.direct_transfer.models import (
+    Dispute,
+    EvidenceFile,
+    FundingWindow,
+    PaymentAccount,
+    RepaymentDay,
+    Tranche,
+    Transfer,
+)
 from app.direct_transfer.receipts import ReceiptFields
 from app.direct_transfer.schemas import FundingWindowOut
 from app.direct_transfer.tranche_state import transition_tranche
@@ -41,6 +52,7 @@ from app.direct_transfer.windows import get_window_progress, lock_window
 from app.lending.models import AuditLog, Project
 from app.market.emails import receipt_notice
 from app.market.funding import expire_lapsed_holds
+from app.market.projection import project_ticket
 from app.notifications import realtime
 from app.notifications.models import EVENT_INVESTMENT_TRANSFER_APPROVED
 from app.notifications.service import create_notification
@@ -605,6 +617,89 @@ async def decide_transfer(
         await realtime.publish([business])
     db.expire_all()  # the decision moved the ticket, its transfer and the dispute
     return await _row(db, await db.get(Tranche, tranche_id))
+
+
+# --------------------------------------------------------------------------- #
+# the repayment an approval starts
+# --------------------------------------------------------------------------- #
+async def _received_on(db: AsyncSession, tranche: Tranche, fallback: dt.date) -> dt.date:
+    """When the money reached the business, as the loan counts it (close._receipt_date): the transfer time on the
+    receipt, else when staff attested or approved it, else `fallback` (approving it today)."""
+    transfer = (
+        await db.execute(
+            select(Transfer)
+            .where(Transfer.tranche_id == tranche.id, Transfer.kind == "DISBURSEMENT")
+            .order_by(Transfer.created_at)
+        )
+    ).scalars().first()
+    moment = (transfer.transferred_at if transfer else None) or tranche.attested_at or tranche.confirmed_at
+    return ict_date(moment) if moment else fallback
+
+
+async def repayment_preview(db: AsyncSession, tranche_id: UUID) -> AdminRepaymentPreviewOut:
+    """How an investment's repayment is worked out, step by step, beside the decision. Waiting for approval: the
+    days it gets if staff approve it today, starting the next working day (PREVIEW). Repaying: the days it got
+    (ACTUAL). 409 NO_PREVIEW for a ticket that never had money to repay, or when approval does not start
+    repayment (repay_from_approval off)."""
+    tranche = await db.get(Tranche, tranche_id)
+    if tranche is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    window = await db.get(FundingWindow, tranche.window_id)
+    repaying = tranche.status == "ACTIVE"
+    # Money to approve: a receipt in, or a ticket already attested, under review or approved.
+    money_in = tranche.status in ("ATTESTED", "UNDER_REVIEW", "CONFIRMED") or (
+        tranche.status == "SIGNED" and tranche.receipt_submitted_at is not None
+    )
+    if not repaying and (not money_in or not resolve(None).repay_from_approval):
+        raise HTTPException(
+            status_code=409,
+            detail="Approving this ticket does not start a repayment",
+            headers={"X-Error-Code": "NO_PREVIEW"},
+        )
+    today = ict_date(_now())
+    approved_on = ict_date(tranche.confirmed_at) if tranche.confirmed_at else today
+    received_on = (
+        tranche.stub_receipt_date
+        if repaying and tranche.stub_receipt_date
+        else await _received_on(db, tranche, approved_on)
+    )
+    days = (
+        (
+            await db.execute(
+                select(RepaymentDay)
+                .where(RepaymentDay.tranche_id == tranche.id)
+                .order_by(RepaymentDay.due_date, RepaymentDay.day_index)
+            )
+        ).scalars().all()
+        if repaying
+        else []
+    )
+    # The real days start where they started (a loan formed at a round's close starts after it); the arithmetic
+    # is worked out from the day before, so its first working day is that start.
+    starts = min((day.due_date for day in days), default=None)
+    plan = project_ticket(
+        amount_vnd=tranche.amount_vnd,
+        loan_rate_pct=Decimal(window.annual_rate_pct),
+        term_months=window.term_months,
+        individual=tranche.investor_type == "INDIVIDUAL",
+        confirmed_on=received_on,
+        close_on=starts - dt.timedelta(days=1) if starts else approved_on,
+        calendar=default_calendar(),
+    )
+    plan["basis"]["approved_on"] = approved_on
+    if days:
+        plan["days"] = [
+            {
+                "kind": day.kind, "day_index": day.day_index, "due_date": day.due_date,
+                "principal_vnd": day.principal_vnd, "interest_vnd": day.interest_vnd, "gross_vnd": day.gross_vnd,
+                "tax_withheld_vnd": day.tax_withheld_vnd, "net_vnd": day.net_vnd,
+            }
+            for day in days
+        ]
+        plan["totals"] = {
+            key: sum(day[key] for day in plan["days"]) for key in ("gross_vnd", "tax_withheld_vnd", "net_vnd")
+        }
+    return AdminRepaymentPreviewOut.model_validate(plan | {"kind": "ACTUAL" if repaying else "PREVIEW"})
 
 
 # --------------------------------------------------------------------------- #

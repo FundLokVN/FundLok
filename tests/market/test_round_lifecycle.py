@@ -284,11 +284,23 @@ async def test_advance_starts_an_investment_approved_before_repaying_from_approv
         await client.get(f"/repayment/tranches/{ticket['id']}/projection", headers=other_sme["headers"])
     ).status_code == 404
     monkeypatch.undo()
+    # It was approved two weeks before staff advanced the round.
+    from app.direct_transfer.calendar_utils import first_working_day_after
+    from app.direct_transfer.models import Tranche
+
+    approved_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=14)
+    db_session.expire_all()
+    row = await db_session.get(Tranche, uuid.UUID(ticket["id"]))
+    row.confirmed_at = row.attested_at = approved_at
+    await db_session.commit()
 
     await client.post(f"/admin/funding/rounds/{window_id}/advance", headers=setup["admin"]["headers"])
 
     schedule = (await client.get(f"/repayment/tranches/{ticket['id']}/schedule", headers=investor["headers"])).json()
     assert len(schedule) == 85
+    # The loan works from the approval: day one is the working day after it, not after staff advanced the round.
+    first = min(r["due_date"] for r in schedule)
+    assert first == first_working_day_after(ict_date(approved_at)).isoformat()
     mine = (await client.get("/funding/me/tranches", headers=investor["headers"])).json()
     assert mine[0]["status"] == "ACTIVE"
 

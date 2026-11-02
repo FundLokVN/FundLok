@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.direct_transfer.schemas import FundingWindowOut, PaymentAccountOut
+from app.market.schemas import ProjectedScheduleOut, ProjectionBasisOut
 
 from app.gverify.normalize import normalize_identifier
 
@@ -800,3 +801,12 @@ class AdminRepaymentDecisionRequest(BaseModel):
 
     outcome: Literal["APPROVED", "DENIED"]
     reason: str | None = Field(default=None, max_length=1000)
+
+
+class AdminRepaymentPreviewOut(ProjectedScheduleOut):
+    """How an investment's repayment is worked out, for the approval panel. PREVIEW: the days it gets if staff
+    approve it today (repayment starts the next working day). ACTUAL: the days it got when it was approved.
+    ``basis`` walks through each step of the arithmetic."""
+
+    kind: Literal["PREVIEW", "ACTUAL"]
+    basis: ProjectionBasisOut

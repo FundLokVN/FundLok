@@ -84,14 +84,42 @@ def project_ticket(
     for (index, due, principal, interest, gross), tax in zip(instalments, taxes):
         days.append(ProjectedDay("INSTALMENT", index, due, principal, interest, gross, tax, gross - tax))
 
+    tax_total = sum(day.tax_withheld_vnd for day in days)
     return {
         "assumed_close_date": close_on,
         "start_date": start,
         "business_day_count": n_days,
+        # Each step of the arithmetic, for a person to follow: the return, the days, the daily amount, the dates,
+        # the first-period interest and the tax.
+        "basis": {
+            "principal_vnd": amount_vnd,
+            "loan_rate_pct": Decimal(loan_rate_pct),
+            "investor_return_pct": (
+                Decimal(p.investor_return_bps) / 100 if p.investor_return_bps is not None else None
+            ),
+            "investor_rate_pct": annual_rate_pct,
+            "term_months": term_months,
+            "working_days_per_month": p.working_days_per_month,
+            "business_day_count": n_days,
+            "interest_vnd": orig.interest_vnd,
+            "total_vnd": orig.total_obligation_vnd,
+            "daily_vnd": orig.daily_amount_vnd,
+            "final_vnd": orig.final_instalment_vnd,
+            "received_on": confirmed_on,
+            "approved_on": close_on,
+            "start_date": start,
+            "end_date": dates[-1],
+            "stub_days": count_business_days(confirmed_on, start, cal),
+            "stub_basis_days": p.stub_basis_days,
+            "stub_interest_vnd": stub,
+            "individual": individual,
+            "withholding_pct": Decimal(p.withholding_bps) / 100,
+            "tax_vnd": tax_total,
+        },
         "days": [dataclasses.asdict(day) for day in days],
         "totals": {
             "gross_vnd": sum(day.gross_vnd for day in days),
-            "tax_withheld_vnd": sum(day.tax_withheld_vnd for day in days),
+            "tax_withheld_vnd": tax_total,
             "net_vnd": sum(day.net_vnd for day in days),
         },
     }

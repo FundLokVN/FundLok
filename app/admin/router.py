@@ -19,6 +19,7 @@ from app.admin.schemas import (
     AdminReceiptFieldsRequest,
     AdminReceiptUrlResponse,
     AdminRepaymentDecisionRequest,
+    AdminRepaymentPreviewOut,
     AdminRepaymentReceiptOut,
     AdminTransferDecisionRequest,
     AdminDecisionRequest,
@@ -459,6 +460,21 @@ async def get_investor_transfer(
     """One investor ticket for the review panel: the transfer reported for it, what a matching receipt shows,
     and any open review."""
     return await admin_funding.get_transfer(db, tranche_id)
+
+
+@router.get(
+    "/funding/transfers/{tranche_id}/repayment",
+    response_model=AdminRepaymentPreviewOut,
+    dependencies=[Depends(audit_admin_read("TRANCHE", id_param="tranche_id"))],
+)
+async def get_investment_repayment(
+    tranche_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The repayment an approval starts, worked out step by step for the review panel: the days if approved today
+    (repayment starts the next working day), or the days it got once repaying."""
+    return await admin_funding.repayment_preview(db, tranche_id)
 
 
 @router.get(

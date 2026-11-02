@@ -1,4 +1,5 @@
 import datetime as dt
+from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -118,6 +119,37 @@ class ProjectedTotalsOut(BaseModel):
     net_vnd: int
 
 
+class ProjectionBasisOut(BaseModel):
+    """How a ticket's days are worked out, step by step. The investors earn `investor_return_pct` over the whole
+    loan, which as a yearly rate is `investor_rate_pct` (never above the business's `loan_rate_pct`): `interest_vnd`
+    on `principal_vnd`. Repaid over `term_months` x `working_days_per_month` working days, `daily_vnd` a day
+    (`total_vnd` / days, the last day `final_vnd` with the leftover), from the first working day after
+    `approved_on`. The first-period interest is `stub_days` working days from `received_on` at the same rate over
+    `stub_basis_days`, paid on day one. An individual investor's tax is `withholding_pct` of the interest only."""
+
+    principal_vnd: int
+    loan_rate_pct: Decimal
+    investor_return_pct: Decimal | None
+    investor_rate_pct: Decimal
+    term_months: int
+    working_days_per_month: int
+    business_day_count: int
+    interest_vnd: int
+    total_vnd: int
+    daily_vnd: int
+    final_vnd: int
+    received_on: dt.date
+    approved_on: dt.date
+    start_date: dt.date
+    end_date: dt.date
+    stub_days: int
+    stub_basis_days: int
+    stub_interest_vnd: int
+    individual: bool
+    withholding_pct: Decimal
+    tax_vnd: int
+
+
 class ProjectedScheduleOut(BaseModel):
     """What a confirmed ticket's repayment days would be if its round closed on `assumed_close_date` (its last
     day, the latest it can). Projected, not guaranteed; replaced by the real days once the loan forms."""
@@ -127,6 +159,7 @@ class ProjectedScheduleOut(BaseModel):
     business_day_count: int
     days: list[ProjectedDayOut]
     totals: ProjectedTotalsOut
+    basis: ProjectionBasisOut | None = None
 
 
 class SmeRepaymentDayOut(BaseModel):

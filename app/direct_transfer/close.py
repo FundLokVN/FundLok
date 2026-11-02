@@ -262,14 +262,17 @@ async def form_investment_loan(
 ) -> None:
     """repay_from_approval: one approved (CONFIRMED) investment becomes its own loan at once, the way `_form_loan`
     forms the round's at close, for a round of one: a facility on the round's contract (at the investors' rate,
-    starting the first working day after today), the investor's holding, the ticket ACTIVE, its repayment days with
-    their stub, and the ledger claims. The SME's activation fee is still invoiced once, when the round closes."""
+    starting the first working day after the day staff approved it), the investor's holding, the ticket ACTIVE, its
+    repayment days with their stub, and the ledger claims. The SME's activation fee is still invoiced once, when the
+    round closes."""
     p = resolve(params)
     cal = calendar or default_calendar()
     await lock_window(db, window.id)
     if tranche.status != "CONFIRMED":
         raise conflict("NOT_CONFIRMED", "Only a confirmed investment forms its loan")
-    start_date = first_working_day_after(ict_date(now), cal)
+    # The loan works from the approval: repayment starts the next working day after it, even when the loan forms
+    # later (an investment approved before repay_from_approval, started by staff advancing its round).
+    start_date = first_working_day_after(ict_date(tranche.confirmed_at or now), cal)
     term = window.term_months
     rate = investor_rate_pct(Decimal(window.annual_rate_pct), term, p)
     tranche.stub_receipt_date = await _receipt_date(db, tranche)
