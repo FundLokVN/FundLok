@@ -714,6 +714,14 @@ class AdminTransferDecisionRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class AdminReceiptDecisionRequest(BaseModel):
+    """Approve or deny an investor's transfer after looking at the receipt. The note is optional; an empty one
+    records that the decision was made by viewing the receipt."""
+
+    outcome: Literal["APPROVED", "DENIED"]
+    reason: str | None = Field(default=None, max_length=1000)
+
+
 class AdminFundingActivityOut(BaseModel):
     """One entry of the transfers' audit trail: who did what to which ticket, and why. ``check_status`` and
     ``failure_codes`` come with a receipt check (MATCHED: recorded as paid; MISMATCH: sent to review; REJECTED);

@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.direct_transfer.schemas import TrancheOut
+from app.direct_transfer.schemas import FundingWindowOut, TrancheOut
 
 
 class ListingCreate(BaseModel):
@@ -60,7 +60,42 @@ class ReservationCreate(BaseModel):
 
 
 class InvestorTrancheOut(TrancheOut):
-    """An investor's own ticket. Adds when they uploaded their transfer receipt: null until they do, so the page
-    knows whether to ask for one."""
+    """An investor's own ticket. Adds when they uploaded their transfer receipt (null until they do, so the page
+    knows whether to ask for one) and, in their list, the project it is in."""
 
     receipt_submitted_at: dt.datetime | None = None
+    project_id: UUID | None = None
+    project_name: str | None = None
+
+
+class SmeTicketOut(BaseModel):
+    """One investor's ticket as the business sees it: the investor masked ("N. A***"), as everywhere the business
+    looks (list_window_tranches)."""
+
+    id: UUID
+    amount_vnd: int
+    status: str
+    reference_code: str
+    investor_display: str
+    attested_at: dt.datetime | None = None
+    confirm_deadline: dt.datetime | None = None
+    review_cause: str | None = None
+
+
+class SmeRoundOut(FundingWindowOut):
+    """The business's own funding round: its progress and every ticket on it."""
+
+    project_id: UUID
+    project_name: str
+    tickets: list[SmeTicketOut]
+
+
+class MarkDaysPaidCreate(BaseModel):
+    repayment_day_ids: list[UUID] = Field(min_length=1, max_length=500)
+    receipt_file_id: UUID | None = None
+
+
+class ReportMissingCreate(BaseModel):
+    """The investor says a repayment day never reached their account."""
+
+    statement: str | None = Field(default=None, max_length=2000)

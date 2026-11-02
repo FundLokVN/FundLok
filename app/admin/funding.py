@@ -27,14 +27,22 @@ from app.admin.schemas import (
     Page,
 )
 from app.direct_transfer.admin import decide_dispute, staff_enter_receipt_fields
+from app.direct_transfer.close import advance_window
+from app.direct_transfer.disputes import open_tranche_dispute
 from app.direct_transfer.errors import DirectTransferError
+from app.direct_transfer.evidence import log_event
 from app.direct_transfer.models import Dispute, EvidenceFile, FundingWindow, PaymentAccount, Tranche, Transfer
 from app.direct_transfer.receipts import ReceiptFields
 from app.direct_transfer.schemas import FundingWindowOut
+from app.direct_transfer.tranche_state import transition_tranche
 from app.direct_transfer.tranches import resolve_kyc_name
-from app.direct_transfer.windows import get_window_progress
+from app.direct_transfer.windows import get_window_progress, lock_window
 from app.lending.models import AuditLog, Project
+from app.market.emails import receipt_notice
 from app.market.funding import expire_lapsed_holds
+from app.notifications import realtime
+from app.notifications.models import EVENT_INVESTMENT_TRANSFER_APPROVED
+from app.notifications.service import create_notification
 from app.users.models import User
 from app.utils import r2
 from app.utils.audit import append_audit
@@ -78,7 +86,8 @@ def _open_dispute():
 
 
 def _needs_action():
-    return or_(_receipt_waiting(), _open_dispute())
+    # A ticket left ATTESTED waits on staff too: approval now means received, so staff settle it.
+    return or_(_receipt_waiting(), _open_dispute(), Tranche.status == "ATTESTED")
 
 
 # --------------------------------------------------------------------------- #
@@ -128,6 +137,36 @@ async def list_rounds(db: AsyncSession, *, open_only: bool) -> list[AdminFunding
     return out
 
 
+async def advance_round(
+    db: AsyncSession, window_id: UUID, *, actor: User, ip_address: str | None
+) -> AdminFundingRoundOut:
+    """Do whatever is due on a round, now: confirm approved tickets whose dispute window lapsed, start the close
+    (day 14, full with nothing pending, or the business asked to close early), and once nothing is pending form the
+    loan: the facility, each investor's holding and the daily repayment days (Edward's advance_window, which the
+    undeployed worker would run every 10 minutes). Safe to press again: it only does what is due."""
+    window = await db.get(FundingWindow, window_id)
+    if window is None:
+        raise HTTPException(status_code=404, detail="Round not found")
+    before = window.status
+    try:
+        window = await advance_window(db, window_id=window_id, now=_now())
+    except DirectTransferError as exc:
+        raise _http(exc) from exc
+    append_audit(
+        db,
+        entity_type="FUNDING_WINDOW",
+        entity_id=window_id,
+        action="FUNDING_ROUND_ADVANCED",
+        actor_id=actor.id,
+        before_state={"status": before},
+        after_state={"status": window.status, "close_reason": window.close_reason},
+        ip_address=ip_address,
+    )
+    await db.commit()
+    [row] = [r for r in await list_rounds(db, open_only=False) if r.id == window_id]
+    return row
+
+
 # --------------------------------------------------------------------------- #
 # transfers
 # --------------------------------------------------------------------------- #
@@ -173,7 +212,7 @@ async def _row(db: AsyncSession, tranche: Tranche) -> AdminInvestorTransferOut:
         receipt_submitted_at=tranche.receipt_submitted_at,
         attested_at=tranche.attested_at,
         confirmed_at=tranche.confirmed_at,
-        needs_action=receipt_waiting or dispute_open,
+        needs_action=receipt_waiting or dispute_open or tranche.status == "ATTESTED",
         transfer=(
             AdminTransferReceiptOut(
                 id=transfer.id,
@@ -258,6 +297,24 @@ def _not_own(tranche: Tranche, actor: User) -> None:
         raise HTTPException(status_code=403, detail="You cannot review your own transfer")
 
 
+async def _notify_business_of_approval(db: AsyncSession, tranche_id: UUID, status: str) -> UUID | None:
+    """Ring the business's bell: staff approved an investor's transfer to its account. Staged on the caller's
+    transaction, so it commits with the approval or not at all. The business's id, to publish to after the
+    commit; None if the ticket has no business any more."""
+    notice = await receipt_notice(db, tranche_id=tranche_id)
+    if notice is None:
+        return None
+    create_notification(
+        db,
+        user_id=notice.sme_user_id,
+        event=EVENT_INVESTMENT_TRANSFER_APPROVED,
+        entity_type="TRANCHE",
+        entity_id=tranche_id,
+        data=notice.notification_data(status),
+    )
+    return notice.sme_user_id
+
+
 async def get_receipt_url(
     db: AsyncSession, transfer_id: UUID, *, actor: User, ip_address: str | None
 ) -> AdminReceiptUrlResponse:
@@ -292,7 +349,8 @@ async def enter_receipt_fields(
     db: AsyncSession, transfer_id: UUID, body: AdminReceiptFieldsRequest, *, actor: User, ip_address: str | None
 ) -> AdminInvestorTransferOut:
     """What staff read off the receipt. The checks then attest the ticket (everything matches the QR FundLok
-    issued) or send it to review; a field left blank, because the receipt does not show it, fails the checks."""
+    issued, and the business's bell rings) or send it to review; a field left blank, because the receipt does not
+    show it, fails the checks."""
     _, tranche = await _transfer_and_tranche(db, transfer_id)
     _not_own(tranche, actor)
     fields = ReceiptFields(
@@ -343,15 +401,164 @@ async def enter_receipt_fields(
         },
         ip_address=ip_address,
     )
+    # A receipt that matched is an approval: the business hears of it (a mismatch goes to review first).
+    business = (
+        await _notify_business_of_approval(db, tranche.id, "ATTESTED")
+        if result.tranche_status == "ATTESTED"
+        else None
+    )
     await db.commit()
+    if business is not None:
+        await realtime.publish([business])
     return await _row(db, await db.get(Tranche, tranche.id))
+
+
+async def _settle_receipt(
+    db: AsyncSession, transfer: Transfer, tranche: Tranche, *, approve: bool, reason: str, actor: User, now: dt.datetime
+) -> None:
+    """Staff looked at the receipt of a ticket awaiting it and approve or deny it, with no fields typed in.
+
+    Approve: staff checked the money arrived, so it is received now: the ticket is attested and confirmed in one
+    step, with no wait for the business to confirm it too. The transfer reads MATCHED with no parsed_fields; the
+    evidence log says it was staff, by eye.
+    Deny: the receipt is rejected as a duplicate one is: the ticket keeps waiting for a receipt, so the investor
+    can upload the right one while the hold lasts, and it lapses if they do not.
+    """
+    # Locked in staff_enter_receipt_fields' order (transfer, ticket, round), so the two never deadlock.
+    await db.refresh(transfer, with_for_update=True)
+    await db.refresh(tranche, with_for_update=True)
+    await lock_window(db, tranche.window_id)
+    if transfer.check_status != "AWAITING_FIELDS" or tranche.status != "SIGNED":
+        raise HTTPException(
+            status_code=409, detail="This receipt was already decided", headers={"X-Error-Code": "ALREADY_DECIDED"}
+        )
+    await log_event(
+        db, entity_type="TRANSFER", entity_id=transfer.id,
+        event_type="STAFF_APPROVED_RECEIPT" if approve else "STAFF_REJECTED_RECEIPT", now=now,
+        actor_id=actor.id, actor_role="ADMIN", reason=reason, payload={"method": "VIEWED", "fields_entered": False},
+    )
+    if approve:
+        transfer.check_status = "MATCHED"
+        transfer.confirmation_level = "CONFIRMED"
+        await transition_tranche(
+            db, tranche, "ATTESTED", now=now, actor_id=actor.id, actor_role="ADMIN", reason=reason,
+            confirm_deadline=now,
+        )
+        await transition_tranche(db, tranche, "CONFIRMED", now=now, actor_id=actor.id, actor_role="ADMIN", reason=reason)
+    else:
+        transfer.check_status = "REJECTED"
+        transfer.failure_codes = ["STAFF_REJECTED"]
+        tranche.receipt_submitted_at = None
+        await db.flush()
+
+
+async def _settle_attested(
+    db: AsyncSession, transfer: Transfer, tranche: Tranche, *, approve: bool, reason: str, actor: User, now: dt.datetime
+) -> None:
+    """A ticket left ATTESTED, waiting for the business to confirm (approved before approval meant received, or
+    checked field by field): staff settle it. Approve: CONFIRMED. Deny: reviewed and void, its place freed."""
+    await db.refresh(transfer, with_for_update=True)
+    await db.refresh(tranche, with_for_update=True)
+    await lock_window(db, tranche.window_id)
+    if tranche.status != "ATTESTED":
+        raise HTTPException(
+            status_code=409, detail="This transfer was already decided", headers={"X-Error-Code": "ALREADY_DECIDED"}
+        )
+    if approve:
+        transfer.confirmation_level = "CONFIRMED"
+        await transition_tranche(db, tranche, "CONFIRMED", now=now, actor_id=actor.id, actor_role="ADMIN", reason=reason)
+        return
+    # ATTESTED cannot go straight to VOID: through a review, decided as not received.
+    await transition_tranche(
+        db, tranche, "UNDER_REVIEW", now=now, actor_id=actor.id, actor_role="ADMIN", reason=reason,
+        review_cause="RECEIPT_MISMATCH",
+    )
+    review = await open_tranche_dispute(db, tranche=tranche, cause="RECEIPT_MISMATCH", now=now, raised_by=actor.id)
+    await decide_dispute(db, dispute_id=review.id, staff_id=actor.id, outcome="NOT_RECEIVED", reason=reason, now=now)
+
+
+# What an empty note records: the decision still says how it was made.
+_DEFAULT_REASON = {True: "Approved after viewing the receipt", False: "Denied after viewing the receipt"}
+
+
+async def decide_receipt(
+    db: AsyncSession, transfer_id: UUID, *, outcome: str, reason: str | None, actor: User, ip_address: str | None
+) -> AdminInvestorTransferOut:
+    """Approve or deny an investor's transfer after looking at the receipt. Nothing is typed in or compared.
+
+    Approving means the money is received: the ticket is CONFIRMED and counts toward the round, with nothing left
+    for the business to confirm. A ticket under review (a late receipt) is settled as received or not
+    (decide_dispute); a receipt waiting is approved or denied (_settle_receipt); a ticket left ATTESTED is
+    settled too (_settle_attested). An approval rings the business's bell.
+    """
+    approve = outcome == "APPROVED"
+    reason = (reason or "").strip() or _DEFAULT_REASON[approve]
+    transfer, tranche = await _transfer_and_tranche(db, transfer_id)
+    _not_own(tranche, actor)
+    tranche_id, now = tranche.id, _now()
+    review = (
+        await db.execute(
+            select(Dispute).where(
+                Dispute.tranche_id == tranche_id, Dispute.subject_type == "TRANCHE", Dispute.status != "DECIDED"
+            )
+        )
+    ).scalar_one_or_none()
+    receipt_waiting = transfer.check_status == "AWAITING_FIELDS" and transfer.evidence_file_id is not None
+    try:
+        if review is not None:
+            await decide_dispute(
+                db, dispute_id=review.id, staff_id=actor.id, outcome="RECEIVED" if approve else "NOT_RECEIVED",
+                reason=reason, now=now,
+            )
+            # A late receipt nobody typed in is settled with its review, so it leaves the queue.
+            if transfer.check_status == "AWAITING_FIELDS":
+                transfer.check_status = "MATCHED" if approve else "REJECTED"
+        elif receipt_waiting and tranche.status == "SIGNED":
+            await _settle_receipt(db, transfer, tranche, approve=approve, reason=reason, actor=actor, now=now)
+        elif tranche.status == "ATTESTED":
+            await _settle_attested(db, transfer, tranche, approve=approve, reason=reason, actor=actor, now=now)
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail="Nothing on this transfer waits for a decision",
+                headers={"X-Error-Code": "NOTHING_TO_DECIDE"},
+            )
+    except DirectTransferError as exc:
+        raise _http(exc) from exc
+    status = tranche.status
+    append_audit(
+        db,
+        entity_type="TRANCHE",
+        entity_id=tranche_id,
+        action="TRANSFER_RECEIVED" if approve else "TRANSFER_NOT_RECEIVED",
+        actor_id=actor.id,
+        after_state={
+            "transfer_id": str(transfer_id),
+            "dispute_id": str(review.id) if review else None,
+            "cause": review.cause if review else "RECEIPT",
+            "check_status": transfer.check_status,
+            "tranche_status": status,
+            "reason": reason,
+        },
+        ip_address=ip_address,
+    )
+    business = (
+        await _notify_business_of_approval(db, tranche_id, status)
+        if approve and status in ("ATTESTED", "CONFIRMED")
+        else None
+    )
+    await db.commit()
+    if business is not None:
+        await realtime.publish([business])
+    db.expire_all()
+    return await _row(db, await db.get(Tranche, tranche_id))
 
 
 async def decide_transfer(
     db: AsyncSession, dispute_id: UUID, *, outcome: str, reason: str, actor: User, ip_address: str | None
 ) -> AdminInvestorTransferOut:
-    """Settle a ticket under review: the money reached the business (RECEIVED, the ticket counts) or it did not
-    (NOT_RECEIVED, the ticket is void and frees its place in the round)."""
+    """Settle a ticket under review: the money reached the business (RECEIVED, the ticket counts, and the
+    business's bell rings) or it did not (NOT_RECEIVED, the ticket is void and frees its place in the round)."""
     dispute = await db.get(Dispute, dispute_id)
     if dispute is None or dispute.subject_type != "TRANCHE":
         raise HTTPException(status_code=404, detail="Review not found")
@@ -373,7 +580,16 @@ async def decide_transfer(
         ip_address=ip_address,
     )
     tranche_id = tranche.id
+    # Received and counted is an approval. Received too late to join a loan that already formed ends VOID, with a
+    # refund owed, and is not news of money arriving; nor is NOT_RECEIVED.
+    business = (
+        await _notify_business_of_approval(db, tranche_id, "CONFIRMED")
+        if outcome == "RECEIVED" and tranche.status == "CONFIRMED"
+        else None
+    )
     await db.commit()
+    if business is not None:
+        await realtime.publish([business])
     db.expire_all()  # the decision moved the ticket, its transfer and the dispute
     return await _row(db, await db.get(Tranche, tranche_id))
 

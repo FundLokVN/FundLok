@@ -14,6 +14,7 @@ from app.admin.schemas import (
     AdminInvestorTransferOut,
     AdminPaymentAccountDecisionRequest,
     AdminPaymentAccountOut,
+    AdminReceiptDecisionRequest,
     AdminReceiptFieldsRequest,
     AdminReceiptUrlResponse,
     AdminTransferDecisionRequest,
@@ -388,6 +389,20 @@ async def list_funding_rounds(
     return await admin_funding.list_rounds(db, open_only=status == "OPEN")
 
 
+@router.post("/funding/rounds/{window_id}/advance", response_model=AdminFundingRoundOut)
+async def advance_funding_round(
+    window_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Do what is due on a round now: start its close when it is due, and once nothing is pending, form the loan
+    and create the daily repayment days. Stands in for the scheduled job, which is not deployed. Audited."""
+    return await admin_funding.advance_round(
+        db, window_id, actor=current_user, ip_address=request.client.host if request.client else None
+    )
+
+
 @router.get(
     "/funding/transfers",
     response_model=Page[AdminInvestorTransferOut],
@@ -471,6 +486,29 @@ async def enter_transfer_receipt_fields(
     business has two working days to dispute; otherwise it goes to review. Once per transfer."""
     return await admin_funding.enter_receipt_fields(
         db, transfer_id, body, actor=current_user, ip_address=request.client.host if request.client else None
+    )
+
+
+@router.post("/funding/transfers/{transfer_id}/decision", response_model=AdminInvestorTransferOut)
+async def decide_investor_receipt(
+    transfer_id: UUID,
+    body: AdminReceiptDecisionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Approve or deny a transfer after looking at the investor's receipt; nothing is typed in or compared.
+    Approving a receipt records the investment as paid (ATTESTED: the business has two working days to say the
+    money never arrived) and rings the business's bell; denying it rejects the receipt, and the investor can
+    upload the right one while the hold lasts. A ticket under review is settled as received or not. Final, and
+    audited with the admin who made it."""
+    return await admin_funding.decide_receipt(
+        db,
+        transfer_id,
+        outcome=body.outcome,
+        reason=body.reason,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
     )
 
 

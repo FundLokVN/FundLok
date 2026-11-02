@@ -477,6 +477,37 @@ async def test_the_investor_uploads_their_transfer_receipt(
     assert again.status_code == 409 and again.headers["X-Error-Code"] == "RECEIPT_ALREADY_SUBMITTED"
 
 
+async def test_the_business_is_emailed_to_look_for_the_money(
+    client, db_session, make_admin, make_user, make_eligible_investor, monkeypatch
+):
+    sent = []
+    monkeypatch.setattr("app.utils.email.send_email", lambda **kw: sent.append(kw))
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR", full_name="Nguyen Van An"))
+    tranche = (await _reserve(client, investor, setup["window"].id, 20_000_000)).json()
+    key = str(uuid.uuid4())
+
+    assert (await _upload(client, investor, tranche["id"], key=key)).status_code == 202
+
+    [mail] = sent
+    assert mail["to_email"] == setup["sme"]["email"]
+    assert tranche["reference_code"] in mail["subject"]
+    html = mail["html_content"]
+    assert "20.000.000 ₫" in html and "₫20,000,000" in html
+    assert tranche["reference_code"] in html and "ABC Co" in html
+    assert "N. A***" in html and "Nguyen Van An" not in html  # masked, as on the business's own view
+    assert "An investor reported a transfer to your business" in html
+
+    # The bell waits for staff to approve the transfer (tests/admin/test_funding_transactions.py).
+    bell = (await client.get("/notifications", headers=setup["sme"]["headers"])).json()
+    assert [n for n in bell["items"] if n["event"] == "INVESTMENT_TRANSFER_APPROVED"] == []
+
+    # The same upload replayed sends nothing more; a refused upload sends nothing at all.
+    assert (await _upload(client, investor, tranche["id"], key=key)).status_code == 202
+    assert (await _upload(client, investor, tranche["id"], b"not a receipt")).status_code == 415
+    assert len(sent) == 1
+
+
 async def test_a_receipt_must_be_a_pdf_or_an_image(
     client, db_session, make_admin, make_user, make_eligible_investor
 ):
