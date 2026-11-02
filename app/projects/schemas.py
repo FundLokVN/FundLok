@@ -158,9 +158,10 @@ class MarketplaceListingOut(BaseModel):
     id: UUID
     status: str  # OPEN | FUNDED | CLOSED
     target_amount: int
+    # With a funding window: what staff confirmed received. Legacy: the listing's own figure.
     funded_amount: int
     min_ticket: int | None
-    # Distinct investors with a FILLED order.
+    # With a funding window: distinct investors with confirmed money. Legacy: with a FILLED order.
     investor_count: int
     open_at: datetime | None
     close_at: datetime | None

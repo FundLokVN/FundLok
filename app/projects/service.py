@@ -196,13 +196,20 @@ LISTED_STATUSES = ("OPEN", "FUNDED", "CLOSED")
 
 
 async def marketplace_listings(db: AsyncSession, application_ids: list[UUID]):
-    """Each application's listing for the marketplace card, in two queries
+    """Each application's listing for the marketplace card, in a few queries
     for the whole list. An application has at most one contract
     (create_contract refuses a second) and a contract at most one listing
     (listings.contract_id is unique), so the mapping is one to one.
+
+    A listing investors join through a funding window (ADR-009) is measured by
+    the window, not by the legacy orders it never gets: raised is what staff
+    confirmed received (CONFIRMED or ACTIVE tickets), investors are the people
+    behind those tickets, and the minimum ticket and closing date are the
+    window's.
     """
     from sqlalchemy import func
 
+    from app.direct_transfer.models import FundingWindow, Tranche
     from app.lending.models import Contract, Listing, Order
     from app.projects.schemas import MarketplaceListingOut
 
@@ -226,19 +233,57 @@ async def marketplace_listings(db: AsyncSession, application_ids: list[UUID]):
             )
         ).all()
     )
-    return {
-        application_id: MarketplaceListingOut(
+    listing_ids = [listing.id for _, listing in rows]
+    windows = {
+        window.listing_id: window
+        for window in (
+            await db.execute(select(FundingWindow).where(FundingWindow.listing_id.in_(listing_ids)))
+        ).scalars()
+    }
+    confirmed = {
+        window_id: (int(raised), int(backers))
+        for window_id, raised, backers in (
+            await db.execute(
+                select(
+                    Tranche.window_id,
+                    func.coalesce(func.sum(Tranche.amount_vnd), 0),
+                    func.count(func.distinct(Tranche.investor_id)),
+                )
+                .where(
+                    Tranche.window_id.in_([w.id for w in windows.values()]),
+                    Tranche.status.in_(("CONFIRMED", "ACTIVE")),
+                )
+                .group_by(Tranche.window_id)
+            )
+        ).all()
+    } if windows else {}
+
+    def listing_out(listing: Listing) -> MarketplaceListingOut:
+        window = windows.get(listing.id)
+        if window is None:
+            return MarketplaceListingOut(
+                id=listing.id,
+                status=listing.status,
+                target_amount=int(listing.target_amount),
+                funded_amount=int(listing.funded_amount or 0),
+                min_ticket=int(listing.min_ticket) if listing.min_ticket is not None else None,
+                investor_count=investors.get(listing.id, 0),
+                open_at=listing.open_at,
+                close_at=listing.close_at,
+            )
+        raised, backers = confirmed.get(window.id, (0, 0))
+        return MarketplaceListingOut(
             id=listing.id,
             status=listing.status,
-            target_amount=int(listing.target_amount),
-            funded_amount=int(listing.funded_amount or 0),
-            min_ticket=int(listing.min_ticket) if listing.min_ticket is not None else None,
-            investor_count=investors.get(listing.id, 0),
-            open_at=listing.open_at,
-            close_at=listing.close_at,
+            target_amount=int(window.target_vnd),
+            funded_amount=raised,
+            min_ticket=int(window.min_ticket_vnd),
+            investor_count=backers,
+            open_at=window.window_start,
+            close_at=window.window_end,
         )
-        for application_id, listing in rows
-    }
+
+    return {application_id: listing_out(listing) for application_id, listing in rows}
 
 
 def verified_document_types(application: LoanApplication) -> list[str]:

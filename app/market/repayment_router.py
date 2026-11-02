@@ -8,15 +8,20 @@ holds the money (ADR-009). Spec: docs/specs/direct_transfer/repayment-collection
 import datetime as dt
 from uuid import UUID
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.errors import DirectTransferError
+from app.direct_transfer.models import FundingWindow, Tranche, Transfer
 from app.direct_transfer.repayment import mark_days_paid, report_missing_day, todays_payments, tranche_schedule
 from app.direct_transfer.schemas import RepaymentRowOut, TodaysPaymentsOut
-from app.market.schemas import MarkDaysPaidCreate, ReportMissingCreate
+from app.market.projection import project_ticket
+from app.market.schemas import MarkDaysPaidCreate, ProjectedScheduleOut, ReportMissingCreate
 from app.users.models import Role, User
 from app.utils.audit import append_audit
 from app.utils.jwt import get_current_user
@@ -136,3 +141,45 @@ async def report_missing(
     await db.commit()
     rows = await tranche_schedule(db, tranche_id=day.tranche_id, user_id=current_user.id)
     return RepaymentRowOut.model_validate(next(row for row in rows if row["repayment_day_id"] == day.id))
+
+
+@router.get("/tranches/{tranche_id}/projection", response_model=ProjectedScheduleOut)
+async def read_projection(
+    tranche_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The investor's confirmed ticket, before its round forms the loan: what its repayment days would be if the
+    round closed on its last day (the latest it can). Projected, not guaranteed; once the loan forms, the real days
+    are at /schedule. 409 NO_PROJECTION when the ticket is not confirmed or the loan already formed."""
+    tranche = await db.get(Tranche, tranche_id)
+    if tranche is None or tranche.investor_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    window = await db.get(FundingWindow, tranche.window_id)
+    if tranche.status != "CONFIRMED" or window.status not in ("OPEN", "FULL", "CLOSING"):
+        raise HTTPException(
+            status_code=409,
+            detail="Only a confirmed ticket whose round is still closing has a projection",
+            headers={"X-Error-Code": "NO_PROJECTION"},
+        )
+    # The latest the round can close: its last day while open, the end of the close wait once closing.
+    close_at = window.close_wait_until if window.status == "CLOSING" and window.close_wait_until else window.window_end
+    # The stub runs from when the money arrived, as at close (close._receipt_date).
+    transfer = (
+        await db.execute(
+            select(Transfer)
+            .where(Transfer.tranche_id == tranche.id, Transfer.kind == "DISBURSEMENT")
+            .order_by(Transfer.created_at)
+        )
+    ).scalars().first()
+    received_at = (transfer.transferred_at if transfer else None) or tranche.attested_at or tranche.confirmed_at
+    return ProjectedScheduleOut.model_validate(
+        project_ticket(
+            amount_vnd=tranche.amount_vnd,
+            annual_rate_pct=Decimal(window.annual_rate_pct),
+            term_months=window.term_months,
+            individual=tranche.investor_type == "INDIVIDUAL",
+            confirmed_on=ict_date(received_at),
+            close_on=ict_date(close_at),
+        )
+    )

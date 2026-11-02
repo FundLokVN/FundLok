@@ -163,3 +163,70 @@ async def test_advancing_a_round_with_nothing_due_changes_nothing(
     assert resp.status_code == 200 and resp.json()["status"] == "OPEN"
     db_session.expire_all()
     assert (await db_session.execute(select(FundingWindow.status))).scalar_one() == "OPEN"
+
+
+async def test_the_marketplace_card_shows_what_the_round_has_raised(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id = setup["window"].id
+    viewer = await make_eligible_investor(await make_user(role="INVESTOR"))
+    paid = await make_eligible_investor(await make_user(role="INVESTOR"))
+    unpaid = await make_eligible_investor(await make_user(role="INVESTOR"))
+    await _approved(client, setup["admin"], paid, window_id, 30_000_000)
+    await _reserve(client, unpaid, window_id, 10_000_000)  # held, not paid: not raised yet
+
+    projects = (await client.get("/projects/public", headers=viewer["headers"])).json()
+
+    [card] = [p for p in projects if p["id"] == str(setup["project"])]
+    listing = card["loan_application"]["listing"]
+    assert listing["funded_amount"] == 30_000_000 and listing["investor_count"] == 1
+    assert listing["target_amount"] == 80_000_000 and listing["min_ticket"] == 10_000_000
+    assert listing["close_at"]
+
+
+async def test_a_confirmed_ticket_projects_the_days_the_loan_then_creates(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    """Before the loan forms the investor sees a projection; once it forms, the real days are the same ones."""
+    from decimal import Decimal
+
+    from app.market.projection import project_ticket
+
+    setup = await _open_project(client, db_session, make_admin, make_user)  # target 80M, minimum 40M
+    window_id = setup["window"].id
+    window_end = setup["window"].window_end
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    ticket = await _approved(client, setup["admin"], investor, window_id, 40_000_000)
+
+    projected = await client.get(f"/repayment/tranches/{ticket['id']}/projection", headers=investor["headers"])
+
+    assert projected.status_code == 200, projected.text
+    body = projected.json()
+    assert body["assumed_close_date"] == ict_date(window_end).isoformat()  # the latest the round can close
+    assert body["business_day_count"] == 84  # 4 months x 21 working days
+    instalments = [d for d in body["days"] if d["kind"] == "INSTALMENT"]
+    assert len(instalments) == 84 and instalments[0]["due_date"] == body["start_date"]
+    assert sum(d["principal_vnd"] for d in instalments) == 40_000_000
+    assert body["totals"]["net_vnd"] == sum(d["net_vnd"] for d in body["days"])
+    other = await make_eligible_investor(await make_user(role="INVESTOR"))
+    assert (
+        await client.get(f"/repayment/tranches/{ticket['id']}/projection", headers=other["headers"])
+    ).status_code == 404
+
+    # The round closes today and the loan forms: the real days are what the projection gives for that close.
+    await client.post(f"/funding/windows/{window_id}/close-early", headers=setup["sme"]["headers"])
+    advanced = await client.post(f"/admin/funding/rounds/{window_id}/advance", headers=setup["admin"]["headers"])
+    assert advanced.json()["status"] == "REPAYING", advanced.text
+    real = (await client.get(f"/repayment/tranches/{ticket['id']}/schedule", headers=investor["headers"])).json()
+    today = ict_date(dt.datetime.now(dt.timezone.utc))
+    expected = project_ticket(
+        amount_vnd=40_000_000, annual_rate_pct=Decimal("16"), term_months=4,
+        individual=any(r["tax_withheld_vnd"] for r in real),  # the investor's own type, as the loan saw it
+        confirmed_on=today, close_on=today,
+    )
+    key = lambda d: (d["kind"], str(d["due_date"]), d["principal_vnd"], d["gross_vnd"], d["tax_withheld_vnd"], d["net_vnd"])
+    assert sorted(map(key, real)) == sorted(map(key, expected["days"]))
+
+    gone = await client.get(f"/repayment/tranches/{ticket['id']}/projection", headers=investor["headers"])
+    assert gone.status_code == 409 and gone.headers["X-Error-Code"] == "NO_PROJECTION"

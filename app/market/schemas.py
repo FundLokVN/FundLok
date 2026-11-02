@@ -99,3 +99,31 @@ class ReportMissingCreate(BaseModel):
     """The investor says a repayment day never reached their account."""
 
     statement: str | None = Field(default=None, max_length=2000)
+
+
+class ProjectedDayOut(BaseModel):
+    kind: str
+    day_index: int
+    due_date: dt.date
+    principal_vnd: int
+    interest_vnd: int
+    gross_vnd: int
+    tax_withheld_vnd: int
+    net_vnd: int
+
+
+class ProjectedTotalsOut(BaseModel):
+    gross_vnd: int
+    tax_withheld_vnd: int
+    net_vnd: int
+
+
+class ProjectedScheduleOut(BaseModel):
+    """What a confirmed ticket's repayment days would be if its round closed on `assumed_close_date` (its last
+    day, the latest it can). Projected, not guaranteed; replaced by the real days once the loan forms."""
+
+    assumed_close_date: dt.date
+    start_date: dt.date
+    business_day_count: int
+    days: list[ProjectedDayOut]
+    totals: ProjectedTotalsOut
