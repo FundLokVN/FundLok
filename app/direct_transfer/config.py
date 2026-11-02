@@ -28,6 +28,13 @@ class DirectTransferParams:
     rate_cap_pct: int = 20  # INV-5 / Dieu 468
     # --- repayment (docs/specs/direct_transfer/repayment-collection.md) ---
     withholding_bps: int = 500  # PROVISIONAL(Q-D6): 5% on interest, individuals only
+    # What investors earn: flat over the whole loan, not a year (Phat, 2026-11-02; the marketplace's target). The
+    # loan is formed at this, capped at the business's own rate; the rest of the business's all-in cost is
+    # FundLok's, invoiced separately. None: investors earn the business's full rate.
+    investor_return_bps: int | None = 250
+    # Each investment starts repaying as soon as staff approve it, as its own loan (Phat, 2026-11-02), instead of
+    # one pooled loan when the round closes. The round's minimum raise then no longer refunds anyone.
+    repay_from_approval: bool = True
     missed_day_report_working_days: int = 2  # Q-026
     late_report_cap_working_days: int = 5  # PROVISIONAL(Q-D14)
     # --- disputes ---

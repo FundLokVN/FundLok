@@ -7,6 +7,8 @@ once), not the spec's two; see app/market/funding.py.
 import datetime as dt
 from uuid import UUID
 
+from decimal import Decimal
+
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, HTTPException, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +17,8 @@ from app.core.database import get_db
 from app.direct_transfer.close import request_early_close
 from app.direct_transfer.config import DEFAULT_PARAMS
 from app.direct_transfer.errors import DirectTransferError
-from app.direct_transfer.models import FundingWindow, Tranche, Transfer
+from app.direct_transfer.calendar_utils import ict_date
+from app.direct_transfer.models import FundingWindow, RepaymentDay, Tranche, Transfer
 from app.direct_transfer.receipts import ManualEntryExtractor
 from app.direct_transfer.schemas import FundingWindowOut, PaymentOut, ReceiptResultOut
 from app.direct_transfer.tranches import (
@@ -29,7 +32,14 @@ from app.lending.models import Project
 from app.market import funding
 from app.market.emails import receipt_notice, send_investment_receipt_email
 from app.market.funding import expire_lapsed_holds, reserve_and_accept
-from app.market.schemas import InvestorTrancheOut, ReservationCreate, SmeRoundOut, SmeTicketOut
+from app.market.projection import project_ticket, sum_by_day
+from app.market.schemas import (
+    InvestorTrancheOut,
+    ReservationCreate,
+    SmeRepaymentPlanOut,
+    SmeRoundOut,
+    SmeTicketOut,
+)
 from app.market.service import _require_eligible_investor
 from app.users.models import Role, User
 from app.utils.audit import append_audit
@@ -285,6 +295,85 @@ async def read_my_rounds(
             )
         )
     return rounds
+
+
+@router.get("/me/rounds/{window_id}/repayment-plan", response_model=SmeRepaymentPlanOut)
+async def read_repayment_plan(
+    window_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The business's daily repayments, one row per working day summed over its investors. Once the loan has formed,
+    the real days with how many were marked paid or reported missing; before, a projection from the investments
+    confirmed so far, if the round closed on its last day (the latest it can): projected, not guaranteed. What goes
+    to investors only: FundLok's fee is invoiced separately."""
+    window = await db.get(FundingWindow, window_id)
+    if window is None or window.sme_user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Round not found")
+
+    days = (
+        await db.execute(
+            select(RepaymentDay)
+            .join(Tranche, Tranche.id == RepaymentDay.tranche_id)
+            .where(Tranche.window_id == window_id)
+            .order_by(RepaymentDay.due_date)
+        )
+    ).scalars().all()
+    # Real days as soon as any investment repays (with repay_from_approval, while the round is still open).
+    if days:
+        rows = sum_by_day(
+            [
+                {"due_date": d.due_date, "principal_vnd": d.principal_vnd, "interest_vnd": d.interest_vnd,
+                 "gross_vnd": d.gross_vnd, "tax_withheld_vnd": d.tax_withheld_vnd, "net_vnd": d.net_vnd}
+                for d in days
+            ]
+        )
+        counts: dict[dt.date, list[int]] = {}
+        for d in days:
+            paid, missing = counts.setdefault(d.due_date, [0, 0])
+            counts[d.due_date] = [
+                paid + (d.status in ("PRESUMED_PAID", "MATCHED")),
+                missing + (d.status == "REPORTED_MISSED"),
+            ]
+        for row in rows:
+            row["paid"], row["missing"] = counts[row["due_date"]]
+        kind, assumed, start = "ACTUAL", None, min(d.due_date for d in days)
+    elif window.status in ("OPEN", "FULL", "CLOSING"):
+        close_at = (
+            window.close_wait_until if window.status == "CLOSING" and window.close_wait_until else window.window_end
+        )
+        tickets = (
+            await db.execute(select(Tranche).where(Tranche.window_id == window_id, Tranche.status == "CONFIRMED"))
+        ).scalars().all()
+        projected: list[dict] = []
+        start = None
+        for ticket in tickets:
+            plan = project_ticket(
+                amount_vnd=ticket.amount_vnd,
+                loan_rate_pct=Decimal(window.annual_rate_pct),
+                term_months=window.term_months,
+                individual=ticket.investor_type == "INDIVIDUAL",
+                confirmed_on=ict_date(ticket.attested_at or ticket.confirmed_at),
+                close_on=ict_date(close_at),
+            )
+            projected.extend(plan["days"])
+            start = plan["start_date"]
+        rows = sum_by_day(projected)
+        kind, assumed = "PROJECTED", ict_date(close_at)
+    else:
+        rows, kind, assumed, start = [], "ACTUAL", None, None
+
+    return SmeRepaymentPlanOut(
+        kind=kind,
+        assumed_close_date=assumed,
+        start_date=start,
+        days=rows,
+        totals={
+            "gross_vnd": sum(r["gross_vnd"] for r in rows),
+            "tax_withheld_vnd": sum(r["tax_withheld_vnd"] for r in rows),
+            "net_vnd": sum(r["net_vnd"] for r in rows),
+        },
+    )
 
 
 @router.post("/windows/{window_id}/close-early", response_model=FundingWindowOut)

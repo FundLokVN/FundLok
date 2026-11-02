@@ -27,7 +27,8 @@ from app.admin.schemas import (
     Page,
 )
 from app.direct_transfer.admin import decide_dispute, staff_enter_receipt_fields
-from app.direct_transfer.close import advance_window
+from app.direct_transfer.close import advance_window, form_investment_loan
+from app.direct_transfer.config import resolve
 from app.direct_transfer.disputes import open_tranche_dispute
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.evidence import log_event
@@ -148,8 +149,16 @@ async def advance_round(
     if window is None:
         raise HTTPException(status_code=404, detail="Round not found")
     before = window.status
+    now = _now()
     try:
-        window = await advance_window(db, window_id=window_id, now=_now())
+        # Approved investments that are not repaying yet (approved before repayment started at approval) start now.
+        if resolve(None).repay_from_approval and window.status in OPEN_ROUND_STATUSES:
+            waiting = (
+                await db.execute(select(Tranche).where(Tranche.window_id == window_id, Tranche.status == "CONFIRMED"))
+            ).scalars().all()
+            for tranche in waiting:
+                await form_investment_loan(db, tranche=tranche, window=window, now=now)
+        window = await advance_window(db, window_id=window_id, now=now)
     except DirectTransferError as exc:
         raise _http(exc) from exc
     append_audit(
@@ -523,6 +532,10 @@ async def decide_receipt(
                 detail="Nothing on this transfer waits for a decision",
                 headers={"X-Error-Code": "NOTHING_TO_DECIDE"},
             )
+        # Received, so it starts repaying now: its own loan and daily days, in this same transaction.
+        if approve and tranche.status == "CONFIRMED" and resolve(None).repay_from_approval:
+            window = await db.get(FundingWindow, tranche.window_id)
+            await form_investment_loan(db, tranche=tranche, window=window, now=now)
     except DirectTransferError as exc:
         raise _http(exc) from exc
     status = tranche.status
@@ -544,7 +557,7 @@ async def decide_receipt(
     )
     business = (
         await _notify_business_of_approval(db, tranche_id, status)
-        if approve and status in ("ATTESTED", "CONFIRMED")
+        if approve and status in ("ATTESTED", "CONFIRMED", "ACTIVE")
         else None
     )
     await db.commit()

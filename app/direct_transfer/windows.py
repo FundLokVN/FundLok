@@ -28,7 +28,8 @@ from app.direct_transfer.storage import EvidenceStorage
 from app.lending.models import Contract, Listing, LoanApplication, Order, ProjectOwnership, ScoreRun
 from app.users.models import User
 
-CAPACITY_STATES = ("RESERVED", "SIGNED", "ATTESTED", "CONFIRMED")
+# ACTIVE holds capacity too: with repay_from_approval an investment repays while its round is still open.
+CAPACITY_STATES = ("RESERVED", "SIGNED", "ATTESTED", "CONFIRMED", "ACTIVE")
 
 
 def compute_min_raise(target_vnd: int, pct: int) -> int:

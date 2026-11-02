@@ -176,7 +176,7 @@ async def read_projection(
     return ProjectedScheduleOut.model_validate(
         project_ticket(
             amount_vnd=tranche.amount_vnd,
-            annual_rate_pct=Decimal(window.annual_rate_pct),
+            loan_rate_pct=Decimal(window.annual_rate_pct),
             term_months=window.term_months,
             individual=tranche.investor_type == "INDIVIDUAL",
             confirmed_on=ict_date(received_at),

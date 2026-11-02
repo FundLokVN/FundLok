@@ -1,9 +1,9 @@
 """A funding round from investment to daily repayment, over the API.
 
-Investors pay the business directly and staff approve each transfer, which means the money is received; the business
-sees its investors (masked); it closes the round early once the minimum is confirmed; staff advance the round, which
-forms the loan and creates the daily repayment days; the business then pays each investor every working day, one
-VietQR per investor, and marks the days paid.
+Investors pay the business directly and staff approve each transfer, which means the money is received and that
+investment starts repaying at once, as its own loan with its own daily days; the business sees its investors
+(masked) and pays each one every working day, one VietQR per investor, and marks the days paid; it closes the round
+early once the minimum is confirmed, and staff advance the round to close it.
 """
 import datetime as dt
 import uuid
@@ -17,7 +17,7 @@ from tests.market.test_funding_flow import PNG, _open_project, _reserve, _upload
 
 
 async def _approved(client, admin, investor, window_id, amount):
-    """A ticket the investor paid and staff approved by looking at the receipt: received (CONFIRMED)."""
+    """A ticket the investor paid and staff approved by looking at the receipt: received and repaying (ACTIVE)."""
     ticket = (await _reserve(client, investor, window_id, amount)).json()
     upload = (await _upload(client, investor, ticket["id"], PNG + uuid.uuid4().bytes)).json()
     resp = await client.post(
@@ -25,7 +25,7 @@ async def _approved(client, admin, investor, window_id, amount):
         json={"outcome": "APPROVED"},
         headers=admin["headers"],
     )
-    assert resp.status_code == 200 and resp.json()["status"] == "CONFIRMED", resp.text
+    assert resp.status_code == 200 and resp.json()["status"] == "ACTIVE", resp.text
     return ticket
 
 
@@ -46,12 +46,12 @@ async def test_a_round_goes_from_investment_to_daily_repayment(
     binh = await make_eligible_investor(await make_user(role="INVESTOR", full_name="Tran Thi Binh"))
     first = await _approved(client, admin, an, window_id, 30_000_000)
 
-    # The business sees its round and each investor, masked; staff approval already counts as received.
+    # The business sees its round and each investor, masked; staff approval counts as received and repaying.
     round_ = await _round(client, sme)
     assert round_["id"] == str(window_id) and round_["status"] == "OPEN"
     assert round_["project_name"].startswith("ABC Co") and round_["confirmed_vnd"] == 30_000_000
     [ticket] = round_["tickets"]
-    assert ticket["investor_display"] == "N. A***" and ticket["status"] == "CONFIRMED"
+    assert ticket["investor_display"] == "N. A***" and ticket["status"] == "ACTIVE"
 
     # Too early to close: 30M confirmed, the minimum is 40M.
     early = await client.post(f"/funding/windows/{window_id}/close-early", headers=sme["headers"])
@@ -185,48 +185,97 @@ async def test_the_marketplace_card_shows_what_the_round_has_raised(
     assert listing["close_at"]
 
 
-async def test_a_confirmed_ticket_projects_the_days_the_loan_then_creates(
+async def test_approval_forms_the_investment_s_own_loan_at_once(
     client, db_session, make_admin, make_user, make_eligible_investor
 ):
-    """Before the loan forms the investor sees a projection; once it forms, the real days are the same ones."""
+    """The investment repays from its approval: its own loan, its days saved at once, while the round is open."""
     from decimal import Decimal
 
+    from app.repayment_schedule.models import Facility
     from app.market.projection import project_ticket
 
     setup = await _open_project(client, db_session, make_admin, make_user)  # target 80M, minimum 40M
-    window_id = setup["window"].id
-    window_end = setup["window"].window_end
-    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
-    ticket = await _approved(client, setup["admin"], investor, window_id, 40_000_000)
+    window_id, contract_id = setup["window"].id, setup["window"].contract_id
+    an = await make_eligible_investor(await make_user(role="INVESTOR"))
+    binh = await make_eligible_investor(await make_user(role="INVESTOR"))
+    first = await _approved(client, setup["admin"], an, window_id, 30_000_000)
 
-    projected = await client.get(f"/repayment/tranches/{ticket['id']}/projection", headers=investor["headers"])
+    real = (await client.get(f"/repayment/tranches/{first['id']}/schedule", headers=an["headers"])).json()
 
-    assert projected.status_code == 200, projected.text
-    body = projected.json()
-    assert body["assumed_close_date"] == ict_date(window_end).isoformat()  # the latest the round can close
-    assert body["business_day_count"] == 84  # 4 months x 21 working days
-    instalments = [d for d in body["days"] if d["kind"] == "INSTALMENT"]
-    assert len(instalments) == 84 and instalments[0]["due_date"] == body["start_date"]
-    assert sum(d["principal_vnd"] for d in instalments) == 40_000_000
-    assert body["totals"]["net_vnd"] == sum(d["net_vnd"] for d in body["days"])
-    other = await make_eligible_investor(await make_user(role="INVESTOR"))
-    assert (
-        await client.get(f"/repayment/tranches/{ticket['id']}/projection", headers=other["headers"])
-    ).status_code == 404
-
-    # The round closes today and the loan forms: the real days are what the projection gives for that close.
-    await client.post(f"/funding/windows/{window_id}/close-early", headers=setup["sme"]["headers"])
-    advanced = await client.post(f"/admin/funding/rounds/{window_id}/advance", headers=setup["admin"]["headers"])
-    assert advanced.json()["status"] == "REPAYING", advanced.text
-    real = (await client.get(f"/repayment/tranches/{ticket['id']}/schedule", headers=investor["headers"])).json()
+    # 84 working days at 2.5% over the loan, plus the first-period interest: what the projection gives for today.
+    instalments = [r for r in real if r["kind"] == "INSTALMENT"]
+    assert len(instalments) == 84 and sum(r["principal_vnd"] for r in instalments) == 30_000_000
+    assert sum(r["interest_vnd"] for r in instalments) == 750_000  # 2.5% of 30M
     today = ict_date(dt.datetime.now(dt.timezone.utc))
     expected = project_ticket(
-        amount_vnd=40_000_000, annual_rate_pct=Decimal("16"), term_months=4,
-        individual=any(r["tax_withheld_vnd"] for r in real),  # the investor's own type, as the loan saw it
-        confirmed_on=today, close_on=today,
+        amount_vnd=30_000_000, loan_rate_pct=Decimal("16"), term_months=4,
+        individual=any(r["tax_withheld_vnd"] for r in real), confirmed_on=today, close_on=today,
     )
     key = lambda d: (d["kind"], str(d["due_date"]), d["principal_vnd"], d["gross_vnd"], d["tax_withheld_vnd"], d["net_vnd"])
     assert sorted(map(key, real)) == sorted(map(key, expected["days"]))
+    # Tax is 5% of the interest only, never of the principal coming back: over the loan it is 5% of all the interest
+    # (each day rounds down, the last day takes the leftover đồng), and no day's tax ever exceeds its interest.
+    total_interest = sum(r["interest_vnd"] for r in real)
+    if any(r["tax_withheld_vnd"] for r in real):  # an individual investor
+        assert abs(sum(r["tax_withheld_vnd"] for r in real) - total_interest * 5 / 100) <= 1
+    assert all(r["tax_withheld_vnd"] <= r["interest_vnd"] for r in real)
 
-    gone = await client.get(f"/repayment/tranches/{ticket['id']}/projection", headers=investor["headers"])
-    assert gone.status_code == 409 and gone.headers["X-Error-Code"] == "NO_PROJECTION"
+    # The round is still open, yet the business already sees what it owes and its real plan.
+    plan = (await client.get(f"/funding/me/rounds/{window_id}/repayment-plan", headers=setup["sme"]["headers"])).json()
+    assert plan["kind"] == "ACTUAL" and len(plan["days"]) == 84
+    due = (
+        await client.get("/repayment/today", params={"date": real[-1]["due_date"]}, headers=setup["sme"]["headers"])
+    ).json()
+    assert {r["tranche_id"] for r in due["rows"]} == {first["id"]}
+    # The business transfers each day after deducting the investor's tax, 5% of the interest only (it keeps that
+    # back for the tax office): the amount it is asked to pay and its VietQR are that net figure.
+    from app.direct_transfer.vietqr import parse_tlv
+
+    for row in due["rows"]:
+        assert row["net_vnd"] == row["gross_vnd"] - row["tax_withheld_vnd"]
+        assert row["tax_withheld_vnd"] <= row["interest_vnd"]  # never taken from the principal coming back
+        assert dict(parse_tlv(row["vietqr_payload"]))["54"] == str(row["net_vnd"])
+    assert due["totals"]["net_vnd"] == due["totals"]["gross_vnd"] - due["totals"]["tax_withheld_vnd"]
+    projection = await client.get(f"/repayment/tranches/{first['id']}/projection", headers=an["headers"])
+    assert projection.status_code == 409  # real days now, nothing to project
+
+    # A second investment is a second loan on the same round.
+    await _approved(client, setup["admin"], binh, window_id, 20_000_000)
+    db_session.expire_all()
+    facilities = (await db_session.execute(select(Facility).where(Facility.contract_id == contract_id))).scalars().all()
+    assert sorted(int(f.principal_vnd) for f in facilities) == [20_000_000, 30_000_000]
+
+    # Closing the round forms nothing more and refunds nobody.
+    await client.post(f"/funding/windows/{window_id}/close-early", headers=setup["sme"]["headers"])
+    advanced = await client.post(f"/admin/funding/rounds/{window_id}/advance", headers=setup["admin"]["headers"])
+    assert advanced.json()["status"] == "REPAYING", advanced.text
+    db_session.expire_all()
+    assert len((await db_session.execute(select(Facility).where(Facility.contract_id == contract_id))).scalars().all()) == 2
+
+
+async def test_advance_starts_an_investment_approved_before_repaying_from_approval(
+    client, db_session, make_admin, make_user, make_eligible_investor, monkeypatch
+):
+    import dataclasses
+
+    from app.direct_transfer import config
+
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id = setup["window"].id
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    monkeypatch.setattr(config, "DEFAULT_PARAMS", dataclasses.replace(config.DEFAULT_PARAMS, repay_from_approval=False))
+    ticket = (await _reserve(client, investor, window_id, 10_000_000)).json()
+    upload = (await _upload(client, investor, ticket["id"], PNG + uuid.uuid4().bytes)).json()
+    approved = await client.post(
+        f"/admin/funding/transfers/{upload['transfer_id']}/decision", json={"outcome": "APPROVED"},
+        headers=setup["admin"]["headers"],
+    )
+    assert approved.json()["status"] == "CONFIRMED"  # approved, but not repaying yet
+    monkeypatch.undo()
+
+    await client.post(f"/admin/funding/rounds/{window_id}/advance", headers=setup["admin"]["headers"])
+
+    schedule = (await client.get(f"/repayment/tranches/{ticket['id']}/schedule", headers=investor["headers"])).json()
+    assert len(schedule) == 85
+    mine = (await client.get("/funding/me/tranches", headers=investor["headers"])).json()
+    assert mine[0]["status"] == "ACTIVE"

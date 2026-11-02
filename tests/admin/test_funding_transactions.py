@@ -358,14 +358,18 @@ async def test_approving_a_receipt_means_the_money_is_received(
 
     assert resp.status_code == 200, resp.text
     row = resp.json()
-    # Staff checked it, so it counts: nothing is left for the business to confirm.
-    assert row["status"] == "CONFIRMED" and row["needs_action"] is False
+    # Staff checked it, so it counts and starts repaying: nothing is left for the business to confirm.
+    assert row["status"] == "ACTIVE" and row["needs_action"] is False
     assert row["transfer"]["check_status"] == "MATCHED" and row["transfer"]["parsed_fields"] is None
     [ring] = await _approvals(client, s["sme"])
-    assert ring["data"]["status"] == "CONFIRMED" and ring["entity_id"] == s["tranche"]["id"]
+    assert ring["data"]["status"] == "ACTIVE" and ring["entity_id"] == s["tranche"]["id"]
     [entry] = (await _activity(client, s["admin"]))["items"]
     assert entry["action"] == "TRANSFER_RECEIVED" and entry["reason"] == "Approved after viewing the receipt"
-    assert entry["tranche_status"] == "CONFIRMED"
+    assert entry["tranche_status"] == "ACTIVE"
+    schedule = (
+        await client.get(f"/repayment/tranches/{s['tranche']['id']}/schedule", headers=s["investor"]["headers"])
+    ).json()
+    assert len(schedule) == 85  # 84 working days and the first-period interest, saved at approval
     [round_] = (await client.get("/admin/funding/rounds", headers=s["admin"]["headers"])).json()
     assert round_["confirmed_vnd"] == 20_000_000
 
@@ -409,10 +413,10 @@ async def test_a_late_receipt_is_approved_without_typing_it_in(
 
     assert resp.status_code == 200, resp.text
     row = resp.json()
-    assert row["status"] == "CONFIRMED" and row["needs_action"] is False  # out of the queue
+    assert row["status"] == "ACTIVE" and row["needs_action"] is False  # out of the queue, and repaying
     assert row["transfer"]["check_status"] == "MATCHED" and row["dispute"]["outcome"] == "RECEIVED"
     [ring] = await _approvals(client, setup["sme"])
-    assert ring["data"]["status"] == "CONFIRMED"
+    assert ring["data"]["status"] == "ACTIVE"
 
 
 async def test_staff_cannot_decide_their_own_transfer(
@@ -443,7 +447,7 @@ async def test_a_ticket_left_waiting_for_the_business_is_settled_by_staff(
     resp = await _decide(client, s["admin"], s["transfer_id"], "APPROVED")
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "CONFIRMED" and resp.json()["needs_action"] is False
+    assert resp.json()["status"] == "ACTIVE" and resp.json()["needs_action"] is False
 
 
 async def test_denying_a_ticket_left_waiting_voids_it(

@@ -127,3 +127,30 @@ class ProjectedScheduleOut(BaseModel):
     business_day_count: int
     days: list[ProjectedDayOut]
     totals: ProjectedTotalsOut
+
+
+class SmeRepaymentDayOut(BaseModel):
+    """One day the business pays: the sum over its investors. ``gross_vnd`` is what it owes in all (``net_vnd`` to
+    the investors, ``tax_withheld_vnd`` held back for the tax office). ``paid`` and ``missing`` count the investors'
+    tickets marked paid and reported missing (real days only)."""
+
+    due_date: dt.date
+    principal_vnd: int
+    interest_vnd: int
+    gross_vnd: int
+    tax_withheld_vnd: int
+    net_vnd: int
+    tickets: int
+    paid: int = 0
+    missing: int = 0
+
+
+class SmeRepaymentPlanOut(BaseModel):
+    """The business's daily repayments to its investors. PROJECTED before the loan forms (if the round closed on
+    ``assumed_close_date``, the latest it can; not a promise), ACTUAL once it has."""
+
+    kind: str  # PROJECTED | ACTUAL
+    assumed_close_date: dt.date | None = None
+    start_date: dt.date | None = None
+    days: list[SmeRepaymentDayOut]
+    totals: ProjectedTotalsOut

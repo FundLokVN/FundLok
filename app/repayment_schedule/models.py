@@ -81,7 +81,8 @@ class Facility(Base):
     __tablename__ = "facility"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    contract_id = Column(UUID(as_uuid=True), ForeignKey("contracts.id", ondelete="RESTRICT"), nullable=False, unique=True)
+    # Not unique: with repay_from_approval each approved investment is its own facility on the round's contract.
+    contract_id = Column(UUID(as_uuid=True), ForeignKey("contracts.id", ondelete="RESTRICT"), nullable=False, index=True)
 
     # Origination inputs (spec §4.1 variables: P, r, x).
     principal_vnd = Column(Numeric(20, 0), nullable=False)

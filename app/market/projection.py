@@ -2,8 +2,9 @@
 
 The real days are created when the round closes (app/direct_transfer/close.py `_form_loan` ->
 `generate_repayment_days`). Until then the investor sees what those days would be, with the same arithmetic: the
-round's rate and term (`compute_origination`), the business-day calendar, `principal_for_day`, the withholding on
-interest for individual investors, and the first-period (stub) interest from the day the transfer was confirmed.
+investors' rate (`investor_rate_pct`: their flat return over the loan, capped at the business's rate), the term
+(`compute_origination`), the business-day calendar, `principal_for_day`, the withholding on interest for individual
+investors, and the first-period (stub) interest from the day the transfer was confirmed.
 
 Two assumptions, both said on the page: the round closes on its last day (the latest it can, so the dates are the
 latest they can be), and the ticket is sized on its own. The real schedule splits the whole loan's days pro rata
@@ -17,7 +18,7 @@ import datetime as dt
 from decimal import Decimal
 
 from app.direct_transfer.calendar_utils import count_business_days, default_calendar, first_working_day_after
-from app.direct_transfer.close import compute_stub_interest
+from app.direct_transfer.close import compute_stub_interest, investor_rate_pct
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.repayment import principal_for_day, rdiv
 from app.repayment_schedule.calendar import BusinessDayCalendar
@@ -39,7 +40,7 @@ class ProjectedDay:
 def project_ticket(
     *,
     amount_vnd: int,
-    annual_rate_pct: Decimal,
+    loan_rate_pct: Decimal,
     term_months: int,
     individual: bool,
     confirmed_on: dt.date,
@@ -51,6 +52,7 @@ def project_ticket(
     one instalment per business day, with the totals. Mirrors generate_repayment_days for one ticket."""
     p = resolve(params)
     cal = calendar or default_calendar()
+    annual_rate_pct = investor_rate_pct(loan_rate_pct, term_months, p)
     start = first_working_day_after(close_on, cal)
     orig = compute_origination(
         principal_vnd=amount_vnd, annual_rate_pct=annual_rate_pct, contractual_term_months=term_months,
@@ -93,3 +95,21 @@ def project_ticket(
             "net_vnd": sum(day.net_vnd for day in days),
         },
     }
+
+
+def sum_by_day(days: list[dict]) -> list[dict]:
+    """Many tickets' days as the business pays them: one row per date with the totals and how many tickets."""
+    by_date: dict[dt.date, dict] = {}
+    for day in days:
+        row = by_date.setdefault(
+            day["due_date"],
+            {"due_date": day["due_date"], "principal_vnd": 0, "interest_vnd": 0, "gross_vnd": 0, "tax_withheld_vnd": 0,
+             "net_vnd": 0, "tickets": 0},
+        )
+        row["principal_vnd"] += day["principal_vnd"]
+        row["interest_vnd"] += day["interest_vnd"]
+        row["gross_vnd"] += day["gross_vnd"]
+        row["tax_withheld_vnd"] += day["tax_withheld_vnd"]
+        row["net_vnd"] += day["net_vnd"]
+        row["tickets"] += 1
+    return [by_date[date] for date in sorted(by_date)]
