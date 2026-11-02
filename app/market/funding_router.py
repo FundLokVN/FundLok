@@ -178,21 +178,6 @@ async def read_my_tranches(
     return out
 
 
-# The leading bytes of each type a receipt may be. The browser's Content-Type is the uploader's claim; what is
-# stored, and later opened by staff, is typed by its content.
-_SIGNATURES = (
-    (b"%PDF-", "application/pdf"),
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"\xff\xd8\xff", "image/jpeg"),
-)
-
-
-def _sniff(content: bytes) -> str | None:
-    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
-        return "image/webp"
-    return next((kind for magic, kind in _SIGNATURES if content.startswith(magic)), None)
-
-
 @router.post("/tranches/{tranche_id}/receipt", response_model=ReceiptResultOut, status_code=202)
 async def upload_receipt(
     tranche_id: UUID,
@@ -211,7 +196,7 @@ async def upload_receipt(
     content = await file.read(limit + 1)
     if len(content) > limit:
         raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
-    content_type = _sniff(content)
+    content_type = funding.sniff_receipt_type(content)
     if content_type is None:
         raise HTTPException(
             status_code=415, detail="Upload a PDF, PNG, JPEG or WEBP", headers={"X-Error-Code": "UNSUPPORTED_TYPE"}

@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.direct_transfer.schemas import FundingWindowOut, TrancheOut
+from app.direct_transfer.schemas import FundingWindowOut, PayeeOut, RepaymentRowOut, TrancheOut
 
 
 class ListingCreate(BaseModel):
@@ -154,3 +154,29 @@ class SmeRepaymentPlanOut(BaseModel):
     start_date: dt.date | None = None
     days: list[SmeRepaymentDayOut]
     totals: ProjectedTotalsOut
+
+
+class RepaymentRejectionOut(BaseModel):
+    """FundLok staff denied the receipt the business uploaded for some of these days, and why."""
+
+    reason: str
+    decided_at: dt.datetime
+
+
+class InvestmentDueOut(BaseModel):
+    """What the business owes one investor on one investment now: every day due today or earlier that it has not
+    marked paid, as one transfer to the investor's account (one VietQR for the whole amount, under the
+    investment's memo). Each amount is tax included (gross) and as transferred once the tax is kept back (net)."""
+
+    date: dt.date
+    tranche_id: UUID
+    reference_code: str
+    investor_display: str
+    days: list[RepaymentRowOut]
+    gross_vnd: int
+    tax_withheld_vnd: int
+    net_vnd: int
+    payee: PayeeOut | None
+    vietqr_payload: str | None
+    # Set when a day due here is due again because staff denied its receipt.
+    rejection: RepaymentRejectionOut | None = None

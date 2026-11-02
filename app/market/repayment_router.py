@@ -10,18 +10,30 @@ from uuid import UUID
 
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.direct_transfer.calendar_utils import ict_date
+from app.direct_transfer.config import DEFAULT_PARAMS
 from app.direct_transfer.errors import DirectTransferError
-from app.direct_transfer.models import FundingWindow, Tranche, Transfer
+from app.direct_transfer.evidence import store_evidence_file
+from app.direct_transfer.models import FundingWindow, PaymentAccount, RepaymentDay, Tranche, Transfer
 from app.direct_transfer.repayment import mark_days_paid, report_missing_day, todays_payments, tranche_schedule
 from app.direct_transfer.schemas import RepaymentRowOut, TodaysPaymentsOut
+from app.direct_transfer.tranches import mask_name
+from app.direct_transfer.vietqr import build_vietqr_payload
+from app.lending.models import AuditLog
+from app.market import funding
 from app.market.projection import project_ticket
-from app.market.schemas import MarkDaysPaidCreate, ProjectedScheduleOut, ReportMissingCreate
+from app.market.schemas import (
+    InvestmentDueOut,
+    MarkDaysPaidCreate,
+    ProjectedScheduleOut,
+    RepaymentRejectionOut,
+    ReportMissingCreate,
+)
 from app.users.models import Role, User
 from app.utils.audit import append_audit
 from app.utils.jwt import get_current_user
@@ -94,6 +106,155 @@ async def mark_paid(
     return [RepaymentRowOut.model_validate(row) for row in today["rows"] if row["repayment_day_id"] in marked]
 
 
+async def _business_tranche(db: AsyncSession, tranche_id: UUID, sme_user_id: UUID) -> Tranche:
+    """One investment in the business's own round; 404 for anyone else's (its investor included)."""
+    tranche = await db.get(Tranche, tranche_id)
+    window = await db.get(FundingWindow, tranche.window_id) if tranche else None
+    if window is None or window.sme_user_id != sme_user_id:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return tranche
+
+
+@router.get("/tranches/{tranche_id}/due", response_model=InvestmentDueOut)
+async def read_investment_due(
+    tranche_id: UUID,
+    on_date: dt.date | None = Query(default=None, alias="date"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """What the business owes this investor now: the days due today or earlier still DUE, added up into one
+    transfer with one VietQR, to the investor's account and under the investment's memo. A day already marked
+    paid, or reported missing, is not asked for again. `date` defaults to today (ICT)."""
+    tranche = await _business_tranche(db, tranche_id, current_user.id)
+    today = on_date or ict_date(_now())
+    rows = await tranche_schedule(db, tranche_id=tranche_id, user_id=current_user.id)
+    due = [row for row in rows if row["status"] == "DUE" and row["due_date"] <= today]
+    net = sum(row["net_vnd"] for row in due)
+    account = await db.get(PaymentAccount, tranche.investor_account_id) if tranche.investor_account_id else None
+    qr = None
+    if account is not None and account.bank_bin and net > 0:
+        qr = build_vietqr_payload(
+            bank_bin=account.bank_bin, account_number=account.account_number, amount_vnd=net,
+            memo=tranche.reference_code,
+        )
+    investor = await db.get(User, tranche.investor_id)
+    # A day due again because staff denied its receipt: say why, from the decision's audit entry.
+    denied = (
+        await db.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.entity_type == "TRANCHE",
+                AuditLog.entity_id == tranche.id,
+                AuditLog.action == "REPAYMENT_RECEIPT_DENIED",
+            )
+            .order_by(AuditLog.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    due_ids = {str(row["repayment_day_id"]) for row in due}
+    rejection = None
+    if denied is not None and due_ids & set((denied.after_state or {}).get("repayment_day_ids") or []):
+        rejection = RepaymentRejectionOut(reason=denied.after_state.get("reason") or "", decided_at=denied.created_at)
+    return InvestmentDueOut(
+        date=today,
+        tranche_id=tranche.id,
+        reference_code=tranche.reference_code,
+        investor_display=mask_name(investor.full_name or investor.email),
+        days=[RepaymentRowOut.model_validate(row) for row in due],
+        gross_vnd=sum(row["gross_vnd"] for row in due),
+        tax_withheld_vnd=sum(row["tax_withheld_vnd"] for row in due),
+        net_vnd=net,
+        payee=rows[0]["payee"] if rows else None,
+        vietqr_payload=qr,
+        rejection=rejection,
+    )
+
+
+@router.post("/tranches/{tranche_id}/pay", response_model=list[RepaymentRowOut])
+async def pay_with_receipt(
+    tranche_id: UUID,
+    request: Request,
+    repayment_day_ids: list[UUID] = Form(...),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    """The business paid this investor and uploads its bank receipt (PDF, PNG, JPEG or WEBP, at most 10 MB). In one
+    step the receipt is kept as evidence (a REPAYMENT transfer for each day, for FundLok to check) and the days are
+    marked paid, so a request that fails part way leaves nothing half done. The same receipt cannot be used twice
+    (409 DUPLICATE_FILE); replaying the same Idempotency-Key stores and marks nothing twice."""
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=400, detail="Idempotency-Key is required", headers={"X-Error-Code": "IDEMPOTENCY_KEY_REQUIRED"}
+        )
+    await _business_tranche(db, tranche_id, current_user.id)
+    day_ids = list(dict.fromkeys(repayment_day_ids))
+    days = (await db.execute(select(RepaymentDay).where(RepaymentDay.id.in_(day_ids)))).scalars().all()
+    if len(days) != len(day_ids) or any(day.tranche_id != tranche_id for day in days):
+        raise HTTPException(status_code=404, detail="Repayment day not found")
+
+    # A replay: the receipt was stored and the days marked under this key already.
+    receipt_id = (
+        await db.execute(
+            select(Transfer.evidence_file_id).where(
+                Transfer.idempotency_key.in_([f"{idempotency_key}:{day_id}" for day_id in day_ids])
+            )
+        )
+    ).scalars().first()
+    replay = receipt_id is not None
+    now = _now()
+    try:
+        if not replay:
+            limit = DEFAULT_PARAMS.max_evidence_bytes
+            content = await file.read(limit + 1)
+            if len(content) > limit:
+                raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
+            content_type = funding.sniff_receipt_type(content)
+            if content_type is None:
+                raise HTTPException(
+                    status_code=415, detail="Upload a PDF, PNG, JPEG or WEBP", headers={"X-Error-Code": "UNSUPPORTED_TYPE"}
+                )
+            stored = await store_evidence_file(
+                db,
+                funding.evidence_storage(),
+                owner_user_id=current_user.id,
+                purpose="RECEIPT",
+                content=content,
+                content_type=content_type,
+                filename=(file.filename or "")[:255] or None,
+            )
+            receipt_id = stored.id
+        marked = await mark_days_paid(
+            db,
+            sme_user_id=current_user.id,
+            repayment_day_ids=day_ids,
+            receipt_file_id=receipt_id,
+            idempotency_key=idempotency_key,
+            now=now,
+        )
+    except DirectTransferError as exc:
+        _raise_mapped(exc)
+    if not replay:
+        append_audit(
+            db,
+            entity_type="TRANCHE",
+            entity_id=tranche_id,
+            action="REPAYMENT_DAYS_MARKED_PAID",
+            actor_id=current_user.id,
+            after_state={
+                "repayment_day_ids": [str(day.id) for day in marked],
+                "net_vnd": sum(day.net_vnd for day in marked),
+                "receipt_file_id": str(receipt_id),
+            },
+            ip_address=request.client.host if request.client else None,
+        )
+    await db.commit()
+    ids = {day.id for day in marked}
+    rows = await tranche_schedule(db, tranche_id=tranche_id, user_id=current_user.id)
+    return [RepaymentRowOut.model_validate(row) for row in rows if row["repayment_day_id"] in ids]
+
+
 @router.get("/tranches/{tranche_id}/schedule", response_model=list[RepaymentRowOut])
 async def read_schedule(
     tranche_id: UUID,
@@ -147,15 +308,16 @@ async def report_missing(
 async def read_projection(
     tranche_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_investor),
+    current_user: User = Depends(get_current_user),
 ):
-    """The investor's confirmed ticket, before its round forms the loan: what its repayment days would be if the
-    round closed on its last day (the latest it can). Projected, not guaranteed; once the loan forms, the real days
-    are at /schedule. 409 NO_PROJECTION when the ticket is not confirmed or the loan already formed."""
+    """A confirmed ticket, before its round forms the loan, for its investor or the business that will owe it: what
+    its repayment days would be if the round closed on its last day (the latest it can). Projected, not guaranteed;
+    once the loan forms, the real days are at /schedule. 409 NO_PROJECTION when the ticket is not confirmed or the
+    loan already formed."""
     tranche = await db.get(Tranche, tranche_id)
-    if tranche is None or tranche.investor_id != current_user.id:
+    window = await db.get(FundingWindow, tranche.window_id) if tranche else None
+    if window is None or current_user.id not in (tranche.investor_id, window.sme_user_id):
         raise HTTPException(status_code=404, detail="Ticket not found")
-    window = await db.get(FundingWindow, tranche.window_id)
     if tranche.status != "CONFIRMED" or window.status not in ("OPEN", "FULL", "CLOSING"):
         raise HTTPException(
             status_code=409,

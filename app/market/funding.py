@@ -50,6 +50,21 @@ INVESTOR_TERMS_VERSION = "2026-10-30"
 # Where signed documents go. Tests swap in InMemoryStorage (root conftest).
 evidence_storage: type[EvidenceStorage] = R2Storage
 
+# The leading bytes of each type a receipt may be. The browser's Content-Type is the uploader's claim; what is
+# stored, and later opened by staff, is typed by its content.
+_SIGNATURES = (
+    (b"%PDF-", "application/pdf"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+)
+
+
+def sniff_receipt_type(content: bytes) -> str | None:
+    """A receipt's type by its content (PDF, PNG, JPEG or WEBP), or None for anything else."""
+    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "image/webp"
+    return next((kind for magic, kind in _SIGNATURES if content.startswith(magic)), None)
+
 
 def _signer() -> Signer:
     # The remote-signing vendor is not chosen yet (funding-window.md rule 1); MockSigner is Edward's stand-in.

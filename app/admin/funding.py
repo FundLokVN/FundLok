@@ -615,9 +615,11 @@ async def decide_transfer(
 ACTIVITY_GROUPS: dict[str, tuple[str, ...]] = {
     "DECISIONS": (
         "TRANSFER_RECEIPT_CHECKED", "TRANSFER_RECEIPT_REJECTED", "TRANSFER_RECEIVED", "TRANSFER_NOT_RECEIVED",
+        "REPAYMENT_RECEIPT_APPROVED", "REPAYMENT_RECEIPT_DENIED",
     ),
     "INVESTOR": ("INVESTMENT_RESERVED", "INVESTMENT_RECEIPT_UPLOADED"),
-    "VIEWS": ("TRANSFER_RECEIPT_VIEWED",),
+    "BUSINESS": ("REPAYMENT_DAYS_MARKED_PAID",),
+    "VIEWS": ("TRANSFER_RECEIPT_VIEWED", "REPAYMENT_RECEIPT_VIEWED"),
 }
 ACTIVITY_GROUPS["ALL"] = tuple(action for actions in list(ACTIVITY_GROUPS.values()) for action in actions)
 
@@ -686,7 +688,12 @@ async def list_activity(
                 actor=people.get(log.actor_id),
                 tranche_id=tid,
                 reference_code=tranche.reference_code if tranche else state.get("reference_code"),
-                amount_vnd=tranche.amount_vnd if tranche else state.get("amount_vnd"),
+                # A repayment entry is about what was repaid, not the investment's size.
+                amount_vnd=(
+                    state.get("net_vnd")
+                    if log.action.startswith("REPAYMENT_") and "net_vnd" in state
+                    else tranche.amount_vnd if tranche else state.get("amount_vnd")
+                ),
                 project_name=project_name,
                 investor=people.get(tranche.investor_id) if tranche else None,
                 check_status=state.get("check_status"),

@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin import funding as admin_funding
+from app.admin import repayments as admin_repayments
 from app.admin import service
 from app.admin.access_log import audit_admin_read
 from app.admin.schemas import (
@@ -17,6 +18,8 @@ from app.admin.schemas import (
     AdminReceiptDecisionRequest,
     AdminReceiptFieldsRequest,
     AdminReceiptUrlResponse,
+    AdminRepaymentDecisionRequest,
+    AdminRepaymentReceiptOut,
     AdminTransferDecisionRequest,
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
@@ -429,7 +432,7 @@ async def list_investor_transfers(
     dependencies=[Depends(audit_admin_read("AUDIT_LOG"))],
 )
 async def list_funding_activity(
-    group: Literal["DECISIONS", "INVESTOR", "VIEWS", "ALL"] = "DECISIONS",
+    group: Literal["DECISIONS", "INVESTOR", "BUSINESS", "VIEWS", "ALL"] = "DECISIONS",
     tranche_id: UUID | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
@@ -437,7 +440,8 @@ async def list_funding_activity(
     current_user: User = Depends(require_admin),
 ):
     """The Transactions tab's audit trail, newest first. DECISIONS (the default): receipts checked, rejected, and
-    reviews settled as received or not. INVESTOR: reservations and uploads. VIEWS: who opened which receipt.
+    reviews settled as received or not, investors' and businesses' alike. INVESTOR: reservations and uploads.
+    BUSINESS: repayments marked paid. VIEWS: who opened which receipt.
     ``tranche_id`` narrows it to one ticket (the review panel's history)."""
     return await admin_funding.list_activity(db, group=group, tranche_id=tranche_id, page=page, page_size=page_size)
 
@@ -525,6 +529,75 @@ async def decide_investor_transfer(
     return await admin_funding.decide_transfer(
         db,
         dispute_id,
+        outcome=body.outcome,
+        reason=body.reason,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.get(
+    "/funding/repayments",
+    response_model=Page[AdminRepaymentReceiptOut],
+    dependencies=[Depends(audit_admin_read("TRANSFER"))],
+)
+async def list_repayment_receipts(
+    status: Literal["NEEDS_ACTION", "DECIDED", "ALL"] = "NEEDS_ACTION",
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The receipts businesses uploaded for repaying their investors, those waiting on staff first. Reads are
+    logged (both parties' names and accounts)."""
+    return await admin_repayments.list_receipts(db, status=status, page=page, page_size=page_size)
+
+
+@router.get(
+    "/funding/repayments/{receipt_id}",
+    response_model=AdminRepaymentReceiptOut,
+    dependencies=[Depends(audit_admin_read("EVIDENCE_FILE", id_param="receipt_id"))],
+)
+async def get_repayment_receipt(
+    receipt_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """One repayment receipt for the review panel: the days it pays and the accounts the money moved between."""
+    return await admin_repayments.get_receipt(db, receipt_id)
+
+
+@router.get(
+    "/funding/repayments/{receipt_id}/receipt-url",
+    response_model=AdminReceiptUrlResponse,
+    dependencies=[Depends(audit_admin_read("EVIDENCE_FILE", id_param="receipt_id"))],
+)
+async def get_repayment_receipt_url(
+    receipt_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A 10-minute link to the receipt the business uploaded. Each view is audited."""
+    return await admin_repayments.get_receipt_url(
+        db, receipt_id, actor=current_user, ip_address=request.client.host if request.client else None
+    )
+
+
+@router.post("/funding/repayments/{receipt_id}/decision", response_model=AdminRepaymentReceiptOut)
+async def decide_repayment_receipt(
+    receipt_id: UUID,
+    body: AdminRepaymentDecisionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Approve or deny a business's repayment receipt after looking at it. Approving records the investor as paid
+    for each day it covers (matched and settled); denying, with a note, puts those days back to due and tells the
+    business why, so it pays and uploads again. Final, and audited with the admin who made it."""
+    return await admin_repayments.decide_receipt(
+        db,
+        receipt_id,
         outcome=body.outcome,
         reason=body.reason,
         actor=current_user,

@@ -36,6 +36,11 @@ EVENT_VERIFICATION_REQUIRED = "VERIFICATION_REQUIRED"
 # (a review settled as received). `data` also carries the amount, the memo,
 # the project and the investor's masked name.
 EVENT_INVESTMENT_TRANSFER_APPROVED = "INVESTMENT_TRANSFER_APPROVED"
+# To the business, when FundLok staff deny the receipt it uploaded for a
+# repayment to an investor: those days are due again. `data` carries the
+# investment (`tranche_id`, `memo`), the investor's masked name, the amount and
+# the note staff gave (`reason`).
+EVENT_REPAYMENT_RECEIPT_REJECTED = "REPAYMENT_RECEIPT_REJECTED"
 
 NOTIFICATION_EVENTS = frozenset(
     {
@@ -43,6 +48,7 @@ NOTIFICATION_EVENTS = frozenset(
         EVENT_APPLICATION_REJECTED,
         EVENT_VERIFICATION_REQUIRED,
         EVENT_INVESTMENT_TRANSFER_APPROVED,
+        EVENT_REPAYMENT_RECEIPT_REJECTED,
     }
 )
 

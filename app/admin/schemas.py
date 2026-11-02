@@ -741,3 +741,62 @@ class AdminFundingActivityOut(BaseModel):
     failure_codes: list[str] = []
     tranche_status: str | None = None
     reason: str | None = None
+
+
+class AdminRepaymentAccountOut(BaseModel):
+    """A bank account as staff check a repayment receipt against it."""
+
+    bank_name: str
+    account_number: str
+    account_name: str
+
+
+class AdminRepaymentDayOut(BaseModel):
+    """One repayment day a business's receipt pays, and the transfer recorded for it."""
+
+    repayment_day_id: UUID
+    transfer_id: UUID
+    kind: Literal["INSTALMENT", "STUB"]
+    due_date: date
+    principal_vnd: int
+    interest_vnd: int
+    gross_vnd: int
+    tax_withheld_vnd: int
+    net_vnd: int
+    status: Literal["DUE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
+    check_status: str
+
+
+class AdminRepaymentReceiptOut(BaseModel):
+    """A receipt the business uploaded for a repayment to one investor, and the days it pays. ``check_status``:
+    AWAITING_FIELDS (waits for staff), MATCHED (approved: the days are paid and settled) or REJECTED (denied: the
+    days are due again). ``payee`` is the investor's account the money should reach, ``payer`` the business's.
+    ``open_report``: the investor reported one of these days as never arriving."""
+
+    id: UUID
+    tranche_id: UUID
+    window_id: UUID
+    project_name: str
+    reference_code: str
+    business: ActorOut
+    investor: ActorOut
+    submitted_at: datetime
+    check_status: Literal["AWAITING_FIELDS", "MATCHED", "REJECTED"]
+    needs_action: bool
+    gross_vnd: int
+    tax_withheld_vnd: int
+    net_vnd: int
+    days: list[AdminRepaymentDayOut]
+    payee: AdminRepaymentAccountOut | None = None
+    payer: AdminRepaymentAccountOut | None = None
+    original_filename: str | None = None
+    content_type: str | None = None
+    open_report: bool = False
+
+
+class AdminRepaymentDecisionRequest(BaseModel):
+    """Approve or deny a business's repayment receipt after looking at it. Denying needs a note: the business
+    sees it, and pays and uploads again."""
+
+    outcome: Literal["APPROVED", "DENIED"]
+    reason: str | None = Field(default=None, max_length=1000)

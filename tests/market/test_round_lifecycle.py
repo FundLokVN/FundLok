@@ -105,6 +105,9 @@ async def test_a_round_goes_from_investment_to_daily_repayment(
     schedule = await client.get(f"/repayment/tranches/{first['id']}/schedule", headers=an["headers"])
     assert schedule.status_code == 200 and len(schedule.json()) > 1
     assert (await client.get(f"/repayment/tranches/{first['id']}/schedule", headers=binh["headers"])).status_code == 404
+    # The business sees each investment's own days too, as the investor does: what it paid, what is left.
+    owed = await client.get(f"/repayment/tranches/{first['id']}/schedule", headers=sme["headers"])
+    assert owed.status_code == 200 and owed.json() == schedule.json()
 
     # The investor's list names the project; their schedule shows the day the business marked paid.
     mine = (await client.get("/funding/me/tranches", headers=an["headers"])).json()
@@ -271,6 +274,15 @@ async def test_advance_starts_an_investment_approved_before_repaying_from_approv
         headers=setup["admin"]["headers"],
     )
     assert approved.json()["status"] == "CONFIRMED"  # approved, but not repaying yet
+    # Before its loan forms, the business and the investor both see the investment's projected days; nobody else.
+    projected = await client.get(f"/repayment/tranches/{ticket['id']}/projection", headers=setup["sme"]["headers"])
+    assert projected.status_code == 200 and projected.json()["business_day_count"] == 84
+    mine = await client.get(f"/repayment/tranches/{ticket['id']}/projection", headers=investor["headers"])
+    assert mine.json() == projected.json()
+    other_sme = await make_user(role="SME")
+    assert (
+        await client.get(f"/repayment/tranches/{ticket['id']}/projection", headers=other_sme["headers"])
+    ).status_code == 404
     monkeypatch.undo()
 
     await client.post(f"/admin/funding/rounds/{window_id}/advance", headers=setup["admin"]["headers"])
@@ -279,3 +291,89 @@ async def test_advance_starts_an_investment_approved_before_repaying_from_approv
     assert len(schedule) == 85
     mine = (await client.get("/funding/me/tranches", headers=investor["headers"])).json()
     assert mine[0]["status"] == "ACTIVE"
+
+
+async def test_the_business_pays_an_investor_and_uploads_its_receipt(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    """One investment's page: what is due now as one transfer with one VietQR, then the receipt and the days marked
+    paid in one step."""
+    from app.direct_transfer.models import EvidenceFile, Transfer
+    from app.direct_transfer.vietqr import parse_tlv
+
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    sme = setup["sme"]
+    an = await make_eligible_investor(await make_user(role="INVESTOR"))
+    binh = await make_eligible_investor(await make_user(role="INVESTOR"))
+    ticket = await _approved(client, setup["admin"], an, setup["window"].id, 30_000_000)
+    other = await _approved(client, setup["admin"], binh, setup["window"].id, 20_000_000)
+    schedule = (await client.get(f"/repayment/tranches/{ticket['id']}/schedule", headers=sme["headers"])).json()
+
+    # Make the first day (its instalment and the first-period interest) due today.
+    first_date = schedule[0]["due_date"]
+    first_ids = [r["repayment_day_id"] for r in schedule if r["due_date"] == first_date]
+    today = ict_date(dt.datetime.now(dt.timezone.utc))
+    db_session.expire_all()
+    for day in (await db_session.execute(select(RepaymentDay).where(RepaymentDay.id.in_(first_ids)))).scalars():
+        day.due_date = today
+    await db_session.commit()
+
+    due = await client.get(f"/repayment/tranches/{ticket['id']}/due", headers=sme["headers"])
+    assert due.status_code == 200, due.text
+    due = due.json()
+    assert sorted(r["repayment_day_id"] for r in due["days"]) == sorted(first_ids)
+    assert due["net_vnd"] == sum(r["net_vnd"] for r in due["days"]) > 0
+    assert due["net_vnd"] == due["gross_vnd"] - due["tax_withheld_vnd"]
+    # One transfer for the whole day: the investor's account, the full amount, the investment's memo.
+    assert due["payee"]["account_number"] and due["reference_code"] == ticket["reference_code"]
+    assert dict(parse_tlv(due["vietqr_payload"]))["54"] == str(due["net_vnd"])
+
+    # Only the business sees what it owes; it pays only this investment's days.
+    assert (await client.get(f"/repayment/tranches/{ticket['id']}/due", headers=an["headers"])).status_code == 403
+    other_sme = await make_user(role="SME")
+    assert (await client.get(f"/repayment/tranches/{ticket['id']}/due", headers=other_sme["headers"])).status_code == 404
+    other_day = (await client.get(f"/repayment/tranches/{other['id']}/schedule", headers=sme["headers"])).json()[0]
+    pay = lambda ids, content, key: client.post(
+        f"/repayment/tranches/{ticket['id']}/pay",
+        data={"repayment_day_ids": ids},
+        files={"file": ("receipt.png", content, "image/png")},
+        headers=sme["headers"] | ({"Idempotency-Key": key} if key else {}),
+    )
+    assert (await pay([other_day["repayment_day_id"]], PNG + b"x", "k-0")).status_code == 404
+    assert (await pay(first_ids, PNG + b"x", None)).status_code == 400
+    unsupported = await pay(first_ids, b"not a receipt", "k-1")
+    assert unsupported.status_code == 415 and unsupported.headers["X-Error-Code"] == "UNSUPPORTED_TYPE"
+
+    receipt = PNG + uuid.uuid4().bytes
+    paid = await pay(first_ids, receipt, "k-2")
+    assert paid.status_code == 200, paid.text
+    assert {r["status"] for r in paid.json()} == {"PRESUMED_PAID"} and len(paid.json()) == len(first_ids)
+    # The receipt is kept as evidence, against each day it pays.
+    db_session.expire_all()
+    transfers = (await db_session.execute(select(Transfer).where(Transfer.kind == "REPAYMENT"))).scalars().all()
+    assert sorted(str(t.repayment_day_id) for t in transfers) == sorted(
+        r["repayment_day_id"] for r in due["days"] if r["net_vnd"] > 0
+    )
+    assert len({t.evidence_file_id for t in transfers}) == 1
+    audit = (
+        await db_session.execute(select(AuditLog).where(AuditLog.action == "REPAYMENT_DAYS_MARKED_PAID"))
+    ).scalar_one()
+    assert audit.after_state["receipt_file_id"] == str(transfers[0].evidence_file_id)
+
+    # A retry of the same request stores and marks nothing twice.
+    again = await pay(first_ids, receipt, "k-2")
+    assert again.status_code == 200 and again.json() == paid.json()
+    db_session.expire_all()
+    business_files = select(EvidenceFile).where(
+        EvidenceFile.owner_user_id == uuid.UUID(sme["id"]), EvidenceFile.purpose == "RECEIPT"
+    )
+    assert len((await db_session.execute(business_files)).scalars().all()) == 1
+    assert len((await db_session.execute(select(Transfer).where(Transfer.kind == "REPAYMENT"))).scalars().all()) == len(
+        transfers
+    )
+
+    # Paid: nothing more is due today. The same receipt cannot pay another day.
+    after = (await client.get(f"/repayment/tranches/{ticket['id']}/due", headers=sme["headers"])).json()
+    assert after["days"] == [] and after["net_vnd"] == 0 and after["vietqr_payload"] is None
+    reused = await pay([schedule[-1]["repayment_day_id"]], receipt, "k-3")
+    assert reused.status_code == 409 and reused.headers["X-Error-Code"] == "DUPLICATE_FILE"
