@@ -55,7 +55,7 @@ You don't need to put the tools on your PATH. The tool searches those locations,
 | Host | Use |
 |---|---|
 | **Neon** | The **direct** connection string, not the pooled one (no `-pooler` in the host). `pg_dump` doesn't work through the pooler. The tool warns you if it sees `-pooler`. |
-| **Cloud SQL (staging)** | Through `cloud-sql-proxy` (`postgresql://user:pass@127.0.0.1:5432/db`), or a socket URL `postgresql://user:pass@/db?host=/cloudsql/PROJECT:REGION:INSTANCE`. |
+| **Cloud SQL (staging)** | Through `cloud-sql-proxy` (install with `brew install cloud-sql-proxy`; then `postgresql://user:pass@127.0.0.1:5432/db`), or a socket URL `postgresql://user:pass@/db?host=/cloudsql/PROJECT:REGION:INSTANCE`. |
 | **Local Docker** | `postgresql://fundlok:fundlok@localhost:5433/fundlok_dev` |
 
 App-style URLs work as-is: `postgresql+asyncpg://…?ssl=require` and `postgresql+psycopg2://…` are converted automatically. See [Which URLs work](#which-urls-work) for the full list.

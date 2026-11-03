@@ -363,8 +363,10 @@ limit would throttle them all as one caller.
    fully automatic on merge to `main`. Consider a GitHub *environment* with
    required reviewers on the `deploy-production` job.
 7. **Legacy files:** `Procfile` and `runtime.txt` are Heroku-era artifacts and
-   are not used by the Cloud Run pipeline; `cloud-sql-proxy` binary (35 MB) is
-   checked into the repo root.
+   are not used by the Cloud Run pipeline. The `cloud-sql-proxy` binary that
+   used to sit at the repo root was removed on 2026-11-03 (built with an
+   unsupported Go, 32 known advisories); install it with
+   `brew install cloud-sql-proxy`.
 
 ---
 
