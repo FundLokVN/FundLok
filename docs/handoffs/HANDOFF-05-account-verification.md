@@ -3,10 +3,22 @@
 | | |
 |---|---|
 | **Status** | AGREED (Edward and Loc, Slack, 2026-10-30). Provisional until pilot experience: PROVISIONAL(Q-D18) |
-| **From** | Edward (backend, `app/direct_transfer/`) |
-| **To** | Phat (admin and user screens, routes, notifications) |
+| **From** | Edward |
+| **To** | **Phat: owns this task end to end, backend and UI** (D-035) |
 | **Decision** | D-031 in `docs/outstanding-issues.md`. Spec: `docs/specs/direct_transfer/transfer-and-evidence.md`, section "Who verifies an account" |
-| **Code** | PR #78 (backend rule, your admin route and schema: small additions, needs your OK) |
+| **Code** | PR #78 holds the backend rule as a starting point. Phat takes it over: push to the same branch (`feature/direct-transfer/sme-account-name-match`), change anything that needs changing |
+
+## Ownership and how we stay in sync (read this first)
+
+**Phat owns this task completely: the backend rule, the admin and user screens, the notifications, the tests.** For this task only, Phat may edit `app/direct_transfer/accounts.py`, `app/direct_transfer/name_lookup.py`, their tests, the admin route/schema/service, and the frontend. That is an agreed exception to the module boundaries in CLAUDE.md (D-035). It does **not** cover the ledger, the tranche state machine, fees, or migrations on any other table: ask Edward first. Edward reviews and approves; he does not code this task.
+
+How we stay in sync (written down so nobody has to remember it):
+1. **Plan first.** Before coding, post a short comment on PR #78: what you will change and in which files; which decisions you rely on (D-031, D-032, this file); anything here you disagree with or find unclear; and how backend and UI will go live together (see "Definition of done"). That comment is the read-back that proves we understood each other. Edward answers within 24 hours; **if there is no answer after 24 hours, go ahead.**
+2. **Decisions already made are not re-opened in code.** If you think one is wrong, add a `Q-` entry to `docs/outstanding-issues.md` (options, a default, an owner) and ask in Slack. Do not edit a decided item or quietly build something different (the lesson of #76).
+3. **Docs change in the same PR as the behaviour.** If the PR changes what the system does, it also updates the spec section "Who verifies an account" (`transfer-and-evidence.md`), this file's checklist, and the register. A PR that changes behaviour without touching docs is not done.
+4. **Before merging:** run `./scripts/docker_test.sh` (or the suite via your venv, see `docs/testing.md`) and `scripts/premerge_check.sh <PR>` (it must say GO). This touches AML (who may receive and send money), so **Edward approves the PR in writing before you merge it**.
+5. **After merging:** tick the checklist below, set the register entry to its final state, and say so in the Slack channel.
+6. **Stuck or unsure:** ask in Slack in this form: the question, two or three options, your recommendation, and what you will do if nobody answers by a stated time. We are 12 hours apart, so every message should carry enough context to act on without a reply.
 
 ## Here is our agreement
 
@@ -25,7 +37,7 @@ PENDING on save · `GET /admin/payment-accounts` queue · `POST /admin/payment-a
 
 ## Tasks for Phat
 
-**T1. Review the backend changes to your admin files (PR #78).** Small additions, all to match the agreement:
+**T1. Take over the backend (PR #78).** It already contains a first version of the rule; keep, change or replace it as needed so that it matches the agreement. What it does today:
 - `POST /admin/payment-accounts/{id}/decision` body gains `verified_holder_name` (string) and `accept_difference` (bool, default false), next to `decision` and `note`.
 - `note` is now required for **approval too** (422 `REASON_REQUIRED`).
 - Approval requires `verified_holder_name` (422 `HOLDER_NAME_REQUIRED`).
@@ -43,10 +55,31 @@ PENDING on save · `GET /admin/payment-accounts` queue · `POST /admin/payment-a
 **T6. Later (not now): rejected accounts.** Loc wants review/re-submission instead of opening a new account. Edward will spec it first (Q-030). It also needs the database rule that stops a rejected account number being saved again.
 
 ## Tasks for Edward
-- Backend rule, name lookup hook, tests, spec, register: done in PR #78.
-- Q-029: evaluate a bank-name lookup provider with Loc (vendor, cost, terms). Nothing is connected.
-- Q-030: design the review/re-submit flow, then hand it to you.
-- Staff how-to (one page: how to look up the holder name, what to reject, wording for reasons), written with Loc.
+- Review Phat's plan comment (within 24 hours) and approve the PR before merge.
+- Q-029 (which bank-name lookup provider) and Q-030 (review instead of a new account), with Loc: these are decisions and designs, not part of this task's code.
+- The staff guide (one page, with Loc).
+- No coding on this task. If something in `app/direct_transfer/` needs a change beyond the exception above, Edward does it on Phat's request.
+
+## Definition of done
+- [ ] Plan comment posted on #78 and answered (or 24 hours passed)
+- [ ] Admin approve sends `note` and `verified_holder_name` (and `accept_difference` for an SME); errors mapped to plain messages (`HOLDER_NAME_REQUIRED`, `HOLDER_NAME_MISMATCH`, `KYC_NAME_MISSING`, `REASON_REQUIRED`, `ALREADY_DECIDED`)
+- [ ] An investor account cannot be approved when the bank's name differs from the KYC name; an SME difference needs the explicit acceptance and a reason
+- [ ] User screens show Waiting verification / Verified / Rejected (with the reason) and the name-mismatch warning; Invest and Open-window are blocked until verified
+- [ ] The owner is notified of the decision
+- [ ] Tests for the backend rule and the UI; `premerge_check.sh` says GO; the suite passes
+- [ ] **Backend and UI go live together.** The backend now requires `verified_holder_name` and a note on approval, so the old admin screen would get errors: merge both on the same day, or add a temporary setting that keeps the old behaviour until the UI is deployed (Phat's choice; record which)
+- [ ] Docs updated (spec section, this checklist, register) in the same PR
+- [ ] Edward approved the PR in writing
+- [ ] After merge: Slack message posted and the register set to its final state
+
+## Starting instructions for a Claude session working on this task
+Paste or follow this at the start of the session:
+1. Read `CLAUDE.md`, this file, `docs/specs/direct_transfer/transfer-and-evidence.md` (section "Who verifies an account"), and the register entries D-031, D-032, D-035, Q-D18, Q-029, Q-030 in `docs/outstanding-issues.md`.
+2. Do not change a decided rule in code. If you think one is wrong, say so and write a `Q-` entry; do not build around it.
+3. Post the plan as a comment on PR #78 before changing code, then wait up to 24 hours for Edward's reply.
+4. Stay inside the files this task may touch (section "Ownership"). Ask before touching anything else.
+5. Run the tests with `./scripts/docker_test.sh`; run `scripts/premerge_check.sh <PR>` before merging; update the docs in the same PR.
+6. Search the repo's docs with the `search_fl_docs` tool if it is available; otherwise read the files above.
 
 ## Staff guide in one paragraph
 Open the account, read the expected name. Look up the account at the bank and compare. Investor: bank name must equal the KYC name, otherwise reject with the reason. SME: if it differs only by an abbreviation or trade name and you have confirmed it (bank letter or statement), approve with *Accept the difference* and say why; if it is a person's account, reject. Reject only when it is final; if the user can fix it, leave it waiting and contact them. Always write the reason.
