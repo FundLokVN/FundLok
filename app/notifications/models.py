@@ -30,6 +30,11 @@ EVENT_APPLICATION_REJECTED = "APPLICATION_REJECTED"
 # business (KYB), an investor their identity (KYC) -- and the reminder is
 # marked read when that check is approved.
 EVENT_VERIFICATION_REQUIRED = "VERIFICATION_REQUIRED"
+# To the business, when an investor uploads their transfer receipt for an
+# investment in its round: look for the money under the memo, or report it as
+# not received. `data` carries the amount, the memo, the project and the
+# investor's masked name.
+EVENT_INVESTMENT_RECEIPT_SUBMITTED = "INVESTMENT_RECEIPT_SUBMITTED"
 # To the business, when FundLok staff approve an investor's transfer to its
 # account. `data["status"]` says how far: ATTESTED (the receipt matched; the
 # business has two working days to say the money did not arrive) or CONFIRMED
@@ -57,6 +62,7 @@ NOTIFICATION_EVENTS = frozenset(
         EVENT_APPLICATION_APPROVED,
         EVENT_APPLICATION_REJECTED,
         EVENT_VERIFICATION_REQUIRED,
+        EVENT_INVESTMENT_RECEIPT_SUBMITTED,
         EVENT_INVESTMENT_TRANSFER_APPROVED,
         EVENT_REPAYMENT_RECEIPT_REJECTED,
         EVENT_REPAYMENT_RECEIPT_SUBMITTED,

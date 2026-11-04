@@ -498,14 +498,60 @@ async def test_the_business_is_emailed_to_look_for_the_money(
     assert "N. A***" in html and "Nguyen Van An" not in html  # masked, as on the business's own view
     assert "An investor reported a transfer to your business" in html
 
-    # The bell waits for staff to approve the transfer (tests/admin/test_funding_transactions.py).
+    # The bell rings when the investor uploads the receipt; INVESTMENT_TRANSFER_APPROVED waits for staff.
     bell = (await client.get("/notifications", headers=setup["sme"]["headers"])).json()
     assert [n for n in bell["items"] if n["event"] == "INVESTMENT_TRANSFER_APPROVED"] == []
+    [submitted] = [n for n in bell["items"] if n["event"] == "INVESTMENT_RECEIPT_SUBMITTED"]
+    assert submitted["data"]["amount_vnd"] == 20_000_000 and submitted["data"]["memo"] == tranche["reference_code"]
+    assert submitted["data"]["investor"] == "N. A***"
 
     # The same upload replayed sends nothing more; a refused upload sends nothing at all.
     assert (await _upload(client, investor, tranche["id"], key=key)).status_code == 202
     assert (await _upload(client, investor, tranche["id"], b"not a receipt")).status_code == 415
     assert len(sent) == 1
+
+
+async def test_the_business_reports_an_investment_transfer_not_received(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR", full_name="Nguyen Van An"))
+    tranche = (await _reserve(client, investor, setup["window"].id, 20_000_000)).json()
+
+    # Cannot report before the investor has uploaded a transfer receipt.
+    before = await client.post(
+        f"/funding/tranches/{tranche['id']}/report-missing",
+        json={"statement": "No money yet"},
+        headers=setup["sme"]["headers"],
+    )
+    assert before.status_code == 400 and before.headers["X-Error-Code"] == "INVALID_TRANSITION"
+
+    assert (await _upload(client, investor, tranche["id"])).status_code == 202
+
+    # Another business cannot report on this round's ticket.
+    other_sme = await make_user(role="SME")
+    stranger = await client.post(
+        f"/funding/tranches/{tranche['id']}/report-missing",
+        json={"statement": "Not mine"},
+        headers=other_sme["headers"],
+    )
+    assert stranger.status_code == 404
+
+    reported = await client.post(
+        f"/funding/tranches/{tranche['id']}/report-missing",
+        json={"statement": "Checked Techcombank statement — nothing under this memo"},
+        headers=setup["sme"]["headers"],
+    )
+    assert reported.status_code == 200, reported.text
+    body = reported.json()
+    assert body["status"] == "UNDER_REVIEW" and body["review_cause"] == "SME_DISPUTE"
+    assert body["receipt_submitted_at"] is not None
+
+    audit = (
+        await db_session.execute(select(AuditLog).where(AuditLog.action == "INVESTMENT_REPORTED_MISSING"))
+    ).scalar_one()
+    assert str(audit.actor_id) == setup["sme"]["id"]
+    assert audit.after_state["reason"] == "Checked Techcombank statement — nothing under this memo"
 
 
 async def test_a_receipt_must_be_a_pdf_or_an_image(

@@ -504,7 +504,7 @@ async def sme_dispute_tranche(
 ) -> Tranche:
     p = resolve(params)
     tranche, window = await _sme_tranche(db, tranche_id, sme_user_id, lock=True)
-    if tranche.status != "ATTESTED":
+    if tranche.status != "ATTESTED" and not (tranche.status == "SIGNED" and tranche.receipt_submitted_at is not None):
         raise DirectTransferError(400, f"Invalid state transition: {tranche.status} → UNDER_REVIEW", "INVALID_TRANSITION")
     if tranche.confirm_deadline is not None and now >= tranche.confirm_deadline:
         raise conflict("DISPUTE_WINDOW_CLOSED", "The dispute window has closed")
@@ -600,6 +600,7 @@ async def list_window_tranches(db: AsyncSession, *, window_id: UUID, sme_user_id
                 "status": t.status,
                 "reference_code": t.reference_code,
                 "investor_display": mask_name(investor.full_name or investor.email),
+                "receipt_submitted_at": t.receipt_submitted_at,
                 "attested_at": t.attested_at,
                 "confirm_deadline": t.confirm_deadline,
                 "review_cause": t.review_cause,

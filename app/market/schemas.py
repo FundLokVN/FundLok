@@ -80,6 +80,7 @@ class SmeTicketOut(BaseModel):
     status: str
     reference_code: str
     investor_display: str
+    receipt_submitted_at: dt.datetime | None = None
     attested_at: dt.datetime | None = None
     confirm_deadline: dt.datetime | None = None
     review_cause: str | None = None

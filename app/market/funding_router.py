@@ -24,7 +24,9 @@ from app.direct_transfer.schemas import FundingWindowOut, PaymentOut, ReceiptRes
 from app.direct_transfer.tranches import (
     list_investor_tranches,
     list_window_tranches,
+    mask_name,
     payment_instructions,
+    sme_dispute_tranche,
     submit_receipt,
 )
 from app.direct_transfer.windows import get_window_progress
@@ -38,6 +40,7 @@ from app.market.schemas import (
     BusinessAnalyticsOut,
     InvestorAnalyticsOut,
     InvestorTrancheOut,
+    ReportMissingCreate,
     ReservationCreate,
     SmeRepaymentPlanOut,
     SmeRoundOut,
@@ -45,6 +48,9 @@ from app.market.schemas import (
     TransactionOut,
 )
 from app.market.service import _require_eligible_investor
+from app.notifications.models import EVENT_INVESTMENT_RECEIPT_SUBMITTED
+from app.notifications.realtime import realtime
+from app.notifications.service import create_notification
 from app.users.models import Role, User
 from app.utils.audit import append_audit
 from app.utils.jwt import get_current_user
@@ -269,6 +275,7 @@ async def upload_receipt(
         )
     except DirectTransferError as exc:
         await _raise_mapped(db, exc)
+    notice = await receipt_notice(db, tranche_id=tranche_id) if not replay else None
     if not replay:
         append_audit(
             db,
@@ -283,18 +290,75 @@ async def upload_receipt(
             },
             ip_address=request.client.host if request.client else None,
         )
-    await db.commit()
-    if not replay:
-        notice = await receipt_notice(db, tranche_id=tranche_id)
         if notice is not None:
-            background_tasks.add_task(send_investment_receipt_email, **notice.email)
+            create_notification(
+                db,
+                user_id=notice.sme_user_id,
+                event=EVENT_INVESTMENT_RECEIPT_SUBMITTED,
+                entity_type="TRANCHE",
+                entity_id=tranche_id,
+                data=notice.notification_data(result.tranche_status),
+            )
+    await db.commit()
+    if notice is not None:
+        await realtime.publish([notice.sme_user_id])
+        background_tasks.add_task(send_investment_receipt_email, **notice.email)
     return ReceiptResultOut.model_validate(result)
 
 
 # --------------------------------------------------------------------------- #
-# the business's side (HANDOFF-04 tickets 1.6 and 1.7; staff approval means received, so the business has
-# nothing to confirm or dispute)
+# the business's side (HANDOFF-04 tickets 1.6 and 1.7)
 # --------------------------------------------------------------------------- #
+@router.post("/tranches/{tranche_id}/report-missing", response_model=SmeTicketOut)
+async def report_missing_transfer(
+    tranche_id: UUID,
+    request: Request,
+    body: ReportMissingCreate | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The business reports that an investor's transfer has not reached its account after a receipt was submitted.
+    Moves the ticket to UNDER_REVIEW (SME_DISPUTE) and opens a dispute for FundLok staff to review."""
+    statement = ((body.statement if body else None) or "").strip() or (
+        "The business reported that the transfer was not received."
+    )
+    try:
+        tranche = await sme_dispute_tranche(
+            db,
+            tranche_id=tranche_id,
+            sme_user_id=current_user.id,
+            statement=statement,
+            file_id=None,
+            now=_now(),
+        )
+    except DirectTransferError as exc:
+        await _raise_mapped(db, exc)
+    append_audit(
+        db,
+        entity_type="TRANCHE",
+        entity_id=tranche.id,
+        action="INVESTMENT_REPORTED_MISSING",
+        actor_id=current_user.id,
+        after_state={
+            "tranche_status": tranche.status,
+            "review_cause": tranche.review_cause,
+            "reason": statement,
+        },
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    investor = await db.get(User, tranche.investor_id)
+    return SmeTicketOut(
+        id=tranche.id,
+        amount_vnd=tranche.amount_vnd,
+        status=tranche.status,
+        reference_code=tranche.reference_code,
+        investor_display=mask_name((investor.full_name or investor.email) if investor else ""),
+        receipt_submitted_at=tranche.receipt_submitted_at,
+        attested_at=tranche.attested_at,
+        confirm_deadline=tranche.confirm_deadline,
+        review_cause=tranche.review_cause,
+    )
 @router.get("/me/rounds", response_model=list[SmeRoundOut])
 async def read_my_rounds(
     db: AsyncSession = Depends(get_db),
