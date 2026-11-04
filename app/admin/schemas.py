@@ -640,6 +640,8 @@ class AdminTransferDisputeOut(BaseModel):
     cause: str
     status: str
     outcome: str | None = None
+    statement: str | None = None
+    created_at: datetime | None = None
 
 
 class AdminTransferExpectedOut(BaseModel):

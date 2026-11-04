@@ -37,6 +37,7 @@ from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.evidence import log_event
 from app.direct_transfer.models import (
     Dispute,
+    DisputeEvidence,
     EvidenceFile,
     FundingWindow,
     PaymentAccount,
@@ -213,6 +214,18 @@ async def _row(db: AsyncSession, tranche: Tranche) -> AdminInvestorTransferOut:
             .limit(1)
         )
     ).scalar_one_or_none()
+    claim = (
+        (
+            await db.execute(
+                select(DisputeEvidence)
+                .where(DisputeEvidence.dispute_id == dispute.id, DisputeEvidence.kind == "CLAIM")
+                .order_by(DisputeEvidence.submitted_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if dispute
+        else None
+    )
     receipt_waiting = bool(transfer and file and transfer.check_status == "AWAITING_FIELDS")
     dispute_open = bool(dispute and dispute.status != "DECIDED")
     return AdminInvestorTransferOut(
@@ -249,7 +262,14 @@ async def _row(db: AsyncSession, tranche: Tranche) -> AdminInvestorTransferOut:
             else None
         ),
         dispute=(
-            AdminTransferDisputeOut(id=dispute.id, cause=dispute.cause, status=dispute.status, outcome=dispute.outcome)
+            AdminTransferDisputeOut(
+                id=dispute.id,
+                cause=dispute.cause,
+                status=dispute.status,
+                outcome=dispute.outcome,
+                statement=claim.statement if claim else None,
+                created_at=(claim.submitted_at if claim else None) or dispute.created_at,
+            )
             if dispute
             else None
         ),
