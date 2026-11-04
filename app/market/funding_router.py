@@ -48,8 +48,8 @@ from app.market.schemas import (
     TransactionOut,
 )
 from app.market.service import _require_eligible_investor
+from app.notifications import realtime
 from app.notifications.models import EVENT_INVESTMENT_RECEIPT_SUBMITTED
-from app.notifications.realtime import realtime
 from app.notifications.service import create_notification
 from app.users.models import Role, User
 from app.utils.audit import append_audit
