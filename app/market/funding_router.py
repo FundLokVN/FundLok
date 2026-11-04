@@ -203,23 +203,25 @@ async def read_my_tranches(
 ):
     """The caller's tickets, newest first, each with the project it is in."""
     tranches = await list_investor_tranches(db, investor_id=current_user.id)
-    projects = dict(
-        (
+    windows = {
+        window_id: (project, term_months)
+        for window_id, project, term_months in (
             await db.execute(
-                select(FundingWindow.id, Project)
+                select(FundingWindow.id, Project, FundingWindow.term_months)
                 .join(Project, Project.id == FundingWindow.project_id)
                 .where(FundingWindow.id.in_({t.window_id for t in tranches}))
             )
         ).all()
-    ) if tranches else {}
+    } if tranches else {}
     out = []
     for tranche in tranches:
-        project = projects.get(tranche.window_id)
+        project, term_months = windows.get(tranche.window_id, (None, None))
         out.append(
             InvestorTrancheOut.model_validate(tranche).model_copy(
                 update={
                     "project_id": project.id if project else None,
                     "project_name": project.legal_name if project else None,
+                    "term_months": term_months,
                 }
             )
         )

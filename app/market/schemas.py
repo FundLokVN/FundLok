@@ -63,11 +63,12 @@ class ReservationCreate(BaseModel):
 
 class InvestorTrancheOut(TrancheOut):
     """An investor's own ticket. Adds when they uploaded their transfer receipt (null until they do, so the page
-    knows whether to ask for one) and, in their list, the project it is in."""
+    knows whether to ask for one) and, in their list, the project it is in and its loan term in months."""
 
     receipt_submitted_at: dt.datetime | None = None
     project_id: UUID | None = None
     project_name: str | None = None
+    term_months: int | None = None
 
 
 class SmeTicketOut(BaseModel):
