@@ -34,11 +34,10 @@ async def test_the_investor_sees_their_investment_and_each_repayment(
     # One row for the day, the first-period interest folded in: what reached the investor, after tax.
     assert repaid["amount"] == sum(r["net_vnd"] for r in first_day)
 
+    # The investor confirms it arrived.
     [receipt] = (await _receipts(client, s["admin"]))["items"]
-    await client.post(
-        f"/admin/funding/repayments/{receipt['id']}/decision", json={"outcome": "APPROVED"},
-        headers=s["admin"]["headers"],
-    )
+    confirmed = await client.post(f"/repayment/receipts/{receipt['id']}/confirm", headers=s["investor"]["headers"])
+    assert confirmed.status_code == 200, confirmed.text
     [repaid] = [r for r in (await mine()).json() if r["type"] == "RETURN"]
     assert repaid["status"] == "COMPLETED"
 

@@ -706,13 +706,14 @@ async def repayment_preview(db: AsyncSession, tranche_id: UUID) -> AdminRepaymen
 # activity log
 # --------------------------------------------------------------------------- #
 # The audit actions the Activity tab shows, by group. DECISIONS is what staff decided about a transfer: a receipt
-# checked (matched: recorded as paid; mismatch: sent to review), rejected, or a review settled either way.
+# checked (matched: recorded as paid; mismatch: sent to review), rejected, or a review settled either way. Staff no
+# longer decide repayment receipts (the investor confirms them, under INVESTOR); the earlier decisions still show.
 ACTIVITY_GROUPS: dict[str, tuple[str, ...]] = {
     "DECISIONS": (
         "TRANSFER_RECEIPT_CHECKED", "TRANSFER_RECEIPT_REJECTED", "TRANSFER_RECEIVED", "TRANSFER_NOT_RECEIVED",
         "REPAYMENT_RECEIPT_APPROVED", "REPAYMENT_RECEIPT_DENIED",
     ),
-    "INVESTOR": ("INVESTMENT_RESERVED", "INVESTMENT_RECEIPT_UPLOADED"),
+    "INVESTOR": ("INVESTMENT_RESERVED", "INVESTMENT_RECEIPT_UPLOADED", "REPAYMENT_RECEIPT_CONFIRMED"),
     "BUSINESS": ("REPAYMENT_DAYS_MARKED_PAID",),
     "VIEWS": ("TRANSFER_RECEIPT_VIEWED", "REPAYMENT_RECEIPT_VIEWED"),
 }

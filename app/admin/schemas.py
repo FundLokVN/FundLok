@@ -770,9 +770,11 @@ class AdminRepaymentDayOut(BaseModel):
 
 class AdminRepaymentReceiptOut(BaseModel):
     """A receipt the business uploaded for a repayment to one investor, and the days it pays. ``check_status``:
-    AWAITING_FIELDS (waits for staff), MATCHED (approved: the days are paid and settled) or REJECTED (denied: the
-    days are due again). ``payee`` is the investor's account the money should reach, ``payer`` the business's.
-    ``open_report``: the investor reported one of these days as never arriving."""
+    AWAITING_FIELDS (waits for the investor to confirm it arrived; ``needs_action``), MATCHED (confirmed by the
+    investor, or approved by staff before investors confirmed: the days are paid and settled) or REJECTED (denied
+    by staff before investors confirmed: the days were due again). Read-only for staff. ``payee`` is the investor's
+    account the money should reach, ``payer`` the business's. ``open_report``: the investor reported one of these
+    days as never arriving."""
 
     id: UUID
     tranche_id: UUID
@@ -793,14 +795,6 @@ class AdminRepaymentReceiptOut(BaseModel):
     original_filename: str | None = None
     content_type: str | None = None
     open_report: bool = False
-
-
-class AdminRepaymentDecisionRequest(BaseModel):
-    """Approve or deny a business's repayment receipt after looking at it. Denying needs a note: the business
-    sees it, and pays and uploads again."""
-
-    outcome: Literal["APPROVED", "DENIED"]
-    reason: str | None = Field(default=None, max_length=1000)
 
 
 class AdminRepaymentPreviewOut(ProjectedScheduleOut):

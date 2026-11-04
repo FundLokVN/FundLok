@@ -216,6 +216,54 @@ class InvestmentDueOut(BaseModel):
     rejection: RepaymentRejectionOut | None = None
 
 
+class RepaymentReceiptAccountOut(BaseModel):
+    """A bank account a repayment moved between, as the investor checks their statement against it."""
+
+    bank_name: str
+    account_number: str
+    account_name: str
+
+
+class RepaymentReceiptDayOut(BaseModel):
+    """One repayment day a business's receipt pays the investor for."""
+
+    repayment_day_id: UUID
+    kind: Literal["INSTALMENT", "STUB"]
+    due_date: dt.date
+    principal_vnd: int
+    interest_vnd: int
+    gross_vnd: int
+    tax_withheld_vnd: int
+    net_vnd: int
+    status: Literal["DUE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
+
+
+class RepaymentReceiptOut(BaseModel):
+    """A receipt the business uploaded for a repayment to the investor, and the days it pays. ``status``:
+    AWAITING_CONFIRMATION (the investor has not said it arrived), CONFIRMED (they did, or staff approved it before
+    investors confirmed: the days are paid and settled) or REJECTED (staff denied it before investors confirmed:
+    the days were due again). ``payee`` is the investor's own account the money should reach, ``payer`` the
+    business's. ``net_vnd`` is what should have arrived. ``open_report``: the investor reported one of these days
+    as never arriving; confirming closes that report as paid."""
+
+    id: UUID
+    tranche_id: UUID
+    reference_code: str
+    project_name: str
+    submitted_at: dt.datetime
+    status: Literal["AWAITING_CONFIRMATION", "CONFIRMED", "REJECTED"]
+    confirmed_at: dt.datetime | None = None
+    gross_vnd: int
+    tax_withheld_vnd: int
+    net_vnd: int
+    days: list[RepaymentReceiptDayOut]
+    payee: RepaymentReceiptAccountOut | None = None
+    payer: RepaymentReceiptAccountOut | None = None
+    original_filename: str | None = None
+    content_type: str | None = None
+    open_report: bool = False
+
+
 class TransactionOut(BaseModel):
     """One movement of the caller's money, signed from their side: out is negative. The investor: INVESTMENT (out)
     and RETURN (in: what reached them, after the tax the business keeps back). The business: DISBURSEMENT (an

@@ -36,11 +36,21 @@ EVENT_VERIFICATION_REQUIRED = "VERIFICATION_REQUIRED"
 # (a review settled as received). `data` also carries the amount, the memo,
 # the project and the investor's masked name.
 EVENT_INVESTMENT_TRANSFER_APPROVED = "INVESTMENT_TRANSFER_APPROVED"
-# To the business, when FundLok staff deny the receipt it uploaded for a
-# repayment to an investor: those days are due again. `data` carries the
+# To the business, when FundLok staff denied the receipt it uploaded for a
+# repayment to an investor: those days were due again. `data` carries the
 # investment (`tranche_id`, `memo`), the investor's masked name, the amount and
-# the note staff gave (`reason`).
+# the note staff gave (`reason`). No longer written (the investor confirms a
+# repayment now, staff do not decide it); kept so earlier ones still render.
 EVENT_REPAYMENT_RECEIPT_REJECTED = "REPAYMENT_RECEIPT_REJECTED"
+# To the investor, when the business uploads the receipt for a repayment to
+# them: check the account and confirm it arrived. `data` carries the
+# investment (`tranche_id`, `memo`), the receipt (`receipt_id`), the project
+# and the amount.
+EVENT_REPAYMENT_RECEIPT_SUBMITTED = "REPAYMENT_RECEIPT_SUBMITTED"
+# To the business, when the investor confirms a repayment reached them: those
+# days are paid. `data` carries the investment (`tranche_id`, `memo`), the
+# investor's masked name and the amount.
+EVENT_REPAYMENT_RECEIPT_CONFIRMED = "REPAYMENT_RECEIPT_CONFIRMED"
 
 NOTIFICATION_EVENTS = frozenset(
     {
@@ -49,6 +59,8 @@ NOTIFICATION_EVENTS = frozenset(
         EVENT_VERIFICATION_REQUIRED,
         EVENT_INVESTMENT_TRANSFER_APPROVED,
         EVENT_REPAYMENT_RECEIPT_REJECTED,
+        EVENT_REPAYMENT_RECEIPT_SUBMITTED,
+        EVENT_REPAYMENT_RECEIPT_CONFIRMED,
     }
 )
 

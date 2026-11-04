@@ -427,8 +427,10 @@ async def match_day(
     now: dt.datetime,
     params: DirectTransferParams | None = None,
     transfer_id: UUID | None = None,
+    actor_role: str = "ADMIN",
 ) -> RepaymentDay:
-    """Staff confirm that a day was paid (matched to evidence). Also the PAID outcome of a missed-day dispute."""
+    """Staff confirm that a day was paid (matched to evidence). Also the PAID outcome of a missed-day dispute, and
+    the investor confirming they received it (`actor_role="INVESTOR"`, `staff_id` the investor)."""
     if not reason or not reason.strip():
         raise DirectTransferError(422, "A reason is required", "REASON_REQUIRED")
     day = (await db.execute(select(RepaymentDay).where(RepaymentDay.id == day_id).with_for_update())).scalar_one_or_none()
@@ -446,7 +448,7 @@ async def match_day(
     await _settle_day(db, day, now=now)
     await log_event(
         db, entity_type="REPAYMENT_DAY", entity_id=day.id, event_type="REPAYMENT_DAY_REPORTED", now=now,
-        actor_id=staff_id, actor_role="ADMIN", reason=reason, payload={"event": "MATCHED"},
+        actor_id=staff_id, actor_role=actor_role, reason=reason, payload={"event": "MATCHED"},
     )
     tranche = await db.get(Tranche, day.tranche_id)
     window = await db.get(FundingWindow, tranche.window_id)

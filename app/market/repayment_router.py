@@ -1,11 +1,12 @@
 """Daily repayment (HANDOFF-04 Epic 2, tickets 2.1 and 2.2): the business pays and marks days paid; the investor
-sees their schedule and reports a day that never arrived.
+sees their schedule, confirms a repayment that arrived (its receipt) and reports a day that never arrived.
 
 Edward's services hold the rules (app/direct_transfer/repayment.py); this router adds auth, auditing and the HTTP
 error mapping. The business pays each investor directly every working day, one VietQR per investor; FundLok never
 holds the money (ADR-009). Spec: docs/specs/direct_transfer/repayment-collection.md section 4.
 """
 import datetime as dt
+from typing import Literal
 from uuid import UUID
 
 from decimal import Decimal
@@ -25,15 +26,17 @@ from app.direct_transfer.schemas import RepaymentRowOut, TodaysPaymentsOut
 from app.direct_transfer.tranches import mask_name
 from app.direct_transfer.vietqr import build_vietqr_payload
 from app.lending.models import AuditLog
-from app.market import funding
+from app.market import funding, repayment_receipts
 from app.market.projection import project_ticket
 from app.market.schemas import (
     InvestmentDueOut,
     MarkDaysPaidCreate,
     ProjectedScheduleOut,
+    RepaymentReceiptOut,
     RepaymentRejectionOut,
     ReportMissingCreate,
 )
+from app.notifications import realtime
 from app.users.models import Role, User
 from app.utils.audit import append_audit
 from app.utils.jwt import get_current_user
@@ -138,7 +141,8 @@ async def read_investment_due(
             memo=tranche.reference_code,
         )
     investor = await db.get(User, tranche.investor_id)
-    # A day due again because staff denied its receipt: say why, from the decision's audit entry.
+    # A day due again because staff denied its receipt (before investors confirmed repayments): say why, from the
+    # decision's audit entry.
     denied = (
         await db.execute(
             select(AuditLog)
@@ -181,14 +185,14 @@ async def pay_with_receipt(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     """The business paid this investor and uploads its bank receipt (PDF, PNG, JPEG or WEBP, at most 10 MB). In one
-    step the receipt is kept as evidence (a REPAYMENT transfer for each day, for FundLok to check) and the days are
-    marked paid, so a request that fails part way leaves nothing half done. The same receipt cannot be used twice
+    step the receipt is kept as evidence (a REPAYMENT transfer for each day, for the investor to confirm) and the
+    days are marked paid, so a request that fails part way leaves nothing half done. The investor's bell rings. The same receipt cannot be used twice
     (409 DUPLICATE_FILE); replaying the same Idempotency-Key stores and marks nothing twice."""
     if not idempotency_key:
         raise HTTPException(
             status_code=400, detail="Idempotency-Key is required", headers={"X-Error-Code": "IDEMPOTENCY_KEY_REQUIRED"}
         )
-    await _business_tranche(db, tranche_id, current_user.id)
+    tranche = await _business_tranche(db, tranche_id, current_user.id)
     day_ids = list(dict.fromkeys(repayment_day_ids))
     days = (await db.execute(select(RepaymentDay).where(RepaymentDay.id.in_(day_ids)))).scalars().all()
     if len(days) != len(day_ids) or any(day.tranche_id != tranche_id for day in days):
@@ -235,6 +239,7 @@ async def pay_with_receipt(
         )
     except DirectTransferError as exc:
         _raise_mapped(exc)
+    notify = None
     if not replay:
         append_audit(
             db,
@@ -249,7 +254,13 @@ async def pay_with_receipt(
             },
             ip_address=request.client.host if request.client else None,
         )
+        # The investor checks their account and confirms it arrived.
+        notify = await repayment_receipts.notify_investor_of_receipt(
+            db, tranche=tranche, receipt_id=receipt_id, net_vnd=sum(day.net_vnd for day in marked)
+        )
     await db.commit()
+    if notify is not None:
+        await realtime.publish([notify])
     ids = {day.id for day in marked}
     rows = await tranche_schedule(db, tranche_id=tranche_id, user_id=current_user.id)
     return [RepaymentRowOut.model_validate(row) for row in rows if row["repayment_day_id"] in ids]
@@ -344,4 +355,32 @@ async def read_projection(
             confirmed_on=ict_date(received_at),
             close_on=ict_date(close_at),
         )
+    )
+
+
+@router.get("/receipts", response_model=list[RepaymentReceiptOut])
+async def list_repayment_receipts(
+    status: Literal["AWAITING", "ALL"] = "AWAITING",
+    limit: int = Query(default=50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The receipts businesses uploaded for repaying this investor, each with the days it pays and what should have
+    reached their account, newest first. AWAITING (default): the ones the investor has not confirmed yet; ALL adds
+    the ones already settled, after those."""
+    return await repayment_receipts.list_receipts(db, investor_id=current_user.id, status=status, limit=limit)
+
+
+@router.post("/receipts/{receipt_id}/confirm", response_model=RepaymentReceiptOut)
+async def confirm_repayment_receipt(
+    receipt_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The investor received this repayment: each day it pays is matched and settled, and a day they had reported
+    missing has that report closed as paid. Only the investor it pays (anyone else: 404); final (409
+    NOTHING_TO_CONFIRM once done), audited, and the business is told."""
+    return await repayment_receipts.confirm_receipt(
+        db, receipt_id, investor=current_user, ip_address=request.client.host if request.client else None
     )

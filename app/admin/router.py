@@ -18,7 +18,6 @@ from app.admin.schemas import (
     AdminReceiptDecisionRequest,
     AdminReceiptFieldsRequest,
     AdminReceiptUrlResponse,
-    AdminRepaymentDecisionRequest,
     AdminRepaymentPreviewOut,
     AdminRepaymentReceiptOut,
     AdminTransferDecisionRequest,
@@ -564,8 +563,9 @@ async def list_repayment_receipts(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """The receipts businesses uploaded for repaying their investors, those waiting on staff first. Reads are
-    logged (both parties' names and accounts)."""
+    """The receipts businesses uploaded for repaying their investors, those the investor has not confirmed yet
+    first. Read-only: the investor confirms a repayment, not staff. Reads are logged (both parties' names and
+    accounts)."""
     return await admin_repayments.list_receipts(db, status=status, page=page, page_size=page_size)
 
 
@@ -579,7 +579,7 @@ async def get_repayment_receipt(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """One repayment receipt for the review panel: the days it pays and the accounts the money moved between."""
+    """One repayment receipt for the panel: the days it pays and the accounts the money moved between."""
     return await admin_repayments.get_receipt(db, receipt_id)
 
 
@@ -597,27 +597,6 @@ async def get_repayment_receipt_url(
     """A 10-minute link to the receipt the business uploaded. Each view is audited."""
     return await admin_repayments.get_receipt_url(
         db, receipt_id, actor=current_user, ip_address=request.client.host if request.client else None
-    )
-
-
-@router.post("/funding/repayments/{receipt_id}/decision", response_model=AdminRepaymentReceiptOut)
-async def decide_repayment_receipt(
-    receipt_id: UUID,
-    body: AdminRepaymentDecisionRequest,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_admin),
-):
-    """Approve or deny a business's repayment receipt after looking at it. Approving records the investor as paid
-    for each day it covers (matched and settled); denying, with a note, puts those days back to due and tells the
-    business why, so it pays and uploads again. Final, and audited with the admin who made it."""
-    return await admin_repayments.decide_receipt(
-        db,
-        receipt_id,
-        outcome=body.outcome,
-        reason=body.reason,
-        actor=current_user,
-        ip_address=request.client.host if request.client else None,
     )
 
 
