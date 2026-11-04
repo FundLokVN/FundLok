@@ -758,6 +758,7 @@ class AdminRepaymentDayOut(BaseModel):
     repayment_day_id: UUID
     transfer_id: UUID
     kind: Literal["INSTALMENT", "STUB"]
+    day_index: int = 0
     due_date: date
     principal_vnd: int
     interest_vnd: int
@@ -781,6 +782,9 @@ class AdminRepaymentReceiptOut(BaseModel):
     window_id: UUID
     project_name: str
     reference_code: str
+    tranche_amount_vnd: int = 0
+    tranche_paid_days: int = 0
+    tranche_total_days: int = 0
     business: ActorOut
     investor: ActorOut
     submitted_at: datetime

@@ -86,10 +86,10 @@ async def _row(db: AsyncSession, receipt_id: UUID) -> AdminRepaymentReceiptOut:
     investor = await db.get(User, tranche.investor_id)
     file = await db.get(EvidenceFile, receipt_id)
     day_ids = [t.repayment_day_id for t in transfers]
-    days = {
-        day.id: day
-        for day in (await db.execute(select(RepaymentDay).where(RepaymentDay.id.in_(day_ids)))).scalars()
-    }
+    tranche_days = (
+        await db.execute(select(RepaymentDay).where(RepaymentDay.tranche_id == tranche.id))
+    ).scalars().all()
+    days = {day.id: day for day in tranche_days}
     reported = (
         await db.execute(
             select(Dispute.id).where(Dispute.repayment_day_id.in_(day_ids), Dispute.status != "DECIDED").limit(1)
@@ -102,6 +102,7 @@ async def _row(db: AsyncSession, receipt_id: UUID) -> AdminRepaymentReceiptOut:
             repayment_day_id=day.id,
             transfer_id=transfer.id,
             kind=day.kind,
+            day_index=day.day_index,
             due_date=day.due_date,
             principal_vnd=day.principal_vnd,
             interest_vnd=day.interest_vnd,
@@ -121,6 +122,9 @@ async def _row(db: AsyncSession, receipt_id: UUID) -> AdminRepaymentReceiptOut:
         window_id=window.id,
         project_name=project.legal_name if project else "",
         reference_code=tranche.reference_code,
+        tranche_amount_vnd=int(tranche.amount_vnd),
+        tranche_paid_days=len({d.due_date for d in tranche_days if d.status in ("PRESUMED_PAID", "MATCHED")}),
+        tranche_total_days=len({d.due_date for d in tranche_days}),
         business=ActorOut.model_validate(business),
         investor=ActorOut.model_validate(investor),
         submitted_at=min(t.created_at for t in transfers),

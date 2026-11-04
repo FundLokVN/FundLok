@@ -70,6 +70,8 @@ async def test_staff_see_the_business_s_receipt_with_the_days_it_pays(
     assert receipt["net_vnd"] == sum(d["net_vnd"] for d in receipt["days"])
     assert receipt["net_vnd"] == receipt["gross_vnd"] - receipt["tax_withheld_vnd"]
     assert receipt["reference_code"] == s["ticket"]["reference_code"]
+    assert receipt["tranche_amount_vnd"] == 30_000_000
+    assert receipt["tranche_paid_days"] == 1 and receipt["tranche_total_days"] > 1
     assert receipt["investor"]["full_name"] == "Nguyen Van An" and receipt["business"]["id"] == s["sme"]["id"]
     assert receipt["payee"]["account_number"]
     assert (await _receipts(client, s["admin"], status="DECIDED"))["items"] == []
