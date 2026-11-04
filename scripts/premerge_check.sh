@@ -125,8 +125,18 @@ if [[ ${#FAILS[@]} -eq 0 ]]; then
   if [[ $RUN_TESTS -eq 1 && ${#FAILS[@]} -eq 0 ]]; then
     echo "== 4. Full test suite (about 11 minutes)"
     export DATABASE_URL="postgresql+asyncpg://fundlok:fundlok@localhost:5433/$DB"
-    if (cd "$WORK" && "$PY" -m pytest -q -p no:cacheprovider 2>&1 | tail -3); then :; fi
-    echo "  (read the summary line above: 'failed' or 'error' means NO-GO)"
+    TEST_LOG="$(mktemp)"
+    # PREMERGE_PYTEST_ARGS is for testing this script itself (for example: -k some_test).
+    # shellcheck disable=SC2086
+    (cd "$WORK" && "$PY" -m pytest -q -p no:cacheprovider ${PREMERGE_PYTEST_ARGS:-} > "$TEST_LOG" 2>&1)
+    TEST_RC=$?
+    tail -3 "$TEST_LOG"
+    rm -f "$TEST_LOG"
+    if [[ $TEST_RC -ne 0 ]]; then
+      note_fail "the test suite did not pass (pytest exit code $TEST_RC)"
+    else
+      echo "  ok: the test suite passes on the merged result"
+    fi
   fi
 fi
 
