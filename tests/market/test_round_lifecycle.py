@@ -10,7 +10,7 @@ import uuid
 
 from sqlalchemy import select
 
-from app.direct_transfer.calendar_utils import ict_date
+from app.direct_transfer.calendar_utils import count_business_days, first_working_day_after, ict_date
 from app.direct_transfer.models import FundingWindow, RepaymentDay
 from app.lending.models import AuditLog
 from tests.market.test_funding_flow import PNG, _open_project, _reserve, _upload
@@ -285,7 +285,6 @@ async def test_advance_starts_an_investment_approved_before_repaying_from_approv
     ).status_code == 404
     monkeypatch.undo()
     # It was approved two weeks before staff advanced the round.
-    from app.direct_transfer.calendar_utils import first_working_day_after
     from app.direct_transfer.models import Tranche
 
     approved_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=14)
@@ -297,7 +296,11 @@ async def test_advance_starts_an_investment_approved_before_repaying_from_approv
     await client.post(f"/admin/funding/rounds/{window_id}/advance", headers=setup["admin"]["headers"])
 
     schedule = (await client.get(f"/repayment/tranches/{ticket['id']}/schedule", headers=investor["headers"])).json()
-    assert len(schedule) == 85
+    # 84 working days, plus a first-period-interest day when the approval (the money's arrival here) fell on a
+    # working day: approved on a weekend or holiday, no working day passes before day one.
+    approved_on = ict_date(approved_at)
+    stub_days = count_business_days(approved_on, first_working_day_after(approved_on))
+    assert len(schedule) == 84 + (1 if stub_days else 0)
     # The loan works from the approval: day one is the working day after it, not after staff advanced the round.
     first = min(r["due_date"] for r in schedule)
     assert first == first_working_day_after(ict_date(approved_at)).isoformat()
