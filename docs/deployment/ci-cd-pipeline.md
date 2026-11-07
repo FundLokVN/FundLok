@@ -262,7 +262,12 @@ ignored). **Required** = app crashes at import without it.
 | `REFRESH_TOKEN_EXPIRE_DAYS` | | `14` | Refresh-token TTL (DB-backed revocation) | default | default | default | default |
 | `GOOGLE_CLIENT_ID` | | `None` | Google OAuth | unset | unset | unset | unset* |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_TENANT_ID` | | `None` / `common` | Microsoft OAuth | unset | unset | unset | unset* |
-| `FRONTEND_URL` | | `http://localhost:3000` | CORS / redirects / KYC callback base | default | default | *needs prod value** | *needs prod value** |
+| `FRONTEND_URL` | | `http://localhost:3000` | CORS / redirects / KYC callback base; Admin > Email's OAuth redirect URI and return page | default | default | *needs prod value** | *needs prod value** (`https://www.fundlok.com`) |
+| `EMAIL_SETTINGS_ENCRYPTION_KEY` | for Admin > Email | `None` | Fernet key encrypting each admin's Google refresh token (`app/admin/internal_email/crypto.py`). Unset = no admin can connect Gmail. Rotating it = every admin reconnects | own key in `.env` | set in `conftest.py` | set on Cloud Run service, its own value | set on Cloud Run service, its own value |
+| `GOOGLE_OAUTH_CLIENT_ID` | | `None` (→ `GOOGLE_CLIENT_ID`) | Admin > Email OAuth client; empty reuses the sign-in client | unset | patched in tests | unset (reuse) | unset (reuse) |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | for Admin > Email | `None` | That client's secret. Unset = Connect with Google answers 503 `GMAIL_OAUTH_NOT_CONFIGURED` | `.env` | patched in tests | set on Cloud Run service (secret) | set on Cloud Run service (secret) |
+| `GOOGLE_OAUTH_REDIRECT_URI` | | `{FRONTEND_URL}/api/admin/email/oauth/callback` | Must match a redirect URI registered on the client exactly | default | default | default | default |
+| `GMAIL_CONNECT_ALLOWED_DOMAINS` | | empty (any) | Domains a connected Gmail account must be on | empty | empty | empty | `fundlok.com` (recommended) |
 | `MOCK_UPLOAD_BASE_URL` | | mock URL | Legacy mock storage | example value | default | default | default |
 | `CLOUDFLARE_TURNSTILE_SECRET_KEY` | | `None` | Bot protection (CAPTCHA) verify | placeholder | unset | unset* | unset* |
 | `BACKEND_SECRET_KEY` | | `None` | Vouches for the visitor address the frontend sends in `X-Client-IP` (see *Client IP* below). Same value as the frontend's `BACKEND_SECRET_KEY` | empty | unset (tests set it) | *staging frontend's value** | *production frontend's value** |
