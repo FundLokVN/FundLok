@@ -1,9 +1,11 @@
 """Admin > Email: each admin's Gmail connection, the org-wide policy, preview,
 and sending.
 
-Every admin connects their own Gmail account and sends from it. Settings are
-always looked up by the signed-in admin's id, never by an id from the request,
-so one admin can neither read nor use another's credentials.
+Every admin connects their own Google account with Google OAuth 2.0 and sends
+from it through the Gmail API. Settings are always looked up by the signed-in
+admin's id (or, on the OAuth callback, the id in the signed state that admin's
+browser started), never by an id from the request body, so one admin can
+neither read nor use another's credentials.
 
 Spec: docs/specs/admin/internal-email.md. Failures the console must translate
 carry an X-Error-Code header; `detail` stays a plain English string.
@@ -11,10 +13,13 @@ carry an X-Error-Code header; `detail` stays a plain English string.
 
 import base64
 import html
+import logging
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from html.parser import HTMLParser
+from urllib.parse import urlencode
 from uuid import UUID
 
 from markupsafe import Markup
@@ -24,9 +29,8 @@ from fastapi import HTTPException, status
 from sqlalchemy import case, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.concurrency import run_in_threadpool
 
-from app.admin.internal_email import crypto, transport
+from app.admin.internal_email import crypto, google, transport
 from app.admin.internal_email.models import (
     STATUS_FAILED,
     STATUS_PENDING,
@@ -36,6 +40,7 @@ from app.admin.internal_email.models import (
 )
 from app.admin.internal_email.schemas import (
     EmailContent,
+    EmailOAuthStart,
     EmailPolicyOut,
     EmailPolicyUpdate,
     EmailPreview,
@@ -46,11 +51,14 @@ from app.admin.internal_email.schemas import (
     RecipientOut,
     SendEmailRequest,
 )
+from app.core.config import settings
 from app.system.models import SystemSetting
 from app.users.models import USER_STATUS_SUSPENDED, Role, User
 from app.utils.audit import append_audit
 from app.utils.email import logo_bytes
 from app.utils.email_templates import render_email
+
+logger = logging.getLogger(__name__)
 
 # Composer template -> exported React Email template (app/email_templates/).
 TEMPLATE_FILES = {
@@ -85,7 +93,15 @@ def _encryption_unavailable() -> HTTPException:
     return _error(
         status.HTTP_503_SERVICE_UNAVAILABLE,
         "EMAIL_ENCRYPTION_UNAVAILABLE",
-        "The app password cannot be stored until the server's encryption key is configured.",
+        "A Google account cannot be connected until the server's encryption key is configured.",
+    )
+
+
+def _reconnect_required() -> HTTPException:
+    return _error(
+        status.HTTP_409_CONFLICT,
+        "GMAIL_RECONNECT_REQUIRED",
+        "Google no longer accepts this connection. Reconnect your Google account under Email settings.",
     )
 
 
@@ -106,14 +122,17 @@ async def _row(
 
 def _out(row: EmailSettings | None) -> EmailSettingsOut:
     if row is None:
-        return EmailSettingsOut(configured=False, enabled=False, has_app_password=False)
-    has_password = bool(row.app_password_encrypted)
+        return EmailSettingsOut(configured=False, enabled=False, needs_reconnect=False)
+    connected = bool(row.refresh_token_encrypted)
     return EmailSettingsOut(
-        configured=has_password,
+        configured=connected,
         enabled=row.enabled,
         gmail_address=row.gmail_address,
         from_name=row.from_name,
-        has_app_password=has_password,
+        # An account was connected (or an App Password saved, before OAuth)
+        # and its access is gone without the admin disconnecting.
+        needs_reconnect=not connected and bool(row.gmail_address),
+        connected_at=row.token_updated_at if connected else None,
         last_verified_at=row.last_verified_at,
         updated_at=row.updated_at,
         signature_name=row.signature_name,
@@ -123,15 +142,15 @@ def _out(row: EmailSettings | None) -> EmailSettingsOut:
 
 
 def _audit_state(row: EmailSettings | None) -> dict | None:
-    """What the audit log may hold about the settings: never the password,
-    not even encrypted, only whether there is one."""
+    """What the audit log may hold about the settings: never the token, not
+    even encrypted, only whether there is one."""
     if row is None:
         return None
     return {
         "gmail_address": row.gmail_address,
         "from_name": row.from_name,
         "enabled": row.enabled,
-        "has_app_password": bool(row.app_password_encrypted),
+        "connected": bool(row.refresh_token_encrypted),
         "signature_name": row.signature_name,
         "signature_title": row.signature_title,
         "signature_phone": row.signature_phone,
@@ -145,54 +164,31 @@ async def get_settings(db: AsyncSession, *, actor_id: UUID) -> EmailSettingsOut:
 async def update_settings(
     db: AsyncSession, body: EmailSettingsUpdate, *, actor_id: UUID, ip_address: str | None
 ) -> EmailSettingsOut:
+    """Sender name, signature and the sending switch. The Google account
+    itself is connected through the OAuth flow, never typed in here."""
     row = await _row(db, actor_id, for_update=True)
     before = _audit_state(row)
-    has_stored_password = row is not None and bool(row.app_password_encrypted)
-    address_changed = row is None or row.gmail_address.lower() != body.gmail_address.lower()
-
-    if body.app_password is None:
-        # An App Password belongs to one Google account.
-        if has_stored_password and address_changed:
-            raise _error(
-                status.HTTP_400_BAD_REQUEST,
-                "APP_PASSWORD_REQUIRED",
-                "Enter the app password for the new Gmail address.",
-            )
-        if body.enabled and not has_stored_password:
-            raise _error(
-                status.HTTP_400_BAD_REQUEST,
-                "APP_PASSWORD_REQUIRED",
-                "Enter the app password before turning sending on.",
-            )
-
-    encrypted = None
-    if body.app_password is not None:
-        try:
-            encrypted = crypto.encrypt_password(body.app_password)
-        except crypto.EncryptionUnavailable:
-            raise _encryption_unavailable() from None
+    # Turning sending ON needs a connected account. Leaving it on does not:
+    # after Google revokes access (or the move from App Passwords) the switch
+    # keeps its value, so editing a signature must not fail, and sending
+    # resumes on reconnect. Sending itself still needs the token.
+    turning_on = body.enabled and (row is None or not row.enabled)
+    if turning_on and (row is None or not row.refresh_token_encrypted):
+        raise _error(
+            status.HTTP_400_BAD_REQUEST,
+            "EMAIL_NOT_CONFIGURED",
+            "Connect your Google account before turning sending on.",
+        )
 
     if row is None:
-        row = EmailSettings(
-            user_id=actor_id, gmail_address=body.gmail_address, from_name=body.from_name
-        )
+        row = EmailSettings(user_id=actor_id, from_name=body.from_name)
         db.add(row)
-
-    credentials_changed = encrypted is not None or address_changed
-    row.gmail_address = body.gmail_address
     row.from_name = body.from_name
     row.enabled = body.enabled
     row.signature_name = body.signature_name
     row.signature_title = body.signature_title
     row.signature_phone = body.signature_phone
-    if encrypted is not None:
-        row.app_password_encrypted = encrypted
-    if credentials_changed:
-        # A test email proved the old credentials, not these.
-        row.last_verified_at = None
 
-    after = _audit_state(row)
-    after["password_changed"] = encrypted is not None
     append_audit(
         db,
         entity_type=_ENTITY,
@@ -200,7 +196,7 @@ async def update_settings(
         action="EMAIL_SETTINGS_UPDATED",
         actor_id=actor_id,
         before_state=before,
-        after_state=after,
+        after_state=_audit_state(row),
         ip_address=ip_address,
     )
     try:
@@ -216,25 +212,204 @@ async def update_settings(
     return _out(row)
 
 
-async def clear_settings(
+async def disconnect(
     db: AsyncSession, *, actor_id: UUID, ip_address: str | None
 ) -> EmailSettingsOut:
-    """Remove the admin's connected account entirely, password included."""
+    """Forget the connected Google account: the token, the address and its
+    verification, and switch sending off. Sender name and signature stay.
+    The token is revoked at Google afterwards, best effort."""
     row = await _row(db, actor_id, for_update=True)
-    if row is not None:
+    if row is None:
+        return _out(None)
+    token = _decrypt_quietly(row.refresh_token_encrypted)
+    if row.refresh_token_encrypted or row.gmail_address:
+        before = _audit_state(row)
+        row.refresh_token_encrypted = None
+        row.oauth_scopes = None
+        row.token_updated_at = None
+        row.gmail_address = None
+        row.last_verified_at = None
+        row.enabled = False
         append_audit(
             db,
             entity_type=_ENTITY,
             entity_id=actor_id,
-            action="EMAIL_SETTINGS_CLEARED",
+            action="EMAIL_GMAIL_DISCONNECTED",
             actor_id=actor_id,
-            before_state=_audit_state(row),
-            after_state=None,
+            before_state=before,
+            after_state=_audit_state(row),
             ip_address=ip_address,
         )
-        await db.delete(row)
         await db.commit()
-    return _out(None)
+        await db.refresh(row)
+    if token:
+        # After the commit: the row no longer holds it whatever Google says.
+        await google.revoke(token)
+    return _out(row)
+
+
+def _decrypt_quietly(stored: str | None) -> str | None:
+    """The token for a best-effort revocation, or None if it cannot be read
+    (no key, rotated key): disconnecting must work regardless."""
+    try:
+        return crypto.decrypt_secret(stored)
+    except crypto.EncryptionUnavailable:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Google OAuth: connect
+# --------------------------------------------------------------------------- #
+
+# The ?error= values the console can show after the redirect back. Never
+# Google's own text, which can carry anything.
+OAUTH_CANCELLED = "cancelled"
+OAUTH_INVALID_STATE = "invalid_state"
+OAUTH_NOT_ADMIN = "not_admin"
+OAUTH_SCOPE_MISSING = "scope_missing"
+OAUTH_EMAIL_UNVERIFIED = "email_unverified"
+OAUTH_DOMAIN_NOT_ALLOWED = "domain_not_allowed"
+OAUTH_NO_REFRESH_TOKEN = "no_refresh_token"
+OAUTH_NOT_CONFIGURED = "not_configured"
+OAUTH_ENCRYPTION_UNAVAILABLE = "encryption_unavailable"
+OAUTH_FAILED = "failed"
+
+
+class OAuthCallbackError(Exception):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def console_url(**params: str) -> str:
+    """Admin > Email on the frontend, with the outcome of a connect."""
+    base = settings.FRONTEND_URL.strip().rstrip("/") + "/admin/email"
+    return f"{base}?{urlencode(params)}" if params else base
+
+
+def start_oauth(*, actor_id: UUID) -> tuple[EmailOAuthStart, str]:
+    """Google's consent URL for the signed-in admin, and the PKCE verifier
+    the router puts in the browser-binding cookie."""
+    if not google.is_configured():
+        raise _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "GMAIL_OAUTH_NOT_CONFIGURED",
+            "Connecting Google accounts is not set up on this server yet.",
+        )
+    verifier = google.new_code_verifier()
+    challenge = google.code_challenge(verifier)
+    state = google.create_state(actor_id, challenge)
+    return EmailOAuthStart(authorization_url=google.authorization_url(state, challenge)), verifier
+
+
+async def complete_oauth(
+    db: AsyncSession,
+    *,
+    code: str | None,
+    state: str | None,
+    error: str | None,
+    verifier: str | None,
+    ip_address: str | None,
+) -> None:
+    """The callback's work: check the state against this browser, trade the
+    code for tokens, and store the refresh token, encrypted, on the admin's
+    own row. Raises OAuthCallbackError with the code the console shows."""
+    if error:
+        # access_denied when the admin pressed Cancel; anything else is a
+        # misconfiguration on Google's side, logged by name only.
+        if error != "access_denied":
+            logger.warning("Google OAuth returned error=%s", error[:64])
+        raise OAuthCallbackError(OAUTH_CANCELLED if error == "access_denied" else OAUTH_FAILED)
+    read = google.read_state(state) if state else None
+    if read is None or not code or not verifier:
+        raise OAuthCallbackError(OAUTH_INVALID_STATE)
+    actor_id, challenge = read
+    # The browser that finished is the one that started: its cookie hashes
+    # to the challenge signed into the state.
+    if not secrets.compare_digest(google.code_challenge(verifier), challenge):
+        raise OAuthCallbackError(OAUTH_INVALID_STATE)
+
+    actor = await db.get(User, actor_id)
+    if (
+        actor is None
+        or actor.role not in (Role.ADMIN.value, Role.SYSTEM_ADMIN.value)
+        or actor.status == USER_STATUS_SUSPENDED
+    ):
+        raise OAuthCallbackError(OAUTH_NOT_ADMIN)
+
+    try:
+        grant = await google.exchange_code(code, verifier)
+    except google.OAuthNotConfigured:
+        raise OAuthCallbackError(OAUTH_NOT_CONFIGURED) from None
+    except google.GoogleUnavailable:
+        raise OAuthCallbackError(OAUTH_FAILED) from None
+
+    rejection = _grant_rejection(grant)
+    if rejection is not None:
+        # Nothing of it is kept; do not leave the grant live at Google.
+        await google.revoke(grant.refresh_token or grant.access_token)
+        raise OAuthCallbackError(rejection)
+
+    try:
+        encrypted = crypto.encrypt_secret(grant.refresh_token)
+    except crypto.EncryptionUnavailable:
+        await google.revoke(grant.refresh_token)
+        raise OAuthCallbackError(OAUTH_ENCRYPTION_UNAVAILABLE) from None
+
+    row = await _row(db, actor_id, for_update=True)
+    before = _audit_state(row)
+    previous_token = None
+    if row is None:
+        row = EmailSettings(
+            user_id=actor_id,
+            from_name=(actor.full_name or grant.name or grant.email)[:80],
+        )
+        db.add(row)
+    elif row.refresh_token_encrypted and (row.gmail_address or "").lower() != grant.email.lower():
+        # A different Google account replaces this one: give the old grant
+        # up. Never for the same account, where revoking the old token would
+        # revoke the whole grant, the new token included.
+        previous_token = _decrypt_quietly(row.refresh_token_encrypted)
+    row.gmail_address = grant.email
+    row.refresh_token_encrypted = encrypted
+    row.oauth_scopes = " ".join(grant.scopes)
+    row.token_updated_at = datetime.now(timezone.utc)
+    # A test email proved the old token, not this one.
+    row.last_verified_at = None
+    append_audit(
+        db,
+        entity_type=_ENTITY,
+        entity_id=actor_id,
+        action="EMAIL_GMAIL_CONNECTED",
+        actor_id=actor_id,
+        before_state=before,
+        after_state=_audit_state(row),
+        ip_address=ip_address,
+    )
+    try:
+        await db.commit()
+    except IntegrityError:
+        # A first-time connect raced a first-time save; the row exists now.
+        await db.rollback()
+        await google.revoke(grant.refresh_token)
+        raise OAuthCallbackError(OAUTH_FAILED) from None
+    if previous_token:
+        await google.revoke(previous_token)
+
+
+def _grant_rejection(grant: google.TokenGrant) -> str | None:
+    if google.GMAIL_SEND_SCOPE not in grant.scopes:
+        # Google's consent screen lets the admin untick "Send email on your
+        # behalf"; without it the connection could never send.
+        return OAUTH_SCOPE_MISSING
+    if not grant.email or not grant.email_verified:
+        return OAUTH_EMAIL_UNVERIFIED
+    allowed = settings.gmail_connect_allowed_domains
+    if allowed and grant.email.rsplit("@", 1)[-1].lower() not in allowed:
+        return OAUTH_DOMAIN_NOT_ALLOWED
+    if not grant.refresh_token:
+        return OAUTH_NO_REFRESH_TOKEN
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -484,26 +659,51 @@ async def preview(db: AsyncSession, content: EmailContent, *, actor_id: UUID) ->
 async def _connected_account(
     db: AsyncSession, actor_id: UUID
 ) -> tuple[EmailSettings, str]:
-    """The admin's own settings row and decrypted password, or the 409/503
-    that says why there is nothing to send with."""
+    """The admin's own settings row and decrypted refresh token, or the
+    409/503 that says why there is nothing to send with."""
     row = await _row(db, actor_id)
-    if row is None or not row.app_password_encrypted:
+    if row is None or not row.refresh_token_encrypted or not row.gmail_address:
         raise _error(
             status.HTTP_409_CONFLICT,
             "EMAIL_NOT_CONFIGURED",
-            "Connect your Gmail account under Email settings first.",
+            "Connect your Google account under Email settings first.",
         )
     try:
-        password = crypto.decrypt_password(row.app_password_encrypted)
+        token = crypto.decrypt_secret(row.refresh_token_encrypted)
     except crypto.EncryptionUnavailable:
         raise _encryption_unavailable() from None
-    if password is None:
-        raise _error(
-            status.HTTP_409_CONFLICT,
-            "APP_PASSWORD_UNREADABLE",
-            "The stored app password can no longer be read. Enter it again.",
-        )
-    return row, password
+    if token is None:
+        # Written under an encryption key that has since been rotated.
+        raise _reconnect_required()
+    return row, token
+
+
+async def _mark_access_revoked(
+    db: AsyncSession, *, actor_id: UUID, ciphertext: str, ip_address: str | None
+) -> None:
+    """Google refused the stored token for good. Drop it, so the console
+    shows "Reconnect with Google", but only if the row still holds that very
+    token: a reconnect that finished meanwhile must not be undone. The
+    address stays, to say which account to reconnect."""
+    row = await _row(db, actor_id, for_update=True)
+    if row is None or row.refresh_token_encrypted != ciphertext:
+        return
+    before = _audit_state(row)
+    row.refresh_token_encrypted = None
+    row.oauth_scopes = None
+    row.token_updated_at = None
+    row.last_verified_at = None
+    append_audit(
+        db,
+        entity_type=_ENTITY,
+        entity_id=actor_id,
+        action="EMAIL_GMAIL_ACCESS_REVOKED",
+        actor_id=actor_id,
+        before_state=before,
+        after_state=_audit_state(row),
+        ip_address=ip_address,
+    )
+    await db.commit()
 
 
 async def _check_rate(db: AsyncSession, actor_id: UUID, recipient_count: int) -> None:
@@ -582,7 +782,7 @@ async def _send_logged(
     db: AsyncSession,
     *,
     account: EmailSettings,
-    password: str,
+    refresh_token: str,
     actor: User,
     recipients: list[str],
     template: str,
@@ -601,6 +801,7 @@ async def _send_logged(
     can hold customers picked from the user directory, and none of them may
     see the others' addresses."""
     from_address = account.gmail_address
+    ciphertext = account.refresh_token_encrypted
     try:
         messages = [
             (
@@ -641,9 +842,7 @@ async def _send_logged(
     failure: transport.DeliveryError | None = None
     undelivered: list[str] = []
     try:
-        undelivered = await run_in_threadpool(
-            transport.deliver, from_address, password, messages
-        )
+        undelivered = await transport.deliver(refresh_token, messages)
     except transport.DeliveryError as exc:
         failure = exc
 
@@ -676,6 +875,11 @@ async def _send_logged(
     await db.refresh(log)
 
     if failure is not None:
+        if failure.reconnect:
+            await _mark_access_revoked(
+                db, actor_id=actor.id, ciphertext=ciphertext, ip_address=ip_address
+            )
+            raise _error(status.HTTP_409_CONFLICT, failure.code, failure.message)
         raise _error(status.HTTP_502_BAD_GATEWAY, failure.code, failure.message)
     return log
 
@@ -686,10 +890,10 @@ async def send_test(
     """Send the test template to the signed-in admin's own address. Allowed
     while sending is paused, so the account can be checked before it is
     switched on."""
-    account, password = await _connected_account(db, actor.id)
-    # What is being tested, so only these credentials are marked verified.
+    account, refresh_token = await _connected_account(db, actor.id)
+    # What is being tested, so only this token is marked verified.
     tested_address = account.gmail_address
-    tested_ciphertext = account.app_password_encrypted
+    tested_ciphertext = account.refresh_token_encrypted
     html = render_email("internal-test", from_address=account.gmail_address)
     text = (
         f"This test email was sent from {account.gmail_address} through the FundLok "
@@ -698,7 +902,7 @@ async def send_test(
     await _send_logged(
         db,
         account=account,
-        password=password,
+        refresh_token=refresh_token,
         actor=actor,
         recipients=[actor.email],
         template="test",
@@ -709,14 +913,14 @@ async def send_test(
         ip_address=ip_address,
     )
     # The settings may have changed (or been cleared) during the Gmail call.
-    # Stamp the row only if it still holds the credentials just tested.
+    # Stamp the row only if it still holds the token just tested.
     verified_at = datetime.now(timezone.utc)
     await db.execute(
         update(EmailSettings)
         .where(
             EmailSettings.user_id == actor.id,
             EmailSettings.gmail_address == tested_address,
-            EmailSettings.app_password_encrypted == tested_ciphertext,
+            EmailSettings.refresh_token_encrypted == tested_ciphertext,
         )
         .values(last_verified_at=verified_at)
     )
@@ -727,7 +931,7 @@ async def send_test(
 async def send(
     db: AsyncSession, body: SendEmailRequest, *, actor: User, ip_address: str | None
 ) -> InternalEmailOut:
-    account, password = await _connected_account(db, actor.id)
+    account, refresh_token = await _connected_account(db, actor.id)
     if not account.enabled:
         raise _error(
             status.HTTP_409_CONFLICT,
@@ -745,7 +949,7 @@ async def send(
     log = await _send_logged(
         db,
         account=account,
-        password=password,
+        refresh_token=refresh_token,
         actor=actor,
         recipients=recipients,
         template=body.template,

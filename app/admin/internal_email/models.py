@@ -1,15 +1,17 @@
 """Admin > Email: each admin's connected Gmail account, and every email sent.
 
 ONE ROW PER ADMIN
-Every admin connects their own Google account with their own App Password,
-and their email goes out from that address. A row belongs to one user and is
-only ever read or changed by that user (the service always filters on the
-signed-in admin). It is deleted with the user.
+Every admin connects their own Google account through Google OAuth 2.0
+(scope gmail.send), and their email goes out from that address through the
+Gmail API. A row belongs to one user and is only ever read or changed by that
+user (the service always filters on the signed-in admin). It is deleted with
+the user.
 
 WHY A TABLE, NOT system_settings
-The settings hold a credential. A dedicated table gives the encrypted
-password its own typed column, which is never selected into a dict that
-could be serialised.
+The settings hold a credential: the OAuth refresh token, which can mint
+access tokens for sending as that mailbox. A dedicated table gives the
+encrypted token its own typed column, which is never selected into a dict
+that could be serialised.
 
 WHY THE LOG KEEPS THE CONTENT
 internal_emails is the record of what each admin sent under FundLok's name,
@@ -49,13 +51,22 @@ class EmailSettings(Base):
         nullable=False,
         unique=True,
     )
-    # The admin's Google account: the SMTP login and the From address.
-    gmail_address = Column(Text, nullable=False)
+    # The connected Google account: the From address, taken from Google's
+    # verified ID token, never typed in. Null until an account is connected.
+    # Kept when Google revokes access (so the console can say which account
+    # to reconnect); cleared by an explicit disconnect.
+    gmail_address = Column(Text, nullable=True)
     from_name = Column(Text, nullable=False)
-    # Fernet "v1:<token>" (crypto.py). Never returned by the API.
-    app_password_encrypted = Column(Text, nullable=True)
+    # The Google OAuth refresh token, Fernet "v1:<token>" (crypto.py). Never
+    # returned by the API; decrypted only in memory to mint an access token.
+    # Null = not connected.
+    refresh_token_encrypted = Column(Text, nullable=True)
+    # Space-separated scopes Google granted with the token.
+    oauth_scopes = Column(Text, nullable=True)
+    # When the stored refresh token was issued (the last connect).
+    token_updated_at = Column(DateTime(timezone=True), nullable=True)
     enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
-    # Set by a successful test email.
+    # Set by a successful test email with the current token.
     last_verified_at = Column(DateTime(timezone=True), nullable=True)
     # The admin's email signature, appended to a message when they tick
     # "Include my email signature" in the composer. Optional: nothing is
