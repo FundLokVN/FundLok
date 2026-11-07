@@ -117,11 +117,27 @@ class Settings(BaseSettings):
     # password-equivalent secrets in plaintext.
     TOTP_ENCRYPTION_KEY: str | None = None
 
-    # Encrypts the Gmail app password an admin saves under Admin > Email
-    # (app/admin/internal_email/crypto.py). Its own key, separate from both
-    # SECRET_KEY and TOTP_ENCRYPTION_KEY, so each can rotate alone. Unset means
-    # the password cannot be saved: fail closed, never plaintext.
+    # Encrypts the Google OAuth refresh token an admin's Gmail connection holds
+    # under Admin > Email (app/admin/internal_email/crypto.py). Its own key,
+    # separate from both SECRET_KEY and TOTP_ENCRYPTION_KEY, so each can rotate
+    # alone. Unset means no account can be connected: fail closed, never
+    # plaintext.
     EMAIL_SETTINGS_ENCRYPTION_KEY: str | None = None
+
+    # Admin > Email: each admin connects their Gmail account with Google OAuth
+    # 2.0 (authorization code flow, scope gmail.send) and mail goes out through
+    # the Gmail API. A "Web application" OAuth client. GOOGLE_OAUTH_CLIENT_ID
+    # unset means the sign-in client (GOOGLE_CLIENT_ID) is used, so reusing it
+    # needs only that client's secret here. The redirect URI must be
+    # registered on the client EXACTLY, and defaults to the frontend's /api
+    # proxy: {FRONTEND_URL}/api/admin/email/oauth/callback. No client id or no
+    # secret means the Connect button answers 503 (GMAIL_OAUTH_NOT_CONFIGURED).
+    GOOGLE_OAUTH_CLIENT_ID: str | None = None
+    GOOGLE_OAUTH_CLIENT_SECRET: str | None = None
+    GOOGLE_OAUTH_REDIRECT_URI: str | None = None
+    # Comma-separated domains a connected Gmail account must be on, e.g.
+    # "fundlok.com". Empty means any Google account.
+    GMAIL_CONNECT_ALLOWED_DOMAINS: str = ""
 
     # PartyKit realtime push for the notification bell (app/notifications/
     # realtime.py). All three unset = feature off and polling is the only path.
@@ -211,6 +227,27 @@ class Settings(BaseSettings):
         if self.WEBAUTHN_ORIGINS:
             return [o.strip().rstrip("/") for o in self.WEBAUTHN_ORIGINS.split(",") if o.strip()]
         return [self.FRONTEND_URL.strip().rstrip("/")]
+
+    @property
+    def gmail_oauth_client_id(self) -> str | None:
+        """The OAuth client for Admin > Email: its own, else the sign-in one."""
+        client_id = self.GOOGLE_OAUTH_CLIENT_ID or self.GOOGLE_CLIENT_ID
+        return client_id.strip() if client_id else None
+
+    @property
+    def gmail_oauth_redirect_uri(self) -> str:
+        """Where Google sends the admin back after the Gmail consent screen."""
+        if self.GOOGLE_OAUTH_REDIRECT_URI:
+            return self.GOOGLE_OAUTH_REDIRECT_URI.strip()
+        return self.FRONTEND_URL.strip().rstrip("/") + "/api/admin/email/oauth/callback"
+
+    @property
+    def gmail_connect_allowed_domains(self) -> list[str]:
+        return [
+            d.strip().lower().lstrip("@")
+            for d in self.GMAIL_CONNECT_ALLOWED_DOMAINS.split(",")
+            if d.strip()
+        ]
 
     @property
     def cors_origins(self) -> list[str]:
