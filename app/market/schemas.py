@@ -61,6 +61,52 @@ class ReservationCreate(BaseModel):
     payment_account_id: UUID | None = None
 
 
+class PartyBOut(BaseModel):
+    """Party B of the Investor Service Agreement, as filled in. A null prints as a dotted blank."""
+
+    holder_type: str | None = None  # INDIVIDUAL | ENTITY
+    name: str | None = None
+    id_number: str | None = None  # personal ID number, or enterprise code
+    address: str | None = None
+    bank_account_number: str | None = None
+    bank_account_name: str | None = None
+    bank_name: str | None = None
+
+
+class InvestorAgreementOut(BaseModel):
+    """Whether the investor must still sign and upload the Investor Service Agreement before committing."""
+
+    # The version the platform asks for now, printed on the PDF to sign.
+    version: str
+    # True until the investor has uploaded a digitally signed copy of `version`.
+    required: bool
+    # When the current version's signed copy was uploaded; null while required.
+    signed_at: dt.datetime | None = None
+    # The investor's latest signed version, of any version (an older one while a new version is required).
+    signed_version: str | None = None
+    # The signed copy's file name as uploaded.
+    file_name: str | None = None
+    # True while the signed copy may still be replaced: no commitment has been made under it yet.
+    replaceable: bool = False
+    # As signed when signed; else as the PDF fills it in now, from the verified profile.
+    party_b: PartyBOut
+
+
+class InvestmentConfirmationOut(BaseModel):
+    """The Annex of the Investor Service Agreement for one commitment, as it will be signed."""
+
+    listing_id: UUID
+    listing_ref: str
+    sme_name: str
+    amount_vnd: int
+    annual_rate_pct: Decimal
+    term_months: int
+    # P × 2.5% × M / 12, before VAT.
+    service_fee_vnd: int
+    service_fee_bps_per_year: int
+    expected_disbursement_date: dt.date
+
+
 class InvestorTrancheOut(TrancheOut):
     """An investor's own ticket. Adds when they uploaded their transfer receipt (null until they do, so the page
     knows whether to ask for one) and, in their list, the project it is in and its loan term in months."""

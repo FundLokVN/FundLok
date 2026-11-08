@@ -55,3 +55,5 @@ from app.direct_transfer.models import (  # noqa: F401
     Tranche,
     Transfer,
 )
+# FKs to users and tranches.
+from app.market.investor_agreement.models import InvestorServiceAgreement  # noqa: F401

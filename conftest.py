@@ -711,11 +711,14 @@ def make_listing(client):
 @pytest.fixture
 def make_eligible_investor(db_session):
     """Bring an investor to where the market accepts their orders: email
-    verified, an APPROVED GVerify KYC attempt and a saved bank account.
-    Idempotent per investor. Pass bank_account=False to stop short of the
-    account (the order endpoint refuses an investor without one)."""
+    verified, an APPROVED GVerify KYC attempt, a saved bank account and a
+    signed Investor Service Agreement (Contract 4; reserving refuses without
+    one). Idempotent per investor. Pass bank_account=False to stop short of
+    the account (the order endpoint refuses an investor without one), and
+    signed_agreement=False to stop short of the agreement (its own upload is
+    covered in tests/market/test_investor_service_agreement.py)."""
 
-    async def _make(investor: dict, bank_account: bool = True):
+    async def _make(investor: dict, bank_account: bool = True, signed_agreement: bool = True):
         from app.direct_transfer.models import PaymentAccount
         from app.gverify.models import STATUS_APPROVED, GVerifyVerification
 
@@ -753,6 +756,32 @@ def make_eligible_investor(db_session):
                         account_number=uuid.uuid4().int.__str__()[:12],
                         account_name="TEST INVESTOR",
                         status="APPROVED",
+                    )
+                )
+        if signed_agreement:
+            import datetime as _dt
+
+            from app.market.investor_agreement.models import InvestorServiceAgreement
+            from app.market.investor_agreement.service import VERSION
+
+            signed = (
+                await db_session.execute(
+                    select(InvestorServiceAgreement.id).where(
+                        InvestorServiceAgreement.investor_id == user.id, InvestorServiceAgreement.version == VERSION
+                    )
+                )
+            ).first()
+            if signed is None:
+                db_session.add(
+                    InvestorServiceAgreement(
+                        investor_id=user.id,
+                        version=VERSION,
+                        signed_at=_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=1),
+                        party_b={},
+                        signed_file_key=f"test/investor-agreement/{user.id}.pdf",
+                        document_sha256="0" * 64,
+                        file_name="signed.pdf",
+                        file_size_bytes=len(SIGNED_AGREEMENT_PDF),
                     )
                 )
         await db_session.commit()
