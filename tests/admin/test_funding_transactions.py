@@ -8,6 +8,7 @@ import uuid
 
 from sqlalchemy import select
 
+from app.direct_transfer.calendar_utils import count_business_days, first_working_day_after, ict_date
 from app.direct_transfer.models import Tranche
 from app.lending.models import AuditLog
 from tests.market.test_funding_flow import PNG, SME_ACCOUNT, _lapse, _open_project, _reserve, _upload
@@ -369,7 +370,11 @@ async def test_approving_a_receipt_means_the_money_is_received(
     schedule = (
         await client.get(f"/repayment/tranches/{s['tranche']['id']}/schedule", headers=s["investor"]["headers"])
     ).json()
-    assert len(schedule) == 85  # 84 working days and the first-period interest, saved at approval
+    # 84 working days, plus the first-period interest saved at approval. That interest counts the working days
+    # from the money's arrival (today) to day one, so money arriving on a weekend or holiday has none and no row.
+    today = ict_date(dt.datetime.now(dt.timezone.utc))
+    stub_days = count_business_days(today, first_working_day_after(today))
+    assert len(schedule) == 84 + (1 if stub_days else 0)
     [round_] = (await client.get("/admin/funding/rounds", headers=s["admin"]["headers"])).json()
     assert round_["confirmed_vnd"] == 20_000_000
 
@@ -471,8 +476,6 @@ async def test_the_approval_panel_works_out_the_repayment_approving_starts(
 ):
     """Before approving, staff see the days the investment gets if approved today, step by step; after, the days
     it got."""
-    from app.direct_transfer.calendar_utils import first_working_day_after, ict_date
-
     s = await _paid(client, db_session, make_admin, make_user, make_eligible_investor, amount=20_000_000)
     preview_url = f"/admin/funding/transfers/{s['tranche']['id']}/repayment"
 
@@ -491,8 +494,10 @@ async def test_the_approval_panel_works_out_the_repayment_approving_starts(
     assert basis["interest_vnd"] == 500_000 and basis["total_vnd"] == 20_500_000
     assert basis["business_day_count"] == 84 == basis["term_months"] * basis["working_days_per_month"]
     assert basis["daily_vnd"] == 20_500_000 // 84 and basis["final_vnd"] == 20_500_000 - 83 * basis["daily_vnd"]
-    # The first-period interest: from the money's arrival (today, on approval) to day one.
-    assert basis["received_on"] == today.isoformat() and basis["stub_days"] >= 1
+    # The first-period interest: the working days from the money's arrival (today, on approval) to day one. One
+    # on a working day; none when it arrives on a weekend or holiday, which is when this test may run.
+    assert basis["received_on"] == today.isoformat()
+    assert basis["stub_days"] == count_business_days(today, first_working_day_after(today))
     assert basis["stub_interest_vnd"] == round(20_000_000 * 0.075 * basis["stub_days"] / 252)
     assert plan["totals"]["tax_withheld_vnd"] == basis["tax_vnd"]
     assert [d["kind"] for d in plan["days"]].count("INSTALMENT") == 84

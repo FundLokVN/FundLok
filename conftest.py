@@ -302,13 +302,13 @@ def _mock_external_io(monkeypatch):
     # forgotten.
     monkeypatch.setattr("app.utils.email.send_email", lambda *a, **kw: None)
 
-    # Admin > Email talks to Gmail over its own connection, not send_email.
-    # Opening it fails loudly in every test; the internal-email tests replace
-    # it with a fake server.
-    def _no_gmail(*a, **kw):
-        raise AssertionError("a test tried to connect to Gmail")
+    # Admin > Email talks to Google (OAuth token endpoint, Gmail API) over
+    # its own HTTP client, not send_email. Opening it fails loudly in every
+    # test; the internal-email tests replace it with a fake Google.
+    def _no_google(*a, **kw):
+        raise AssertionError("a test tried to contact Google")
 
-    monkeypatch.setattr("app.admin.internal_email.transport._connect", _no_gmail)
+    monkeypatch.setattr("app.admin.internal_email.google._client", _no_google)
 
     # GVerify verification-document retention writes to R2 — never in tests.
     async def _no_store(*a, **kw):
