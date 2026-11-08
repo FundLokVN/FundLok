@@ -58,6 +58,7 @@ email-validator==2.3.0
 google-cloud-storage==3.17.1
 boto3==1.43.118          # Cloudflare R2 (S3-compatible) presigned uploads
 pypdf==6.21.4            # CIC credit-report PDFs (app/uploads/parsers/cic.py)
+fpdf2==2.8.3             # SME service agreement PDF the SME downloads and signs (app/loans/agreement/pdf.py)
 defusedxml==0.7.1        # safe XML parsing of uploaded XLSX / e-invoice files (app/uploads/parsers/xlsx.py, statements.py)
 python-multipart==0.0.32 # multipart file uploads (FastAPI UploadFile): investors' transfer receipts, app/market/funding_router.py
 PyYAML==6.0.3          # grading engine params loader (app/underwriting/grading/params.py)

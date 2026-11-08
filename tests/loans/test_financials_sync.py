@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from app.gverify.models import STATUS_APPROVED, GVerifyKybVerification
 from app.lending.models import LoanApplicationFinancials
-from conftest import auth_headers
+from conftest import SIGNED_AGREEMENT_PDF, auth_headers
 from tests.loans.test_lite_grading_figures import figures
 from tests.uploads.test_cic import blank_pdf, report_text
 from tests.uploads.test_tax_filings import TAX, folder_zip, statements_xml, vat_months
@@ -25,6 +25,8 @@ FILINGS = folder_zip({**vat_months(), "B02.xml": statements_xml()})
 def storage(monkeypatch):
     # The stored object is chosen by the document type in its key.
     def get_bytes(key, **kw):
+        if "sme_service_agreement" in key:
+            return SIGNED_AGREEMENT_PDF
         return blank_pdf() if "cic_report" in key else FILINGS
 
     monkeypatch.setattr("app.uploads.parsers.cic._text", lambda raw: report_text())
@@ -86,6 +88,7 @@ async def _complete(client, db_session, sme, **form):
     assert resp.status_code == 200, resp.text
     await _upload(client, sme, app_id, "tax_filings", "filings.zip", "application/zip")
     await _upload(client, sme, app_id, "cic_report", "cic.pdf", "application/pdf")
+    await _upload(client, sme, app_id, "sme_service_agreement", "signed.pdf", "application/pdf")
     submit = await client.post(f"/loans/applications/{app_id}/submit", headers=auth_headers(sme))
     assert submit.status_code == 200, submit.text
     return app_id
@@ -154,6 +157,7 @@ async def test_missing_verification_is_left_missing_and_named(client, db_session
     await _upload(client, sme, app_id, "tax_filings", "filings.zip", "application/zip")
     await _upload(client, sme, app_id, "cic_report", "cic.pdf", "application/pdf")
     await client.put(f"/loans/applications/{app_id}/figures", json=figures(), headers=auth_headers(sme))
+    await _upload(client, sme, app_id, "sme_service_agreement", "signed.pdf", "application/pdf")
     assert (await client.post(f"/loans/applications/{app_id}/submit", headers=auth_headers(sme))).status_code == 200
 
     run = await _score(client, admin, app_id)
@@ -175,6 +179,7 @@ async def test_missing_verification_is_left_missing_and_named(client, db_session
 async def test_without_headcount_or_term_no_row_is_written(client, db_session, make_user, make_admin, storage):
     sme, admin = await make_user(role="SME"), await make_admin()
     app_id = await _apply(client, sme, employee_count=None, duration_months=None)
+    await _upload(client, sme, app_id, "sme_service_agreement", "signed.pdf", "application/pdf")
     assert (await client.post(f"/loans/applications/{app_id}/submit", headers=auth_headers(sme))).status_code == 200
 
     run = await _score(client, admin, app_id)

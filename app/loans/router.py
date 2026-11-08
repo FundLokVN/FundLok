@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -83,6 +83,37 @@ async def save_loan_application_figures(
     return LoanApplicationFiguresOut(
         **row.self_reported_figures,
         figures_updated_at=row.figures_updated_at,
+    )
+
+
+@router.get(
+    "/applications/{application_id}/service-agreement",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def get_service_agreement(
+    application_id: UUID,
+    download: bool = Query(False, description="true: as an attachment, to save"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The SME Service Agreement (Contract 2) as a PDF, filled in with this
+    SME's details and the application's terms, for the SME to review, sign
+    with its enterprise digital signature and upload back as
+    document_type "sme_service_agreement". Only the SME that owns the
+    application. Generated each time, never stored: the signed upload is the
+    record."""
+    from app.loans.agreement.service import build_pdf
+
+    pdf, filename = await build_pdf(db, application_id, current_user)
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

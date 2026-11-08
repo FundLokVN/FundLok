@@ -503,9 +503,51 @@ def make_loan_application(client):
     return _make
 
 
+# What a digitally signed agreement looks like to the upload check
+# (app/loans/agreement/signature.py): a PDF with a signature dictionary, as a
+# signing tool appends it in an incremental update.
+SIGNED_AGREEMENT_PDF = (
+    b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"
+    b"9 0 obj\n<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /ETSI.CAdES.detached "
+    b"/ByteRange [0 120 4216 380] /Contents <3082> >>\nendobj\n%%EOF\n"
+)
+
+
+async def attach_signed_service_agreement(db_session, application_id) -> None:
+    """The SME uploaded its signed SME Service Agreement, as the wizard does
+    before Send (submit refuses without it). Test setup: the upload itself is
+    covered in tests/loans/test_service_agreement.py."""
+    from sqlalchemy import select as _select
+
+    from app.lending.models import LoanApplicationDocument
+    from app.loans.agreement.service import SERVICE_AGREEMENT_DOCUMENT_TYPE
+
+    app_id = uuid.UUID(str(application_id))
+    existing = await db_session.scalar(
+        _select(LoanApplicationDocument.id).where(
+            LoanApplicationDocument.loan_application_id == app_id,
+            LoanApplicationDocument.document_type == SERVICE_AGREEMENT_DOCUMENT_TYPE,
+        )
+    )
+    if existing is None:
+        db_session.add(
+            LoanApplicationDocument(
+                loan_application_id=app_id,
+                document_type=SERVICE_AGREEMENT_DOCUMENT_TYPE,
+                file_key=f"test/{app_id}/signed-service-agreement-{uuid.uuid4().hex}.pdf",
+                original_filename="hop-dong-dich-vu-da-ky.pdf",
+                content_type="application/pdf",
+                file_size_bytes=1024,
+                status="UPLOADED",
+            )
+        )
+        await db_session.commit()
+
+
 @pytest.fixture
-def submit_loan_application(client):
+def submit_loan_application(client, db_session):
     async def _submit(sme: dict, application_id: str):
+        await attach_signed_service_agreement(db_session, application_id)
         return await client.post(
             f"/loans/applications/{application_id}/submit",
             headers=auth_headers(sme),

@@ -299,7 +299,15 @@ def verified_document_types(application: LoanApplication) -> list[str]:
         return []
     from app.admin.service import REQUIRED_DOCUMENT_TYPES
 
-    uploaded = dict.fromkeys(d.document_type for d in application.documents if d.status == "UPLOADED")
+    from app.loans.agreement.service import SERVICE_AGREEMENT_DOCUMENT_TYPE
+
+    # The SME Service Agreement is between the SME and FundLok, not evidence
+    # about the business: investors are not shown it (Contract 2 Art. 8).
+    uploaded = dict.fromkeys(
+        d.document_type
+        for d in application.documents
+        if d.status == "UPLOADED" and d.document_type != SERVICE_AGREEMENT_DOCUMENT_TYPE
+    )
     return [*REQUIRED_DOCUMENT_TYPES, *(t for t in uploaded if t not in REQUIRED_DOCUMENT_TYPES)]
 
 

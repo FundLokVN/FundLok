@@ -25,6 +25,10 @@ DOCUMENT_TYPE_RULES: dict[str, dict] = {
     # the statement XML alone. Parsed at confirm by
     # app/uploads/parsers/tax_filings.py.
     "tax_filings": {"extensions": {"zip", "xml"}, "max_size": 100 * MB},
+    # Step 4: the SME Service Agreement the SME downloaded from
+    # GET /loans/applications/{id}/service-agreement, signed with its
+    # enterprise digital signature. A signed PDF. Required to submit.
+    "sme_service_agreement": {"extensions": {"pdf"}, "max_size": 25 * MB},
 }
 
 EXTENSION_CONTENT_TYPES: dict[str, frozenset[str]] = {
