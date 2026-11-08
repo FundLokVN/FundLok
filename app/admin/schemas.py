@@ -46,6 +46,12 @@ class AdminStats(BaseModel):
     projects_by_status: dict[str, int]
 
 
+# Whether a user accepted the current Terms & Services and data consent
+# (app/consent): ACCEPTED, REQUIRED (not yet, or only an older version), or
+# NOT_APPLICABLE for admins, who are never asked.
+ConsentState = Literal["ACCEPTED", "REQUIRED", "NOT_APPLICABLE"]
+
+
 class UserRow(BaseModel):
     id: UUID
     email: str
@@ -57,6 +63,9 @@ class UserRow(BaseModel):
     status: str
     email_verified: bool
     created_at: datetime | None
+    # Filled in by list_users after the page is read (one query per page).
+    consent_status: ConsentState = "REQUIRED"
+    consent_accepted_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -287,6 +296,33 @@ class AdminPaymentAccountDecisionRequest(AdminDecisionRequest):
     user sees it as the reason); an approval may have one."""
 
 
+class AdminConsentRecordOut(BaseModel):
+    """One acceptance record from user_consents, as stored."""
+
+    id: UUID
+    version: str
+    # {"TERMS": true, "DATA_PROCESSING": true, "DATA_SHARING_TPV": true}
+    consents: dict[str, bool]
+    verified_by: str
+    ip_address: str | None = None
+    user_agent: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AdminUserConsent(BaseModel):
+    """The user's Terms & data consent, for the admin user panel."""
+
+    status: ConsentState
+    # The version the platform asks for now.
+    current_version: str
+    # When the current version was accepted (null unless ACCEPTED).
+    accepted_at: datetime | None = None
+    # Every record, newest first; older versions included.
+    records: list[AdminConsentRecordOut] = []
+
+
 class AdminUserFullDetail(AdminUserDetail):
     """The user preview panel's payload, in the spirit of AdminProjectDetail:
     the whole panel in one response instead of the client stitching a list row
@@ -328,6 +364,9 @@ class AdminUserFullDetail(AdminUserDetail):
 
     # Empty for a user with no project ownerships, not an error.
     projects: list[AdminUserProjectRef] = []
+
+    # Terms & Services and data consent (Contract 1).
+    consent: AdminUserConsent | None = None
     investments: AdminUserInvestmentSummary
 
 

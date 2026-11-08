@@ -88,6 +88,58 @@ async def accepted_at(db: AsyncSession, user_id) -> datetime | None:
     return latest.created_at
 
 
+# What an admin sees for a user (Admin > Users): the current Terms accepted,
+# still owed, or not asked at all (FundLok staff).
+STATE_ACCEPTED = "ACCEPTED"
+STATE_REQUIRED = "REQUIRED"
+STATE_NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+async def states_for(db: AsyncSession, users) -> dict:
+    """{user_id: (state, accepted_at)} for a page of users, in one query:
+    each user's latest row for the current version (DISTINCT ON), judged the
+    same way as the gate (all three boxes literally true)."""
+    ids = [u.id for u in users if not is_exempt(u)]
+    latest: dict = {}
+    if ids:
+        rows = (
+            await db.execute(
+                select(UserConsent.user_id, UserConsent.consents, UserConsent.created_at)
+                .where(
+                    UserConsent.user_id.in_(ids),
+                    UserConsent.version == documents.CURRENT_VERSION,
+                )
+                .distinct(UserConsent.user_id)
+                .order_by(UserConsent.user_id, UserConsent.created_at.desc())
+            )
+        ).all()
+        latest = {row.user_id: row for row in rows}
+    out = {}
+    for user in users:
+        if is_exempt(user):
+            out[user.id] = (STATE_NOT_APPLICABLE, None)
+            continue
+        row = latest.get(user.id)
+        if row is not None and all_accepted(row.consents):
+            out[user.id] = (STATE_ACCEPTED, row.created_at)
+        else:
+            out[user.id] = (STATE_REQUIRED, None)
+    return out
+
+
+async def history(db: AsyncSession, user_id) -> list[UserConsent]:
+    """Every consent row the user has, newest first: the evidence trail."""
+    return list(
+        (
+            await db.execute(
+                select(UserConsent)
+                .where(UserConsent.user_id == user_id)
+                .order_by(UserConsent.created_at.desc())
+            )
+        ).scalars()
+    )
+
+
 async def get_status(db: AsyncSession, user: User) -> ConsentStatusOut:
     when = await accepted_at(db, user.id)
     return ConsentStatusOut(

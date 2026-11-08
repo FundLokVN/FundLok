@@ -90,6 +90,11 @@ ConsentAcceptRequest { version: str, terms: bool, data_processing: bool, data_sh
 
 `GET /users/me` gains `consent_required: bool` (always false for admins), which the frontend proxy reads to send the user to `/consent`.
 
+**Admin > Users** (admins only, existing endpoints):
+
+- `GET /admin/overview?mode=users`: each `UserRow` gains `consent_status` (`ACCEPTED` | `REQUIRED` | `NOT_APPLICABLE` for admins) and `consent_accepted_at`. One query per page (`DISTINCT ON user_id`), judged exactly as the gate.
+- `GET /admin/users/{id}`: gains `consent: { status, current_version, accepted_at, records: [{ id, version, consents, verified_by, ip_address, user_agent, created_at }] }`, records newest first, older versions included.
+
 ---
 
 ## 5. State Machine
@@ -147,6 +152,10 @@ CONSENTED ──(CURRENT_VERSION changes)──▶ NO CONSENT for the new versio
 - `test_ekyc_needs_consent`
 - `test_choosing_a_role_needs_consent`
 - `test_users_me_reports_consent_required`
+- `test_the_user_list_shows_who_accepted_the_terms` (tests/admin/test_admin_user_consent.py)
+- `test_the_user_panel_shows_the_consent_records`
+- `test_a_user_who_has_not_accepted_shows_as_required`
+- `test_an_admins_panel_says_not_applicable`
 
 ---
 
