@@ -350,11 +350,37 @@ async def client():
 DEFAULT_PASSWORD = "Str0ngPassw0rd!1"
 
 
-@pytest.fixture
-def make_user(client):
-    """Register (+optionally self-select a role for) a user; return tokens/headers."""
+async def record_consent(db_session, user_id) -> None:
+    """The user accepted the current Terms & Services and data consent, as a
+    real user does right after sign-up (docs/specs/consent/). Test setup, not
+    the behaviour under test: tests/consent/ covers the real flow."""
+    from app.consent import documents
+    from app.consent.models import UserConsent
 
-    async def _make(role: str | None = None, email: str | None = None, full_name: str = "Test User"):
+    db_session.add(
+        UserConsent(
+            user_id=uuid.UUID(str(user_id)),
+            version=documents.CURRENT_VERSION,
+            consents={doc: True for doc in documents.DOCUMENTS},
+            verified_by=documents.VERIFIED_BY_EMAIL_OTP,
+        )
+    )
+    await db_session.commit()
+
+
+@pytest.fixture
+def make_user(client, db_session):
+    """Register (+optionally self-select a role for) a user; return tokens/headers.
+
+    Every user has accepted the current Terms, as after a real sign-up, unless
+    `consent=False` (for tests of the consent gate itself)."""
+
+    async def _make(
+        role: str | None = None,
+        email: str | None = None,
+        full_name: str = "Test User",
+        consent: bool = True,
+    ):
         email = email or f"user-{uuid.uuid4().hex[:12]}@example.com"
         reg = await client.post(
             "/auth/register",
@@ -367,6 +393,8 @@ def make_user(client):
         login = await client.post("/auth/login", json={"email": email, "password": DEFAULT_PASSWORD})
         assert login.status_code == 200, login.text
         user_id = login.json()["id"]
+        if consent:
+            await record_consent(db_session, user_id)
         access_token = login.cookies.get("access_token")
         refresh_token = login.cookies.get("refresh_token")
         headers = {"Authorization": f"Bearer {access_token}"}

@@ -34,6 +34,7 @@ from app.sme.router import router as sme_router
 from app.underwriting.router import router as underwriting_router
 from app.uploads.router import files_router, router as uploads_router
 from app.users.router import router as users_router
+from app.consent.router import router as consent_router
 from app.users.payment_accounts_router import router as payment_accounts_router
 from app.verification.router import kyb_router, kyc_router
 from app.gverify.router import kyb_router as gverify_kyb_router, router as gverify_router
@@ -214,6 +215,7 @@ async def test_db(db: AsyncSession = Depends(get_db)):
 app.include_router(auth_router)
 app.include_router(oauth_router)
 app.include_router(users_router)
+app.include_router(consent_router)
 app.include_router(payment_accounts_router)
 app.include_router(projects_router)
 app.include_router(sme_router)
