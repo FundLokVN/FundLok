@@ -51,6 +51,10 @@ class InvestorServiceAgreement(Base):
     file_size_bytes = Column(BigInteger, nullable=False)
     ip_address = Column(Text, nullable=True)
     user_agent = Column(Text, nullable=True)
+    # NEAC's verdict on the signed copy when it was accepted (neac.py): signer, issuer, validity, OCSP/CRL, signing
+    # time, and NEAC's raw answer. Null only for records made outside the upload (e.g. test fixtures).
+    signature_check = Column(JSONB, nullable=True)
+    signature_checked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now, server_default=func.now())
 
 

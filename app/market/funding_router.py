@@ -57,6 +57,7 @@ from app.market.schemas import (
     InvestorAnalyticsOut,
     InvestorTrancheOut,
     PartyBOut,
+    SignatureCheckOut,
     SignedInvestmentConfirmationOut,
     ReportMissingCreate,
     ReservationCreate,
@@ -181,7 +182,23 @@ async def _agreement_status(db: AsyncSession, investor_id: UUID) -> InvestorAgre
         signed_version=latest.version if latest else None,
         file_name=signed.file_name if signed else None,
         tranche_id=signed.tranche_id if signed else None,
+        signature_check=_signature_check(signed.signature_check) if signed else None,
         party_b=party,
+    )
+
+
+def _signature_check(check: dict | None) -> SignatureCheckOut | None:
+    if not check:
+        return None
+    signer, issuer = check.get("signer") or {}, check.get("issuer") or {}
+    return SignatureCheckOut(
+        verified_by=check.get("verified_by", "NEAC"),
+        checked_at=check["checked_at"],
+        signer_name=signer.get("cn"),
+        signer_id=signer.get("cccd") or signer.get("mst"),
+        issuer_name=issuer.get("cn"),
+        signed_time=check.get("signed_time"),
+        name_matches=bool(check.get("name_matches")),
     )
 
 
@@ -234,9 +251,10 @@ async def upload_my_signed_investor_agreement(
     current_user: User = Depends(require_investor),
 ):
     """The investor's digitally signed copy of the agreement, signed with the commitment `tranche_id` (theirs, its
-    hold not lapsed): a PDF of at most 10 MB with a digital signature in it (a presence check; staff review who
-    signed). `version` is the one printed on the PDF they downloaded. Keeps that commitment's Annex and opens its
-    payment details. One per version."""
+    hold not lapsed): a PDF of at most 10 MB, this commitment's agreement, which NEAC verifies as validly signed,
+    unchanged and not revoked, by the investor (their eKYC ID or KYB enterprise code on the certificate). `version`
+    is the one printed on the PDF they downloaded. Keeps NEAC's verdict and that commitment's Annex, and opens its
+    payment details. One per version. NEAC takes a few seconds; 503 NEAC_UNAVAILABLE when it cannot be reached."""
     # The agreement names a verified Party B: the same gate as reserving.
     await _require_eligible_investor(db, current_user.id)
     limit = DEFAULT_PARAMS.max_evidence_bytes

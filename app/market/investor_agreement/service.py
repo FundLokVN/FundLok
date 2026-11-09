@@ -18,15 +18,20 @@ Where Party B's blanks come from:
   registered bank account the investor's approved account at a listed bank, the one the SME repays into
 Anything unknown is None and prints as a dotted blank, as in the template.
 
-The signature check is a presence check (app/loans/agreement/signature.py): it catches the unsigned PDF sent
-straight back, not who signed or which document it is. Those are for staff review, as for the SME agreement.
+The signed upload is checked in three ways before it counts: it is this commitment's agreement (its code and the
+version are in the text), NEAC (neac.py, the national authority's own verification) says the signature is valid,
+the document unchanged and the certificate not revoked, and the signer's ID on the certificate is the investor's
+(eKYC ID number, or KYB enterprise code). NEAC's verdict is kept with the agreement.
 """
 from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import io
 from decimal import Decimal
 from uuid import UUID
+
+from pypdf import PdfReader
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,7 +46,7 @@ from app.direct_transfer.models import FundingWindow, PaymentAccount, Tranche
 from app.direct_transfer.storage import EvidenceStorage
 from app.lending.models import Project
 from app.loans.agreement.signature import has_digital_signature, is_pdf
-from app.market.investor_agreement import text
+from app.market.investor_agreement import neac, text
 from app.market.investor_agreement.models import InvestorServiceAgreement, SignedInvestmentConfirmation
 from app.market.investor_agreement.pdf import AgreementData, AnnexData, annex_rows_for, render, render_annex
 from app.users.models import User
@@ -232,7 +237,11 @@ async def record_signed_upload(
     409 INVESTOR_AGREEMENT_OUTDATED when `version` (the one printed on the PDF they downloaded) is not the current
     one; 415 UNSUPPORTED_TYPE for anything but a PDF; 422 INVESTOR_AGREEMENT_UNSIGNED for a PDF with no digital
     signature in it; 409 INVESTOR_AGREEMENT_ALREADY_SIGNED when this version is already on file; 409 HOLD_EXPIRED
-    when the commitment's hold lapsed (they commit again, and sign with the new commitment).
+    when the commitment's hold lapsed (they commit again, and sign with the new commitment); 422
+    INVESTOR_AGREEMENT_WRONG_DOCUMENT when it is not this commitment's agreement; 422
+    INVESTOR_AGREEMENT_SIGNATURE_INVALID when NEAC does not accept the signature (NEAC's reasons in the detail); 422
+    INVESTOR_AGREEMENT_SIGNER_MISMATCH when the valid signature is someone else's; 503 NEAC_UNAVAILABLE when NEAC
+    cannot be reached (nothing is accepted unchecked: they try again).
     """
     if version != VERSION:
         raise conflict(
@@ -252,7 +261,15 @@ async def record_signed_upload(
         raise conflict("INVESTOR_AGREEMENT_ALREADY_SIGNED", "Your signed agreement is already on file")
     if tranche.status not in ("RESERVED", "SIGNED") or now > tranche.hold_expires_at:
         raise conflict("HOLD_EXPIRED", "The commitment's hold has lapsed; commit again and sign with it")
+    if not _is_this_agreement(content, tranche.reference_code):
+        raise DirectTransferError(
+            422,
+            f"This is not the agreement for commitment {tranche.reference_code}. Download it from this step, sign "
+            "it, and upload that file.",
+            "INVESTOR_AGREEMENT_WRONG_DOCUMENT",
+        )
     party = await current_party_b(db, investor_id)
+    check = await _check_with_neac(content, file_name, party, now)
     stored = await store_evidence_file(
         db, storage, owner_user_id=investor_id, purpose="SIGNED_DOCUMENT", content=content,
         content_type="application/pdf",
@@ -271,6 +288,8 @@ async def record_signed_upload(
         file_size_bytes=len(content),
         ip_address=ip_address,
         user_agent=(user_agent or "")[:500] or None,
+        signature_check=check,
+        signature_checked_at=now,
     )
     db.add(row)
     await db.flush()
@@ -280,6 +299,62 @@ async def record_signed_upload(
         storage=storage, now=now, params=params,
     )
     return row
+
+
+def _is_this_agreement(content: bytes, reference_code: str) -> bool:
+    """Whether the PDF is FundLok's agreement for this commitment: its text carries the commitment code (printed in
+    the Annex) and the current version (on every page). Signing adds to a PDF; it keeps the original text."""
+    try:
+        reader = PdfReader(io.BytesIO(content))
+        body = "\n".join((page.extract_text() or "") for page in reader.pages)
+    except Exception:  # an unreadable PDF is not this agreement
+        return False
+    return reference_code in body and VERSION in body
+
+
+async def _check_with_neac(content: bytes, file_name: str | None, party: PartyB, now: dt.datetime) -> dict:
+    """NEAC's verdict on the signed copy, required to be valid and the investor's; what is kept with it."""
+    try:
+        result = await neac.verify_document(content, file_name or "hop-dong-da-ky.pdf")
+    except neac.NeacUnavailable as exc:
+        raise DirectTransferError(
+            503,
+            "The digital signature could not be checked with NEAC right now. Please try again in a few minutes.",
+            "NEAC_UNAVAILABLE",
+        ) from exc
+    if not result.signatures:
+        raise DirectTransferError(
+            422, f"NEAC: {result.message or 'no digital signature found'}", "INVESTOR_AGREEMENT_SIGNATURE_INVALID"
+        )
+    valid = [sig for sig in result.signatures if not neac.problems(sig)]
+    if not valid:
+        reasons = "; ".join(neac.problems(result.signatures[0]))
+        raise DirectTransferError(422, f"NEAC: {reasons}", "INVESTOR_AGREEMENT_SIGNATURE_INVALID")
+    mine = [sig for sig in valid if neac.same_id(sig, party.id_number)]
+    if not mine:
+        found = valid[0].signer
+        raise DirectTransferError(
+            422,
+            f"The agreement is signed by {found.get('cn') or 'someone else'} "
+            f"({found.get('cccd') or found.get('mst') or 'no ID'}), not by the investor ({party.id_number or 'no ID on file'}).",
+            "INVESTOR_AGREEMENT_SIGNER_MISMATCH",
+        )
+    sig = mine[0]
+    return {
+        "verified_by": "NEAC",
+        "verify_url": neac.VERIFY_URL,
+        "checked_at": now.isoformat(),
+        "valid": True,
+        "signer": sig.signer,
+        "issuer": sig.issuer,
+        "signed_time": sig.signed_time,
+        "certificate_validity": sig.certificate_validity,
+        "ocsp": sig.ocsp,
+        "crl": sig.crl,
+        "name_matches": neac.same_name(sig, party.name),
+        "message": result.message,
+        "signatures": [s.as_dict() for s in result.signatures],
+    }
 
 
 # --------------------------------------------------------------------------- #

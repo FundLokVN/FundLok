@@ -790,6 +790,56 @@ def make_eligible_investor(db_session):
     return _make
 
 
+@pytest.fixture(autouse=True)
+def fake_neac(monkeypatch):
+    """NEAC's signature verification, faked: tests never call neac.gov.vn.
+
+    The uploaded test PDF steers the verdict with markers in its bytes (see
+    tests/market/test_investor_service_agreement.py, _signed_copy):
+      %FAKE-NEAC-SIGNER:<id>   the signer's ID on the certificate (CCCD:<id>)
+      %FAKE-NEAC-NAME:<name>   the signer's name (CN), ASCII
+      %FAKE-NEAC:<CASE>        INVALID | MODIFIED | REVOKED | UNSIGNED | DOWN
+    Without a signer marker the certificate carries someone else's ID. The
+    calls made are kept in `.calls`."""
+    import re as _re
+    from types import SimpleNamespace
+
+    from app.market.investor_agreement import neac
+
+    state = SimpleNamespace(calls=[])
+
+    async def _verify(content: bytes, filename: str):
+        state.calls.append(filename)
+        case = _re.search(rb"%FAKE-NEAC:([A-Z]+)", content)
+        case = case.group(1).decode() if case else "VALID"
+        if case == "DOWN":
+            raise neac.NeacUnavailable("fake NEAC is down")
+        if case == "UNSIGNED":
+            return neac.NeacResult(message="Văn bản không có chữ ký số", signatures=[])
+        signer_id = _re.search(rb"%FAKE-NEAC-SIGNER:([A-Za-z0-9]+)", content)
+        name = _re.search(rb"%FAKE-NEAC-NAME:([^\r\n]+)", content)
+        signature = neac.NeacSignature(
+            issuer={"cn": "FPT Certification Authority SHA256", "o": "FPT CORPORATION", "c": "VN"},
+            signer={
+                "cn": name.group(1).decode() if name else "SOMEONE",
+                "c": "VN",
+                "cccd": f"CCCD:{signer_id.group(1).decode() if signer_id else '000000000000'}",
+            },
+            intact="Bị thay đổi" if case == "MODIFIED" else "Không bị thay đổi",
+            certificate_validity="Thời điểm có hiệu lực: 2026-03-18 11:00:40+07:00; Thời điểm hết hiệu lực: 2027-03-26",
+            validity="Không hợp lệ" if case == "INVALID" else "Hợp lệ tại thời điểm ký",
+            timestamp_status="Không",
+            signed_time="Ngày 09 tháng 11 năm 2026, 10:00:00 [UTC+07:00]",
+            reason_invalidity="Chứng thư số của tổ chức phát hành chưa được công nhận." if case == "INVALID" else "",
+            ocsp="Chứng thư số đã bị thu hồi." if case == "REVOKED" else "Chứng thư số chưa bị thu hồi. [http://ocsp3.fis.com.vn]",
+            crl="Chứng thư số chưa bị thu hồi [http://crl3.fis.com.vn]",
+        )
+        return neac.NeacResult(message="Success", signatures=[signature])
+
+    monkeypatch.setattr(neac, "verify_document", _verify)
+    return state
+
+
 @pytest.fixture
 def place_order(client, make_eligible_investor):
     async def _place(investor: dict, listing_id: str, amount: str = "1000.00", idempotency_key: str | None = None,

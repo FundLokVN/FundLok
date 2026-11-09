@@ -73,6 +73,18 @@ class PartyBOut(BaseModel):
     bank_name: str | None = None
 
 
+class SignatureCheckOut(BaseModel):
+    """NEAC's verdict on the signed copy when it was accepted."""
+
+    verified_by: str  # "NEAC"
+    checked_at: dt.datetime
+    signer_name: str | None = None  # the certificate's CN, e.g. "CÔNG TY CỔ PHẦN FUNDLOK"
+    signer_id: str | None = None  # as on the certificate, e.g. "MST:1501167629" or "CCCD:079..."
+    issuer_name: str | None = None  # the CA, e.g. "FPT Certification Authority SHA256"
+    signed_time: str | None = None  # NEAC's wording, e.g. "Ngày 20 tháng 10 năm 2026, 17:16:11 [UTC+07:00]"
+    name_matches: bool = False  # the certificate's name is the investor's verified name
+
+
 class InvestorAgreementOut(BaseModel):
     """Whether the investor must still sign and upload the Investor Service Agreement before committing."""
 
@@ -89,6 +101,8 @@ class InvestorAgreementOut(BaseModel):
     file_name: str | None = None
     # The commitment it was signed with (whose Annex it carries filled in).
     tranche_id: UUID | None = None
+    # NEAC's verdict on the signed copy (null for records made outside the upload).
+    signature_check: SignatureCheckOut | None = None
     # As signed when signed; else as the PDF fills it in now, from the verified profile.
     party_b: PartyBOut
 

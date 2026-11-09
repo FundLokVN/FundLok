@@ -6,7 +6,7 @@
 | **Owner** | Phat |
 | **Implementer(s)** | Phat (backend `app/market/`, frontend) |
 | **Module** | `app/market/investor_agreement/`, `app/market/funding.py`, `app/market/funding_router.py` |
-| **Version** | 1.3 (1.1: the master agreement is a digitally signed PDF, as for the SME; 1.2: each commitment's Annex is kept as a filled-in PDF and shown before paying; 1.3: commit first, so the agreement's Annex is filled in with the commitment's code and values, then sign, then pay) |
+| **Version** | 1.3 (1.1: the master agreement is a digitally signed PDF, as for the SME; 1.2: each commitment's Annex is kept as a filled-in PDF and shown before paying; 1.3: commit first, so the agreement's Annex is filled in with the commitment's code and values, then sign, then pay; 1.4: the signed copy is verified with NEAC and must be the investor's own) |
 | **Date** | 2026-11-08 |
 | **Related ADR** | ADR-009 |
 | **Depends on** | `docs/specs/direct_transfer/funding-window.md`, `docs/specs/direct_transfer/end-to-end-payment-flow.md` ("Contract structure"), `docs/specs/direct_transfer/fees.md` (investor fee formula), the SME Service Agreement step (`app/loans/agreement/`), Contract set v0.3 (5 Nov 2026, draft pending IBL review) |
@@ -23,7 +23,7 @@ Phat chose to sign it the way an SME signs its service agreement (Contract 2), w
 
 ## 2. Out of Scope
 
-- Validating the signature. The check is presence-only (`app/loans/agreement/signature.py`, a `/ByteRange` signature dictionary), exactly as for the SME. Certificate chain, signer identity and "is this the right document" are for staff review.
+- Validating the signature ourselves. The cryptographic verdict is NEAC's (rule 8); FundLok only reads it. A local presence check (`/ByteRange`) still refuses an unsigned file before asking NEAC.
 - An admin screen for the signed copies.
 - A digital signature on each commitment's Annex. It is filled in as a PDF and confirmed in-app (covered by the commitment's MockSigner-signed acceptance), not signed with the investor's own digital signature (Phat's choice, 9 Nov).
 - The Loan Contract (Contract 5) as its own document.
@@ -47,6 +47,10 @@ investor_service_agreements
   document_sha256  TEXT         NOT NULL  SHA-256 of the signed PDF as uploaded
   file_name        TEXT         NULL
   file_size_bytes  BIGINT       NOT NULL
+  signature_check  JSONB        NULL      NEAC's verdict when accepted (migration 0538f8bc779a): verified_by, checked_at,
+                                          signer, issuer, signed_time, certificate_validity, ocsp, crl, name_matches,
+                                          message, signatures (NEAC's raw answer)
+  signature_checked_at TIMESTAMPTZ NULL
   ip_address       TEXT         NULL
   user_agent       TEXT         NULL
   created_at       TIMESTAMPTZ  NOT NULL  DEFAULT now()
@@ -96,7 +100,7 @@ investment_confirmation:    {id, listing_id, sme_name, committed_amount_vnd, ann
 
 | Method and path | Purpose |
 |---|---|
-| `GET /funding/me/investor-agreement` | `InvestorAgreementOut {version, required, signed_at, signed_version, file_name, tranche_id, party_b}` |
+| `GET /funding/me/investor-agreement` | `InvestorAgreementOut {version, required, signed_at, signed_version, file_name, tranche_id, signature_check: {verified_by, checked_at, signer_name, signer_id, issuer_name, signed_time, name_matches} \| null, party_b}` |
 | `GET /funding/me/investor-agreement/document[?tranche_id=…][&download=true]` | The current version as a PDF, filled in with the investor's details and, with `tranche_id` (their own commitment, else 404), that commitment's code and Annex; without it, the Annex is the blank template. `inline` or `attachment`, `no-store`. Generated each time, never stored. File name `FundLok-hop-dong-dich-vu-nha-dau-tu-{REF}[-{CODE}]-{VERSION}.pdf`. |
 | `POST /funding/me/investor-agreement` (multipart `file`, `version`, `tranche_id`) | 201 with `InvestorAgreementOut`. Needs the eligible-investor gate (KYC and approved bank account) and the investor's own live commitment. Keeps that commitment's Annex and opens its payment details. Audited as `INVESTOR_AGREEMENT_SIGNED`. |
 | `GET /funding/me/investor-agreement/signed[?download=true]` | The signed copy of the current version, byte for byte. 404 when none. |
@@ -115,10 +119,29 @@ None new. The agreement is either required (no row for the current version) or s
 1. **Text and version.** The text lives in `app/market/investor_agreement/text.py`, verbatim from Contract set v0.3. `VERSION` is printed on every page. Bump it whenever a word changes, and every investor signs the new text before their next commitment. The frontend has no copy of the text; it sends back the version the status gave it.
 2. **PDF.** The same renderer as the SME agreement (fpdf2, embedded Be Vietnam Pro). Party B comes from the approved payout account (holder type and bank details) and the verified profile. `INDIVIDUAL`: eKYC full name and ID number, plus the OCR address if any. `ENTITY`: KYB business name, enterprise code and address. The fallback name is the account's full name. Unknown values print as dotted blanks. Generated for a commitment, the Annex shows "Mã cam kết / Commitment: {code}" and all six rows filled in, with a note that later commitments are confirmed on the platform. Without one, it is the blank template.
 3. **Commit first.** `reserve_and_accept` makes a first commitment without the agreement: the amount is held (2-hour hold), the commitment gets its reference code, and the acceptance (investing terms plus the Annex values) is signed in-app. No money moves.
-4. **Upload checks**, in order: size at most 10 MB; the commitment is the investor's own (404); `version` equals `VERSION`; the file is a PDF; it carries a digital signature; no signed copy of this version is on file (409 `INVESTOR_AGREEMENT_ALREADY_SIGNED`); the commitment's hold has not lapsed (409 `HOLD_EXPIRED`). It is stored as evidence, a row is written with the commitment and Party B, and that commitment's Annex is kept (rule 6).
+4. **Upload checks**, in order:
+   - size at most 10 MB;
+   - the commitment is the investor's own (404);
+   - `version` equals `VERSION`;
+   - the file is a PDF carrying a digital signature;
+   - no signed copy of this version is on file (409 `INVESTOR_AGREEMENT_ALREADY_SIGNED`);
+   - the commitment's hold has not lapsed (409 `HOLD_EXPIRED`);
+   - it is this commitment's agreement: its text carries the commitment code and `VERSION` (422 `INVESTOR_AGREEMENT_WRONG_DOCUMENT`);
+   - NEAC accepts the signature (rule 8);
+   - the accepted signature is the investor's.
+
+   Only then is it stored as evidence, a row written with the commitment, Party B and NEAC's verdict, and that commitment's Annex kept (rule 6).
 5. **Payment gate.** `GET /funding/tranches/{id}/payment` is refused (409 `INVESTOR_AGREEMENT_REQUIRED`) while the investor has no signed copy of `VERSION`. Receipt upload is not gated, so money already sent still reaches staff.
 6. **Annex per commitment.** Before the payment details exist (for a later commitment when the investor agrees; for the first, when the agreement signed with it is uploaded), the server fills in the Annex (`pdf.render_annex`: commitment reference, the agreement version and signing date, both parties, the six rows, Article 7, the confirmation time in Vietnam time), stores the PDF as evidence and writes an `investment_confirmations` row. The commitment's signed acceptance names the row and the PDF's hash. A replayed reservation reuses the row. The transfer step shows it above the QR, with View and Download.
 7. **One signature per version.** There is no replacement: a wrong file is for staff review.
+8. **NEAC verification** (`app/market/investor_agreement/neac.py`). The signed PDF is posted to NEAC's public verification, `POST https://neac.gov.vn/vi/Home/VerifyFileByNeac` (multipart `file`; the endpoint behind "Kiểm tra văn bản ký số" on neac.gov.vn, which has no published contract). A signature is accepted only when:
+   - `intact` reads "Không bị thay đổi";
+   - `validity` reads "Hợp lệ…";
+   - `reasonInvalidity` is empty;
+   - neither `ocsp` nor `crl` reports a revocation.
+
+   Otherwise 422 `INVESTOR_AGREEMENT_SIGNATURE_INVALID`, with NEAC's own words in the detail. NEAC's wording is read conservatively, so a change in it fails closed. If NEAC cannot be reached, or answers something else: 503 `NEAC_UNAVAILABLE`, and nothing is accepted unchecked. Timeout 45 s (`NEAC_VERIFY_TIMEOUT_SECONDS`); the URL can be overridden with `NEAC_VERIFY_URL`.
+9. **The signer is the investor.** The accepted signature's certificate ID (NEAC's `signer.mst` / `signer.cccd`, e.g. "MST:1501167629", "CCCD:079…") must carry the investor's eKYC ID number (individual) or KYB enterprise code (organisation). Otherwise 422 `INVESTOR_AGREEMENT_SIGNER_MISMATCH`. The name is compared too and recorded (`name_matches`), but does not refuse.
 
 ## 7. Error Cases
 
@@ -128,6 +151,10 @@ None new. The agreement is either required (no row for the current version) or s
 | Upload for a commitment that is not the investor's | 404 | — |
 | Upload after the commitment's hold lapsed | 409 | `HOLD_EXPIRED` |
 | Upload when this version is already signed | 409 | `INVESTOR_AGREEMENT_ALREADY_SIGNED` |
+| Not this commitment's agreement (code or version missing from its text) | 422 | `INVESTOR_AGREEMENT_WRONG_DOCUMENT` |
+| NEAC does not accept the signature (changed, invalid, revoked, none) | 422 | `INVESTOR_AGREEMENT_SIGNATURE_INVALID` |
+| A valid signature, but not the investor's ID | 422 | `INVESTOR_AGREEMENT_SIGNER_MISMATCH` |
+| NEAC unreachable or unreadable answer | 503 | `NEAC_UNAVAILABLE` |
 | Upload names another version | 409 | `INVESTOR_AGREEMENT_OUTDATED` |
 | Upload is not a PDF | 415 | `UNSUPPORTED_TYPE` |
 | PDF with no digital signature (e.g. FundLok's own download sent straight back) | 422 | `INVESTOR_AGREEMENT_UNSIGNED` |
@@ -143,6 +170,11 @@ Tests: `tests/market/test_investor_service_agreement.py`.
 - [x] `test_the_agreement_pdf_is_filled_in_with_the_investor_and_the_commitments_annex`
 - [x] `test_uploading_the_signed_agreement_keeps_the_first_annex_and_opens_payment`
 - [x] `test_the_unsigned_agreement_sent_straight_back_is_refused`
+- [x] `test_neac_must_accept_the_signature`
+- [x] `test_the_valid_signature_must_be_the_investors`
+- [x] `test_only_this_commitments_agreement_is_taken`
+- [x] `test_nothing_is_accepted_unchecked_when_neac_is_down`
+- [x] `test_an_organisation_signs_with_its_enterprise_certificate`
 - [x] `test_only_a_pdf_of_the_current_version_is_taken`
 - [x] `test_the_agreement_is_signed_with_the_investors_own_live_commitment`
 - [x] `test_the_agreement_is_signed_once_per_version`
@@ -162,7 +194,8 @@ Frontend (`app/(app)/dashboard/invest/`): a first-time investor gets 1 Số ti�
 | # | Question | Owner |
 |---|---|---|
 | 1 | GVerify's eKYC OCR returns no address, so an individual's Party B address is blank. Ask the investor for it, or get it from GVerify? | Phat / Edward |
-| 2 | Validate signatures (pyHanko: certificate chain, signer name against the eKYC name) instead of the presence check? | Edward |
+| 2 | NEAC's verification endpoint has no published contract or SLA. Ask NEAC for an official API or agreement before launch, and decide whether a NEAC outage should keep blocking first investments (today: 503, try again). | Lok / Edward |
+| 2a | Privacy: the investor's signed agreement (name, ID number, address, bank account) is sent to NEAC for the check. The data-processing consent (Contract 1 Art. 10) must cover it. | IBL |
 | 3 | Staff review of signed copies: an admin view, and what happens to a copy found to be wrong after a commitment. | Phat |
 | 4 | "Expected Disbursement Date" in the Annex is the hold's last ICT day (pay within the 2-hour hold). It changes with commit-then-accept. | Edward |
 | 5 | Do individual investors realistically hold a digital signature? If not, the platform's remote-signing vendor (funding-window.md rule 1) is needed before launch. | Lok / Edward |
