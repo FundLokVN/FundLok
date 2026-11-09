@@ -1,5 +1,6 @@
 """Verifying a signed agreement with NEAC, the National Electronic Authentication Centre (Trung tâm Chứng thực điện
-tử quốc gia), the authority that recognises Vietnam's digital-signature providers.
+tử quốc gia), the authority that recognises Vietnam's digital-signature providers. Used for the investor's
+agreement (service.py) and for the SME Service Agreement staff review (app/loans/agreement/neac_check.py).
 
 NEAC's public "Kiểm tra văn bản ký số" (https://neac.gov.vn/vi) posts the file to POST /vi/Home/VerifyFileByNeac
 (multipart `file`) and answers JSON:

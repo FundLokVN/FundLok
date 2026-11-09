@@ -14,6 +14,7 @@ from sqlalchemy.sql import Select
 from fastapi import BackgroundTasks, HTTPException
 
 from app.admin.schemas import (
+    AdminSignatureCheck,
     AdminPaymentAccountOut,
     ActorOut,
     AdminDecision,
@@ -485,13 +486,26 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
     kyb = await _latest_kyb_for_project(db, project_id)
     registration_verified = bool(kyb and kyb.is_approved)
 
+    # The newest NEAC check of each signed Service Agreement, in one query.
+    from app.loans.agreement import neac_check
+
+    checks = await neac_check.latest_checks(
+        db, [d.id for r in rows for d in r.documents if d.document_type == neac_check.DOCUMENT_TYPE]
+    )
+
     def _row(application) -> AdminLoanApplicationRow:
         out = AdminLoanApplicationRow.model_validate(application)
         out = out.model_copy(
             update={
                 "missing_documents": missing_documents(
                     application.documents, registration_verified=registration_verified
-                )
+                ),
+                "documents": [
+                    d.model_copy(update={"signature_check": AdminSignatureCheck.from_verdict(checks[d.id])})
+                    if d.id in checks
+                    else d
+                    for d in out.documents
+                ],
             }
         )
         run = latest_runs.get(application.id)

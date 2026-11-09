@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin import funding as admin_funding
@@ -10,6 +10,7 @@ from app.admin import repayments as admin_repayments
 from app.admin import service
 from app.admin.access_log import audit_admin_read
 from app.admin.schemas import (
+    AdminSignatureCheck,
     AdminFundingActivityOut,
     AdminFundingRoundOut,
     AdminInvestorTransferOut,
@@ -321,6 +322,32 @@ async def get_document_url(
 ):
     """A 10-minute read URL for an uploaded application document. Admin-only."""
     return await service.get_document_url(db, document_id)
+
+
+@router.post("/documents/{document_id}/neac-check", response_model=AdminSignatureCheck)
+async def check_document_with_neac(
+    document_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Check the SME's signed Service Agreement (wizard step 4) with NEAC, and record the verdict: NEAC's own
+    verification (valid, unchanged, not revoked), whether it is this application's agreement, and whether the
+    signer's MST is the company's. Admin-only; the SME is not held up by it. Takes a few seconds."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    from app.lending.models import LoanApplicationDocument
+    from app.loans.agreement import neac_check
+
+    document = await db.get(LoanApplicationDocument, document_id)
+    if document is None or document.document_type != neac_check.DOCUMENT_TYPE:
+        raise HTTPException(status_code=404, detail="No signed service agreement with this id")
+    if document.status != "UPLOADED":
+        raise HTTPException(status_code=409, detail="The signed service agreement has not finished uploading")
+    verdict = await neac_check.check_sme_agreement(
+        db, document=document, actor_id=current_user.id, now=_dt.now(_tz.utc)
+    )
+    await db.commit()
+    return AdminSignatureCheck.from_verdict(verdict)
 
 
 @router.get(

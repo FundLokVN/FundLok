@@ -485,6 +485,61 @@ class AdminKycImageUrlResponse(BaseModel):
     content_type: str
 
 
+class AdminSignatureCheck(BaseModel):
+    """The SME's signed Service Agreement as NEAC and FundLok's own checks found it (app/loans/agreement/neac_check).
+
+    status: VERIFIED (NEAC accepts the signature) | INVALID (NEAC does not; `problems` in its words) |
+    NO_SIGNATURE (NEAC found none) | UNAVAILABLE (NEAC could not be reached; check again).
+    right_document: the PDF carries this application's reference and the agreement version.
+    signer_matches: the certificate's MST is the company's (`expected_tax_code`, from its KYB or the project).
+    """
+
+    status: str
+    checked_at: datetime
+    right_document: bool
+    application_ref: str
+    agreement_version: str
+    signer_matches: bool
+    name_matches: bool
+    expected_tax_code: str | None = None
+    expected_name: str | None = None
+    expected_source: str | None = None  # KYB | PROJECT
+    signer_name: str | None = None
+    signer_id: str | None = None  # as on the certificate, e.g. "MST:1501167629"
+    issuer_name: str | None = None
+    signed_time: str | None = None
+    certificate_validity: str | None = None
+    ocsp: str | None = None
+    crl: str | None = None
+    problems: list[str] = []
+    neac_message: str | None = None
+
+    @classmethod
+    def from_verdict(cls, verdict: dict) -> "AdminSignatureCheck":
+        signer, issuer = verdict.get("signer") or {}, verdict.get("issuer") or {}
+        return cls(
+            status=verdict["status"],
+            checked_at=verdict["checked_at"],
+            right_document=bool(verdict.get("right_document")),
+            application_ref=verdict.get("application_ref") or "",
+            agreement_version=verdict.get("agreement_version") or "",
+            signer_matches=bool(verdict.get("signer_matches")),
+            name_matches=bool(verdict.get("name_matches")),
+            expected_tax_code=verdict.get("expected_tax_code"),
+            expected_name=verdict.get("expected_name"),
+            expected_source=verdict.get("expected_source"),
+            signer_name=signer.get("cn"),
+            signer_id=signer.get("mst") or signer.get("cccd"),
+            issuer_name=issuer.get("cn"),
+            signed_time=verdict.get("signed_time"),
+            certificate_validity=verdict.get("certificate_validity"),
+            ocsp=verdict.get("ocsp"),
+            crl=verdict.get("crl"),
+            problems=list(verdict.get("problems") or []),
+            neac_message=verdict.get("neac_message"),
+        )
+
+
 class AdminApplicationDocument(BaseModel):
     """One file the SME uploaded on the loan-application wizard.
 
@@ -504,6 +559,8 @@ class AdminApplicationDocument(BaseModel):
     file_size_bytes: int | None
     status: str
     uploaded_at: datetime | None
+    # The signed Service Agreement only: the newest NEAC check, null until one has run.
+    signature_check: AdminSignatureCheck | None = None
 
     model_config = {"from_attributes": True}
 
