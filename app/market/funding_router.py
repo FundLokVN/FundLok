@@ -47,6 +47,7 @@ from app.market import funding
 from app.market.emails import receipt_notice, send_investment_receipt_email
 from app.market.funding import expire_lapsed_holds, reserve_and_accept
 from app.market.investor_agreement import service as investor_agreement
+from app.market.investor_agreement.models import InvestorServiceAgreement
 from app.market.portfolio import business_analytics, business_transactions, investor_analytics, investor_transactions
 from app.market.projection import project_ticket, sum_by_day
 from app.market.schemas import (
@@ -56,6 +57,7 @@ from app.market.schemas import (
     InvestorAnalyticsOut,
     InvestorTrancheOut,
     PartyBOut,
+    SignedInvestmentConfirmationOut,
     ReportMissingCreate,
     ReservationCreate,
     SmeRepaymentPlanOut,
@@ -304,6 +306,60 @@ async def read_investment_confirmation(
         db, window=window, amount_vnd=amount_vnd, pay_by=_now() + dt.timedelta(hours=DEFAULT_PARAMS.hold_hours)
     )
     return InvestmentConfirmationOut.model_validate(confirmation, from_attributes=True)
+
+
+async def _own_confirmation(db: AsyncSession, tranche_id: UUID, investor_id: UUID):
+    confirmation = await investor_agreement.confirmation_for(db, tranche_id)
+    if confirmation is None or confirmation.investor_id != investor_id:
+        raise HTTPException(status_code=404, detail="No investment confirmation for this ticket")
+    return confirmation
+
+
+@router.get("/tranches/{tranche_id}/investment-confirmation", response_model=SignedInvestmentConfirmationOut)
+async def read_signed_investment_confirmation(
+    tranche_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The Investment Confirmation (Annex) the investor confirmed with this commitment, as filled in then. Their
+    own tickets only; 404 for one made before confirmations were kept."""
+    confirmation = await _own_confirmation(db, tranche_id, current_user.id)
+    tranche = await db.get(Tranche, tranche_id)
+    agreement = await db.get(InvestorServiceAgreement, confirmation.agreement_id)
+    return SignedInvestmentConfirmationOut(
+        id=confirmation.id,
+        tranche_id=confirmation.tranche_id,
+        reference_code=tranche.reference_code,
+        listing_id=confirmation.listing_id,
+        listing_ref=str(confirmation.listing_id).split("-")[0].upper(),
+        sme_name=confirmation.sme_name,
+        amount_vnd=confirmation.amount_vnd,
+        annual_rate_pct=confirmation.annual_rate_pct,
+        term_months=confirmation.term_months,
+        service_fee_vnd=confirmation.service_fee_vnd,
+        service_fee_bps_per_year=confirmation.service_fee_bps_per_year,
+        expected_disbursement_date=confirmation.expected_disbursement_date,
+        confirmed_at=confirmation.confirmed_at,
+        agreement_version=agreement.version,
+    )
+
+
+@router.get(
+    "/tranches/{tranche_id}/investment-confirmation/document",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def read_signed_investment_confirmation_document(
+    tranche_id: UUID,
+    download: bool = Query(False, description="true: as an attachment, to save"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The filled-in Investment Confirmation PDF kept for this commitment, exactly as stored."""
+    confirmation = await _own_confirmation(db, tranche_id, current_user.id)
+    tranche = await db.get(Tranche, tranche_id)
+    content = await funding.evidence_storage().get(confirmation.file_key, max_bytes=DEFAULT_PARAMS.max_evidence_bytes)
+    return _pdf_response(content, f"FundLok-xac-nhan-dau-tu-{tranche.reference_code}.pdf", download)
 
 
 @router.get("/tranches/{tranche_id}/payment", response_model=PaymentOut)

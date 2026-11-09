@@ -15,7 +15,7 @@ the text (text.VERSION) asks every investor to sign again: a new row, the old on
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Index, Text, func
+from sqlalchemy import BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.core.base import Base
@@ -48,4 +48,37 @@ class InvestorServiceAgreement(Base):
     file_size_bytes = Column(BigInteger, nullable=False)
     ip_address = Column(Text, nullable=True)
     user_agent = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now, server_default=func.now())
+
+
+class SignedInvestmentConfirmation(Base):
+    """One commitment's Investment Confirmation (the agreement's Annex), filled in and confirmed in-app.
+
+    Made when the investor agrees to a commitment, before the payment details are shown: the Annex values, the
+    filled-in PDF kept as evidence, and the master agreement it is part of (Contract 4 Art. 7). The commitment's
+    signed acceptance names it by id and the PDF's hash, so the in-app signature covers it. Insert-only, one per
+    tranche.
+    """
+
+    __tablename__ = "investment_confirmations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tranche_id = Column(UUID(as_uuid=True), ForeignKey("tranches.id", ondelete="RESTRICT"), nullable=False, unique=True)
+    investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    agreement_id = Column(
+        UUID(as_uuid=True), ForeignKey("investor_service_agreements.id", ondelete="RESTRICT"), nullable=False
+    )
+    # The Annex rows, as printed.
+    listing_id = Column(UUID(as_uuid=True), ForeignKey("listings.id", ondelete="RESTRICT"), nullable=False)
+    sme_name = Column(Text, nullable=False)
+    amount_vnd = Column(BigInteger, nullable=False)
+    annual_rate_pct = Column(Numeric(6, 3), nullable=False)
+    term_months = Column(Integer, nullable=False)
+    service_fee_vnd = Column(BigInteger, nullable=False)  # P × 2.5% × M / 12, before VAT
+    service_fee_bps_per_year = Column(Integer, nullable=False)
+    expected_disbursement_date = Column(Date, nullable=False)
+    # The filled-in PDF in evidence storage, and its SHA-256.
+    file_key = Column(Text, nullable=False)
+    document_sha256 = Column(Text, nullable=False)
+    confirmed_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now, server_default=func.now())

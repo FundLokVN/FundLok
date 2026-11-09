@@ -107,6 +107,28 @@ class InvestmentConfirmationOut(BaseModel):
     expected_disbursement_date: dt.date
 
 
+class SignedInvestmentConfirmationOut(BaseModel):
+    """One commitment's Investment Confirmation as filled in and confirmed when the investor agreed to it."""
+
+    id: UUID
+    tranche_id: UUID
+    # The commitment's reference code (its transfer memo too).
+    reference_code: str
+    listing_id: UUID
+    listing_ref: str
+    sme_name: str
+    amount_vnd: int
+    annual_rate_pct: Decimal
+    term_months: int
+    # P × 2.5% × M / 12, before VAT.
+    service_fee_vnd: int
+    service_fee_bps_per_year: int
+    expected_disbursement_date: dt.date
+    confirmed_at: dt.datetime
+    # The Investor Service Agreement version it is part of.
+    agreement_version: str
+
+
 class InvestorTrancheOut(TrancheOut):
     """An investor's own ticket. Adds when they uploaded their transfer receipt (null until they do, so the page
     knows whether to ask for one) and, in their list, the project it is in and its loan term in months."""

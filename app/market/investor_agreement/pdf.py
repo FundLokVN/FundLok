@@ -8,7 +8,8 @@ Be Vietnam Pro embedded so the Vietnamese renders the same everywhere, and
 anything the platform does not know printed as a dotted blank.
 """
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal
 
 from fpdf import FPDF
 
@@ -27,6 +28,48 @@ class AgreementData:
     address: str | None
     bank_account: str | None
     bank_name: str | None
+
+
+@dataclass(frozen=True)
+class AnnexData:
+    """One commitment's Investment Confirmation, every value known."""
+
+    commitment_ref: str  # the tranche's reference code, also its transfer memo
+    investor_name: str | None
+    investor_id_number: str | None
+    agreement_version: str
+    agreement_signed_on: date
+    listing_ref: str
+    sme_name: str
+    amount_vnd: int
+    annual_rate_pct: Decimal
+    term_months: int
+    service_fee_vnd: int
+    expected_disbursement_date: date
+    confirmed_at: datetime  # already in Vietnam time
+
+
+def vi_number(value) -> str:
+    """20000000 -> "20.000.000", Decimal("13.750") -> "13,75": the contract's own way of writing numbers."""
+    d = Decimal(str(value)).normalize()
+    whole, _, frac = f"{d:f}".partition(".")
+    whole = f"{int(whole):,}".replace(",", ".")
+    return f"{whole},{frac}" if frac else whole
+
+
+def annex_rows(data: AnnexData) -> list[tuple[str, str]]:
+    """The Annex rows, filled in, under the template's own labels."""
+    labels = [label for label, _ in text.ANNEX_ROWS]
+    rate, months = vi_number(data.annual_rate_pct), data.term_months
+    values = [
+        data.listing_ref,
+        data.sme_name,
+        f"{vi_number(data.amount_vnd)} VND",
+        f"{rate}%/năm, {months} tháng / {rate}% a year, {months} months",
+        f"P × 2,5% × M / 12 = {vi_number(data.service_fee_vnd)} VND + VAT",
+        data.expected_disbursement_date.strftime("%d/%m/%Y"),
+    ]
+    return list(zip(labels, values))
 
 
 def _or_blank(value, blank: str = text.BLANK) -> str:
@@ -48,9 +91,9 @@ def party_b(data: AgreementData) -> tuple[str, str]:
 
 
 class _AgreementPDF(FPDF):
-    def __init__(self, data: AgreementData):
+    def __init__(self, footer_label: str):
         super().__init__(format="A4")
-        self.data = data
+        self.footer_label = footer_label
         for style, name in (("", "Regular"), ("B", "Bold"), ("I", "Italic"), ("BI", "BoldItalic")):
             self.add_font(FAMILY, style=style, fname=str(FONT_DIR / f"BeVietnamPro-{name}.ttf"))
         self.set_margins(left=20, top=18, right=20)
@@ -64,15 +107,14 @@ class _AgreementPDF(FPDF):
         self.cell(
             0,
             5,
-            f"{text.VERSION} · Mã nhà đầu tư / Investor {self.data.investor_ref} · "
-            f"Trang {self.page_no()}/{{nb}}",
+            f"{text.VERSION} · {self.footer_label} · Trang {self.page_no()}/{{nb}}",
             align="C",
         )
         self.set_text_color(0, 0, 0)
 
 
 def render(data: AgreementData) -> bytes:
-    pdf = _AgreementPDF(data)
+    pdf = _AgreementPDF(f"Mã nhà đầu tư / Investor {data.investor_ref}")
     pdf.set_title(f"{text.TITLE[0]} / {text.TITLE[1]}")
     pdf.set_author("FundLok")
     pdf.set_subject(f"{text.VERSION} – {data.name or ''}".strip(" –"))
@@ -168,4 +210,73 @@ def render(data: AgreementData) -> bytes:
         pdf.set_font(FAMILY, style="I", size=8.5)
         pdf.multi_cell(half - 4, 4.5, who, align="C", new_x="LEFT", new_y="NEXT")
 
+    return bytes(pdf.output())
+
+
+def render_annex(data: AnnexData) -> bytes:
+    """One commitment's Investment Confirmation, filled in: kept as evidence when the investor agrees, and the copy
+    they can open before paying."""
+    pdf = _AgreementPDF(f"Mã cam kết / Commitment {data.commitment_ref}")
+    pdf.set_title(text.ANNEX_TITLE)
+    pdf.set_author("FundLok")
+    pdf.set_subject(f"{data.agreement_version} – {data.commitment_ref}")
+    pdf.add_page()
+
+    def para(body: str, *, style: str = "", size: float = 10, grey: bool = False, markdown: bool = False):
+        pdf.set_font(FAMILY, style=style, size=size)
+        if grey:
+            pdf.set_text_color(70, 70, 70)
+        pdf.multi_cell(0, 5.2, body, markdown=markdown, align="L", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(0, 0, 0)
+
+    pdf.set_font(FAMILY, style="B", size=14)
+    pdf.multi_cell(0, 7, text.ANNEX_TITLE, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(1.5)
+    pdf.set_font(FAMILY, size=8.5)
+    pdf.set_text_color(100, 100, 100)
+    pdf.multi_cell(
+        0,
+        4.5,
+        f"Mã cam kết / Commitment: {data.commitment_ref}   ·   Phiên bản / Version: {data.agreement_version}",
+        align="L",
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(2.5)
+
+    signed_on = data.agreement_signed_on.strftime("%d/%m/%Y")
+    para(text.ANNEX_PART_OF[0].format(version=data.agreement_version, signed_on=signed_on))
+    para(text.ANNEX_PART_OF[1].format(version=data.agreement_version, signed_on=signed_on), style="I", size=9.5,
+         grey=True)
+    pdf.ln(2)
+    para(text.ANNEX_PARTY_A, markdown=True)
+    para(
+        text.ANNEX_PARTY_B.format(
+            name=_or_blank(data.investor_name, text.BLANK_NAME), code=_or_blank(data.investor_id_number)
+        ),
+        markdown=True,
+    )
+    pdf.ln(3)
+
+    pdf.set_font(FAMILY, size=9.5)
+    with pdf.table(col_widths=(70, 100), text_align="LEFT", line_height=5.5, padding=1.6) as table:
+        header = table.row()
+        header.cell("Mục / Item")
+        header.cell("Giá trị / Value")
+        for label, value in annex_rows(data):
+            row = table.row()
+            row.cell(label)
+            row.cell(value)
+    pdf.ln(3)
+
+    # Article 7: what this confirmation is and when it takes effect.
+    art7_vi, art7_en = dict(text.ARTICLES)["Điều 7. Xác nhận đầu tư / Investment Confirmation"][0]
+    para(art7_vi)
+    para(art7_en, style="I", size=9.5, grey=True)
+    pdf.ln(5)
+
+    at = data.confirmed_at.strftime("%H:%M %d/%m/%Y")
+    para(text.ANNEX_CONFIRMED[0].format(at=at), style="B", size=9.5)
+    para(text.ANNEX_CONFIRMED[1].format(at=at), style="I", size=9, grey=True)
     return bytes(pdf.output())

@@ -19,7 +19,7 @@ from app.gverify.models import STATUS_APPROVED, GVerifyKybVerification, GVerifyV
 from app.lending.models import AuditLog, Project
 from app.market.funding import INVESTOR_TERMS_VERSION
 from app.market.investor_agreement import service as investor_agreement
-from app.market.investor_agreement.models import InvestorServiceAgreement
+from app.market.investor_agreement.models import InvestorServiceAgreement, SignedInvestmentConfirmation
 from conftest import SIGNED_AGREEMENT_PDF
 from tests.market.test_funding_flow import _open_project
 
@@ -266,6 +266,9 @@ async def test_the_first_commitment_goes_through_once_the_signed_agreement_is_in
         "document_sha256": signature.document_sha256,
     }
     assert acceptance["investment_confirmation"]["committed_amount_vnd"] == 20_000_000
+    confirmation = (await db_session.execute(select(SignedInvestmentConfirmation))).scalar_one()
+    assert acceptance["investment_confirmation"]["id"] == str(confirmation.id)
+    assert acceptance["investment_confirmation"]["document_sha256"] == confirmation.document_sha256
     audit = (await db_session.execute(select(AuditLog).where(AuditLog.action == "INVESTMENT_RESERVED"))).scalar_one()
     assert audit.after_state["investor_agreement_id"] == str(signature.id)
     assert audit.after_state["investor_agreement_version"] == VERSION
@@ -293,7 +296,8 @@ async def test_a_later_commitment_signs_only_its_investment_confirmation(
     [acceptance] = signed_documents
     assert acceptance["investor_service_agreement"]["id"] == str(signature.id)
     project = await db_session.get(Project, second["project"])
-    assert acceptance["investment_confirmation"] | {"expected_disbursement_date": None} == {
+    unstable = {"expected_disbursement_date": None, "id": None, "document_sha256": None}
+    assert acceptance["investment_confirmation"] | unstable == {
         "listing_id": str(second_listing),
         "sme_name": project.legal_name,
         "committed_amount_vnd": 15_000_000,
@@ -301,8 +305,101 @@ async def test_a_later_commitment_signs_only_its_investment_confirmation(
         "term_months": 3,
         "expected_service_fee_vnd": 93_750,  # 15,000,000 × 2.5% × 3 / 12
         "service_fee_bps_per_year": 250,
-        "expected_disbursement_date": None,
+        **unstable,
     }
+    # Each commitment keeps its own filled-in Annex.
+    confirmations = (await db_session.execute(select(SignedInvestmentConfirmation))).scalars().all()
+    assert sorted(c.amount_vnd for c in confirmations) == [10_000_000, 15_000_000]
+
+
+async def test_each_commitment_keeps_its_filled_in_investment_confirmation_before_payment(
+    client, db_session, make_admin, make_user, make_eligible_investor, storage, signed_documents
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id, listing_id = setup["window"].id, setup["window"].listing_id
+    project = await db_session.get(Project, setup["project"])
+    sme_name = project.legal_name
+    investor = await _verified_investor(db_session, make_user, make_eligible_investor)
+    assert (await _upload(client, investor)).status_code == 201
+    signed_documents.clear()
+
+    tranche = (await _reserve(client, investor, window_id, 20_000_000)).json()
+
+    # Kept when the investor agreed: the values, the PDF and the agreement it is part of.
+    [signature] = await _signatures(db_session, investor)  # also expires what the session held
+    row = (await db_session.execute(select(SignedInvestmentConfirmation))).scalar_one()
+    assert str(row.tranche_id) == tranche["id"] and row.agreement_id == signature.id
+    assert (row.listing_id, row.sme_name, row.amount_vnd, str(row.annual_rate_pct), row.term_months) == (
+        listing_id, sme_name, 20_000_000, "16.000", 4
+    )
+    assert row.service_fee_vnd == 166_666 and row.service_fee_bps_per_year == 250
+    # The in-app signature covers it: the signed acceptance names the record and the PDF's hash.
+    [acceptance] = signed_documents
+    assert acceptance["investment_confirmation"]["id"] == str(row.id)
+    assert acceptance["investment_confirmation"]["document_sha256"] == row.document_sha256
+
+    # What the investor opens on the transfer step, before paying.
+    shown = await client.get(f"/funding/tranches/{tranche['id']}/investment-confirmation", headers=investor["headers"])
+    assert shown.status_code == 200, shown.text
+    body = shown.json()
+    assert body["reference_code"] == tranche["reference_code"]
+    assert body["listing_ref"] == str(listing_id).split("-")[0].upper()
+    assert body["sme_name"] == sme_name and body["amount_vnd"] == 20_000_000
+    assert body["annual_rate_pct"] == "16.000" and body["term_months"] == 4 and body["service_fee_vnd"] == 166_666
+    assert body["agreement_version"] == VERSION
+    assert body["expected_disbursement_date"] == row.expected_disbursement_date.isoformat()
+
+    pdf = await client.get(
+        f"/funding/tranches/{tranche['id']}/investment-confirmation/document", headers=investor["headers"]
+    )
+    assert pdf.status_code == 200 and pdf.headers["content-type"] == "application/pdf"
+    assert pdf.content == storage.objects[row.file_key][0]
+    assert tranche["reference_code"] in pdf.headers["content-disposition"]
+    text_ = _pdf_text(pdf.content)
+    for expected in (
+        "Phụ lục – Xác nhận đầu tư",
+        tranche["reference_code"],
+        str(listing_id).split("-")[0].upper(),
+        sme_name,
+        "20.000.000 VND",
+        "16%/năm, 4 tháng",
+        "P × 2,5% × M / 12 = 166.666 VND + VAT",
+        row.expected_disbursement_date.strftime("%d/%m/%Y"),
+        "NGUYEN VAN A",
+        "079203001234",
+        VERSION,
+    ):
+        assert expected in text_, expected
+
+
+async def test_replaying_a_commitment_keeps_one_investment_confirmation(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    key = str(uuid.uuid4())
+
+    first = await _reserve(client, investor, window_id, key=key)
+    again = await _reserve(client, investor, window_id, key=key)
+
+    assert first.status_code == 201 and again.status_code == 201
+    assert len((await db_session.execute(select(SignedInvestmentConfirmation))).scalars().all()) == 1
+
+
+async def test_only_the_investor_who_committed_sees_its_investment_confirmation(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    other = await make_eligible_investor(await make_user(role="INVESTOR"))
+    tranche_id = (await _reserve(client, investor, setup["window"].id)).json()["id"]
+
+    for path in (f"/funding/tranches/{tranche_id}/investment-confirmation",
+                 f"/funding/tranches/{tranche_id}/investment-confirmation/document"):
+        assert (await client.get(path, headers=other["headers"])).status_code == 404, path
+        assert (await client.get(path, headers=setup["sme"]["headers"])).status_code == 403, path
+    unknown = await client.get(f"/funding/tranches/{uuid.uuid4()}/investment-confirmation", headers=investor["headers"])
+    assert unknown.status_code == 404
 
 
 async def test_a_wrong_file_can_be_replaced_until_a_commitment_is_made_under_it(

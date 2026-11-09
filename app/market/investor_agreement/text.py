@@ -260,6 +260,21 @@ ANNEX_ROWS = (
     ("Ngày giải ngân dự kiến / Expected Disbursement Date", "{blank}"),
 )
 
+# The filled-in Annex of one commitment (pdf.render_annex). Not contract text beyond the Article 7 clause it quotes.
+ANNEX_PART_OF = (
+    "Phụ lục này là một phần của Hợp đồng dịch vụ dành cho Nhà đầu tư, phiên bản {version}, Bên B đã ký số ngày "
+    "{signed_on}.",
+    "This Annex forms part of the Investor Service Agreement, version {version}, digitally signed by Party B on "
+    "{signed_on}.",
+)
+ANNEX_PARTY_A = "**Bên A – FundLok:** Công ty Cổ phần FundLok, mã số doanh nghiệp 1501167629."
+ANNEX_PARTY_B = "**Bên B – Nhà đầu tư:** {name}, số định danh cá nhân / mã số doanh nghiệp {code}."
+ANNEX_CONFIRMED = (
+    "Bên B xác nhận điện tử trên nền tảng FundLok lúc {at} (giờ Việt Nam), cùng lúc chấp nhận Hợp đồng cho vay.",
+    "Party B confirmed electronically on the FundLok platform at {at} (Vietnam time), together with accepting the "
+    "Loan Contract.",
+)
+
 # Not contract text: says how the Annex above gets its values.
 ANNEX_NOTE = (
     "Ghi chú: Phụ lục được điền và xác nhận trên nền tảng tại mỗi lần cam kết.",

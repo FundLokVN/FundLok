@@ -347,8 +347,9 @@ async def reserve_and_accept(
     if tranche.status == "EXPIRED":
         raise conflict("HOLD_EXPIRED", "The reservation hold has expired; reserve again")
     window = await db.get(FundingWindow, tranche.window_id)
-    confirmation = await investor_agreement.investment_confirmation(
-        db, window=window, amount_vnd=tranche.amount_vnd, pay_by=tranche.hold_expires_at, params=params
+    # The Annex, filled in and kept (PDF and record) before the payment details exist.
+    confirmation = await investor_agreement.record_confirmation(
+        db, tranche=tranche, window=window, agreement=agreement, storage=evidence_storage(), now=now, params=params
     )
     # What the investor signs: the terms they read, by version, the ticket they are taking, its Investment
     # Confirmation, and the master agreement it falls under.
@@ -362,7 +363,7 @@ async def reserve_and_accept(
                 "signed_at": agreement.signed_at.isoformat(),
                 "document_sha256": agreement.document_sha256,
             },
-            "investment_confirmation": confirmation.as_document(),
+            "investment_confirmation": investor_agreement.confirmation_document(confirmation),
             "window_id": str(window.id),
             "listing_id": str(window.listing_id),
             "tranche_id": str(tranche.id),

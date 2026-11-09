@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.direct_transfer import fees
+from app.core.timezone import ICT
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.errors import DirectTransferError, conflict
@@ -40,8 +41,8 @@ from app.direct_transfer.storage import EvidenceStorage
 from app.lending.models import Project
 from app.loans.agreement.signature import has_digital_signature, is_pdf
 from app.market.investor_agreement import text
-from app.market.investor_agreement.models import InvestorServiceAgreement
-from app.market.investor_agreement.pdf import AgreementData, render
+from app.market.investor_agreement.models import InvestorServiceAgreement, SignedInvestmentConfirmation
+from app.market.investor_agreement.pdf import AgreementData, AnnexData, render, render_annex
 from app.users.models import User
 
 # Contract set v0.3 (5 Nov 2026), DRAFT pending IBL review. Printed on every page of the PDF.
@@ -315,3 +316,92 @@ async def investment_confirmation(
         service_fee_bps_per_year=p.investor_fee_bps_per_year,
         expected_disbursement_date=ict_date(pay_by),
     )
+
+
+async def confirmation_for(db: AsyncSession, tranche_id: UUID) -> SignedInvestmentConfirmation | None:
+    return (
+        await db.execute(select(SignedInvestmentConfirmation).where(SignedInvestmentConfirmation.tranche_id == tranche_id))
+    ).scalar_one_or_none()
+
+
+async def record_confirmation(
+    db: AsyncSession,
+    *,
+    tranche: Tranche,
+    window: FundingWindow,
+    agreement: InvestorServiceAgreement,
+    storage: EvidenceStorage,
+    now: dt.datetime,
+    params: DirectTransferParams | None = None,
+) -> SignedInvestmentConfirmation:
+    """Fill in and keep the commitment's Investment Confirmation, before the investor is shown where to pay.
+
+    The filled-in PDF goes to evidence storage and a row records its values and hash; the commitment's signed
+    acceptance then names both, so the in-app signature covers the Annex. Idempotent per tranche (a replayed
+    reservation finds the one already made)."""
+    existing = await confirmation_for(db, tranche.id)
+    if existing is not None:
+        return existing
+    terms = await investment_confirmation(
+        db, window=window, amount_vnd=tranche.amount_vnd, pay_by=tranche.hold_expires_at, params=params
+    )
+    # Party B as in the master agreement it is part of; the live profile when that copy has no name.
+    party = dict(agreement.party_b or {})
+    if not party.get("name"):
+        party = (await current_party_b(db, tranche.investor_id)).as_dict()
+    pdf = render_annex(
+        AnnexData(
+            commitment_ref=tranche.reference_code,
+            investor_name=party.get("name"),
+            investor_id_number=party.get("id_number"),
+            agreement_version=agreement.version,
+            agreement_signed_on=ict_date(agreement.signed_at),
+            listing_ref=terms.listing_ref,
+            sme_name=terms.sme_name,
+            amount_vnd=terms.amount_vnd,
+            annual_rate_pct=terms.annual_rate_pct,
+            term_months=terms.term_months,
+            service_fee_vnd=terms.service_fee_vnd,
+            expected_disbursement_date=terms.expected_disbursement_date,
+            confirmed_at=now.astimezone(ICT),
+        )
+    )
+    stored = await store_evidence_file(
+        db, storage, owner_user_id=tranche.investor_id, purpose="SIGNED_DOCUMENT", content=pdf,
+        content_type="application/pdf", filename=f"xac-nhan-dau-tu-{tranche.reference_code}.pdf", params=params,
+    )
+    row = SignedInvestmentConfirmation(
+        tranche_id=tranche.id,
+        investor_id=tranche.investor_id,
+        agreement_id=agreement.id,
+        listing_id=terms.listing_id,
+        sme_name=terms.sme_name,
+        amount_vnd=terms.amount_vnd,
+        annual_rate_pct=terms.annual_rate_pct,
+        term_months=terms.term_months,
+        service_fee_vnd=terms.service_fee_vnd,
+        service_fee_bps_per_year=terms.service_fee_bps_per_year,
+        expected_disbursement_date=terms.expected_disbursement_date,
+        file_key=stored.storage_key,
+        document_sha256=stored.sha256,
+        confirmed_at=now,
+    )
+    db.add(row)
+    await db.flush()
+    return row
+
+
+def confirmation_document(row: SignedInvestmentConfirmation) -> dict:
+    """The Annex as the commitment's signed acceptance carries it: its values, its record and its PDF's hash."""
+    return {
+        "id": str(row.id),
+        "listing_id": str(row.listing_id),
+        "sme_name": row.sme_name,
+        "committed_amount_vnd": row.amount_vnd,
+        "annual_rate_pct": str(row.annual_rate_pct),
+        "term_months": row.term_months,
+        "expected_service_fee_vnd": row.service_fee_vnd,
+        "service_fee_bps_per_year": row.service_fee_bps_per_year,
+        "expected_disbursement_date": row.expected_disbursement_date.isoformat(),
+        "document_sha256": row.document_sha256,
+    }
