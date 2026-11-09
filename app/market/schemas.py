@@ -78,7 +78,8 @@ class InvestorAgreementOut(BaseModel):
 
     # The version the platform asks for now, printed on the PDF to sign.
     version: str
-    # True until the investor has uploaded a digitally signed copy of `version`.
+    # True until the investor has uploaded a digitally signed copy of `version`. While true, a commitment is still
+    # made (code and all) but its payment details are refused: the agreement is signed with it first.
     required: bool
     # When the current version's signed copy was uploaded; null while required.
     signed_at: dt.datetime | None = None
@@ -86,8 +87,8 @@ class InvestorAgreementOut(BaseModel):
     signed_version: str | None = None
     # The signed copy's file name as uploaded.
     file_name: str | None = None
-    # True while the signed copy may still be replaced: no commitment has been made under it yet.
-    replaceable: bool = False
+    # The commitment it was signed with (whose Annex it carries filled in).
+    tranche_id: UUID | None = None
     # As signed when signed; else as the PDF fills it in now, from the verified profile.
     party_b: PartyBOut
 

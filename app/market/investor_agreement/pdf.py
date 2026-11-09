@@ -28,6 +28,10 @@ class AgreementData:
     address: str | None
     bank_account: str | None
     bank_name: str | None
+    # Filled in when the agreement is generated for the commitment it is signed with: that commitment's code and
+    # its Annex rows (annex_rows_for). Otherwise the Annex prints as the blank template.
+    commitment_ref: str | None = None
+    annex: list[tuple[str, str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -57,19 +61,40 @@ def vi_number(value) -> str:
     return f"{whole},{frac}" if frac else whole
 
 
-def annex_rows(data: AnnexData) -> list[tuple[str, str]]:
+def annex_rows_for(
+    *,
+    listing_ref: str,
+    sme_name: str,
+    amount_vnd: int,
+    annual_rate_pct,
+    term_months: int,
+    service_fee_vnd: int,
+    expected_disbursement_date: date,
+) -> list[tuple[str, str]]:
     """The Annex rows, filled in, under the template's own labels."""
     labels = [label for label, _ in text.ANNEX_ROWS]
-    rate, months = vi_number(data.annual_rate_pct), data.term_months
+    rate = vi_number(annual_rate_pct)
     values = [
-        data.listing_ref,
-        data.sme_name,
-        f"{vi_number(data.amount_vnd)} VND",
-        f"{rate}%/năm, {months} tháng / {rate}% a year, {months} months",
-        f"P × 2,5% × M / 12 = {vi_number(data.service_fee_vnd)} VND + VAT",
-        data.expected_disbursement_date.strftime("%d/%m/%Y"),
+        listing_ref,
+        sme_name,
+        f"{vi_number(amount_vnd)} VND",
+        f"{rate}%/năm, {term_months} tháng / {rate}% a year, {term_months} months",
+        f"P × 2,5% × M / 12 = {vi_number(service_fee_vnd)} VND + VAT",
+        expected_disbursement_date.strftime("%d/%m/%Y"),
     ]
     return list(zip(labels, values))
+
+
+def annex_rows(data: AnnexData) -> list[tuple[str, str]]:
+    return annex_rows_for(
+        listing_ref=data.listing_ref,
+        sme_name=data.sme_name,
+        amount_vnd=data.amount_vnd,
+        annual_rate_pct=data.annual_rate_pct,
+        term_months=data.term_months,
+        service_fee_vnd=data.service_fee_vnd,
+        expected_disbursement_date=data.expected_disbursement_date,
+    )
 
 
 def _or_blank(value, blank: str = text.BLANK) -> str:
@@ -179,23 +204,32 @@ def render(data: AgreementData) -> bytes:
             en(p_en)
             gap(1.5)
 
-    # Annex: the template, one per commitment, completed on the platform.
+    # Annex: the commitment it is signed with, filled in; else the blank template.
     gap(4)
     heading(text.ANNEX_TITLE)
     gap(1.5)
+    if data.annex:
+        pdf.set_font(FAMILY, style="B", size=10)
+        pdf.multi_cell(0, 5.2, f"Mã cam kết / Commitment: {data.commitment_ref}", new_x="LMARGIN", new_y="NEXT")
+        gap(1)
+        rows = data.annex
+        note = tuple(n.format(ref=data.commitment_ref) for n in text.ANNEX_NOTE_FILLED)
+    else:
+        rows = [(label, value.format(blank=text.BLANK)) for label, value in text.ANNEX_ROWS]
+        note = text.ANNEX_NOTE
     pdf.set_font(FAMILY, size=9.5)
     with pdf.table(col_widths=(70, 100), text_align="LEFT", line_height=5.5, padding=1.6) as table:
         header = table.row()
         header.cell("Mục / Item")
         header.cell("Giá trị / Value")
-        for label, value in text.ANNEX_ROWS:
+        for label, value in rows:
             row = table.row()
             row.cell(label)
-            row.cell(value.format(blank=text.BLANK))
+            row.cell(value)
     gap(1.5)
     pdf.set_font(FAMILY, style="I", size=8.5)
     pdf.set_text_color(100, 100, 100)
-    pdf.multi_cell(0, 4.5, f"{text.ANNEX_NOTE[0]} {text.ANNEX_NOTE[1]}", new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(0, 4.5, f"{note[0]} {note[1]}", new_x="LMARGIN", new_y="NEXT")
     pdf.set_text_color(0, 0, 0)
 
     # Signature blocks

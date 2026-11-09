@@ -275,6 +275,14 @@ ANNEX_CONFIRMED = (
     "Loan Contract.",
 )
 
+# Not contract text: under the Annex when the agreement is filled in for the commitment it is signed with.
+ANNEX_NOTE_FILLED = (
+    "Ghi chú: Phụ lục trên là Xác nhận đầu tư của lần cam kết {ref}, ký cùng Hợp đồng này. Các lần cam kết sau "
+    "được điền và xác nhận trên nền tảng.",
+    "Note: the Annex above is the Investment Confirmation of commitment {ref}, signed with this Agreement. Later "
+    "commitments are completed and confirmed on the platform.",
+)
+
 # Not contract text: says how the Annex above gets its values.
 ANNEX_NOTE = (
     "Ghi chú: Phụ lục được điền và xác nhận trên nền tảng tại mỗi lần cam kết.",

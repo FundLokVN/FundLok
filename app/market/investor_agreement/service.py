@@ -2,12 +2,13 @@
 
 Spec: docs/specs/market/investor-service-agreement.md
 
-The investor signs the master agreement once, before their first commitment, the same way an SME signs its
-service agreement: download the PDF filled in with their details, sign it with their digital signature, upload
-the signed copy. Reserving refuses an investor without one for the current version (funding.reserve_and_accept);
-every commitment, the first included, signs its own Investment Confirmation (the Annex), carried in the
-commitment's signed acceptance. This module fills Party B, renders the PDF, checks and records the signed upload,
-and builds the Annex.
+The investor signs the master agreement once, with their first commitment, the same way an SME signs its
+service agreement. Agreeing to the commitment holds the amount and gives it a code (no money moves); they then
+download the agreement filled in with their details and that commitment's Annex, sign it with their digital
+signature and upload the signed copy. The payment details are refused until a signed copy of the current version
+is on file (funding_router.read_payment). Every later commitment signs only its own Investment Confirmation (the
+Annex), kept when the investor agrees (record_confirmation). This module fills Party B, renders the PDFs, checks
+and records the signed upload, and keeps each commitment's Annex.
 
 Where Party B's blanks come from:
   name, ID number         an individual's approved eKYC (full name, ID card number); an organisation's approved
@@ -42,7 +43,7 @@ from app.lending.models import Project
 from app.loans.agreement.signature import has_digital_signature, is_pdf
 from app.market.investor_agreement import text
 from app.market.investor_agreement.models import InvestorServiceAgreement, SignedInvestmentConfirmation
-from app.market.investor_agreement.pdf import AgreementData, AnnexData, render, render_annex
+from app.market.investor_agreement.pdf import AgreementData, AnnexData, annex_rows_for, render, render_annex
 from app.users.models import User
 
 # Contract set v0.3 (5 Nov 2026), DRAFT pending IBL review. Printed on every page of the PDF.
@@ -141,9 +142,12 @@ async def current_party_b(db: AsyncSession, investor_id: UUID) -> PartyB:
 # --------------------------------------------------------------------------- #
 # the PDF to sign
 # --------------------------------------------------------------------------- #
-async def build_pdf(db: AsyncSession, investor_id: UUID, *, now: dt.datetime) -> tuple[bytes, str]:
-    """(pdf bytes, file name): the current version filled in with the investor's details. Generated each time,
-    never stored: the signed upload is the record."""
+async def build_pdf(
+    db: AsyncSession, investor_id: UUID, *, now: dt.datetime, tranche: Tranche | None = None
+) -> tuple[bytes, str]:
+    """(pdf bytes, file name): the current version filled in with the investor's details and, given the commitment
+    it is signed with, that commitment's code and Annex. Generated each time, never stored: the signed upload is
+    the record."""
     party = await current_party_b(db, investor_id)
     account = (
         f"{party.bank_account_number} ({party.bank_account_name})"
@@ -151,6 +155,21 @@ async def build_pdf(db: AsyncSession, investor_id: UUID, *, now: dt.datetime) ->
         else party.bank_account_number
     )
     ref = investor_ref(investor_id)
+    annex = None
+    if tranche is not None:
+        window = await db.get(FundingWindow, tranche.window_id)
+        terms = await investment_confirmation(
+            db, window=window, amount_vnd=tranche.amount_vnd, pay_by=tranche.hold_expires_at
+        )
+        annex = annex_rows_for(
+            listing_ref=terms.listing_ref,
+            sme_name=terms.sme_name,
+            amount_vnd=terms.amount_vnd,
+            annual_rate_pct=terms.annual_rate_pct,
+            term_months=terms.term_months,
+            service_fee_vnd=terms.service_fee_vnd,
+            expected_disbursement_date=terms.expected_disbursement_date,
+        )
     data = AgreementData(
         investor_ref=ref,
         prepared_on=ict_date(now),
@@ -159,21 +178,24 @@ async def build_pdf(db: AsyncSession, investor_id: UUID, *, now: dt.datetime) ->
         address=party.address,
         bank_account=account,
         bank_name=party.bank_name,
+        commitment_ref=tranche.reference_code if tranche is not None else None,
+        annex=annex,
     )
-    return render(data), f"FundLok-hop-dong-dich-vu-nha-dau-tu-{ref}-{VERSION}.pdf"
+    suffix = f"-{tranche.reference_code}" if tranche is not None else ""
+    return render(data), f"FundLok-hop-dong-dich-vu-nha-dau-tu-{ref}{suffix}-{VERSION}.pdf"
 
 
 # --------------------------------------------------------------------------- #
 # the signed copy
 # --------------------------------------------------------------------------- #
 async def current_signature(db: AsyncSession, investor_id: UUID) -> InvestorServiceAgreement | None:
-    """The investor's latest signed upload of the CURRENT version, or None: then they sign before committing."""
+    """The investor's signed copy of the CURRENT version, or None: then they sign it with their next commitment,
+    and its payment details wait for it."""
     return (
         await db.execute(
-            select(InvestorServiceAgreement)
-            .where(InvestorServiceAgreement.investor_id == investor_id, InvestorServiceAgreement.version == VERSION)
-            .order_by(InvestorServiceAgreement.signed_at.desc())
-            .limit(1)
+            select(InvestorServiceAgreement).where(
+                InvestorServiceAgreement.investor_id == investor_id, InvestorServiceAgreement.version == VERSION
+            )
         )
     ).scalar_one_or_none()
 
@@ -190,21 +212,11 @@ async def latest_signature(db: AsyncSession, investor_id: UUID) -> InvestorServi
     ).scalar_one_or_none()
 
 
-async def used_by_a_commitment(db: AsyncSession, agreement: InvestorServiceAgreement) -> bool:
-    """Whether the investor has committed since uploading it: its acceptance then rests on this copy."""
-    return (
-        await db.execute(
-            select(Tranche.id)
-            .where(Tranche.investor_id == agreement.investor_id, Tranche.reserved_at >= agreement.signed_at)
-            .limit(1)
-        )
-    ).first() is not None
-
-
 async def record_signed_upload(
     db: AsyncSession,
     *,
     investor_id: UUID,
+    tranche: Tranche,
     content: bytes,
     file_name: str | None,
     version: str,
@@ -214,11 +226,13 @@ async def record_signed_upload(
     user_agent: str | None = None,
     params: DirectTransferParams | None = None,
 ) -> InvestorServiceAgreement:
-    """Check and record the investor's signed copy of the current version.
+    """Check and record the investor's signed copy of the current version, signed with the commitment `tranche`
+    (theirs; the caller checks), and keep that commitment's Annex. The payment details then open.
 
     409 INVESTOR_AGREEMENT_OUTDATED when `version` (the one printed on the PDF they downloaded) is not the current
     one; 415 UNSUPPORTED_TYPE for anything but a PDF; 422 INVESTOR_AGREEMENT_UNSIGNED for a PDF with no digital
-    signature in it; 409 INVESTOR_AGREEMENT_IN_USE when they already committed under their current copy.
+    signature in it; 409 INVESTOR_AGREEMENT_ALREADY_SIGNED when this version is already on file; 409 HOLD_EXPIRED
+    when the commitment's hold lapsed (they commit again, and sign with the new commitment).
     """
     if version != VERSION:
         raise conflict(
@@ -234,12 +248,10 @@ async def record_signed_upload(
             "signed copy.",
             "INVESTOR_AGREEMENT_UNSIGNED",
         )
-    existing = await current_signature(db, investor_id)
-    if existing is not None and await used_by_a_commitment(db, existing):
-        raise conflict(
-            "INVESTOR_AGREEMENT_IN_USE",
-            "Your signed agreement already covers an investment and cannot be replaced",
-        )
+    if await current_signature(db, investor_id) is not None:
+        raise conflict("INVESTOR_AGREEMENT_ALREADY_SIGNED", "Your signed agreement is already on file")
+    if tranche.status not in ("RESERVED", "SIGNED") or now > tranche.hold_expires_at:
+        raise conflict("HOLD_EXPIRED", "The commitment's hold has lapsed; commit again and sign with it")
     party = await current_party_b(db, investor_id)
     stored = await store_evidence_file(
         db, storage, owner_user_id=investor_id, purpose="SIGNED_DOCUMENT", content=content,
@@ -251,6 +263,7 @@ async def record_signed_upload(
         investor_id=investor_id,
         version=VERSION,
         signed_at=now,
+        tranche_id=tranche.id,
         party_b=party.as_dict(),
         signed_file_key=stored.storage_key,
         document_sha256=stored.sha256,
@@ -261,6 +274,11 @@ async def record_signed_upload(
     )
     db.add(row)
     await db.flush()
+    # The commitment's Annex, as filled in the agreement just signed.
+    await record_confirmation(
+        db, tranche=tranche, window=await db.get(FundingWindow, tranche.window_id), agreement=row,
+        storage=storage, now=now, params=params,
+    )
     return row
 
 

@@ -1,21 +1,21 @@
 """The Investor Service Agreement (Contract 4) each investor signed and uploaded, and which version.
 
-ONE ROW PER SIGNED UPLOAD
-Before their first commitment the investor downloads the agreement filled in with their details
-(GET /funding/me/investor-agreement/document), signs it with their digital signature and uploads the signed
-PDF (POST /funding/me/investor-agreement). The row is the platform's record of it: when, which version, Party B
-as filled in, and the signed file kept as evidence with its hash. Reserving refuses an investor with no row for
-the current version (409 INVESTOR_AGREEMENT_REQUIRED); every later commitment signs only its Investment
-Confirmation (the Annex, carried in the commitment's own signed acceptance).
+ONE ROW PER INVESTOR PER VERSION
+The investor signs it with their first commitment: agreeing to the commitment holds the amount and gives it a
+code (no money moves), then they download the agreement filled in with their details and that commitment's
+Annex (GET /funding/me/investor-agreement/document?tranche_id=), sign it with their digital signature and upload
+the signed PDF (POST /funding/me/investor-agreement). Until then the payment details are refused (409
+INVESTOR_AGREEMENT_REQUIRED). The row is the platform's record: when, which version, the commitment it was signed
+with, Party B as filled in, and the signed file kept as evidence with its hash. Every later commitment signs only
+its own Investment Confirmation (investment_confirmations).
 
-The table is evidence, so the app only ever INSERTS rows. The investor's latest row for a version is the one that
-counts: a wrong file can be replaced by a new upload until a commitment has been made under it. A new version of
-the text (text.VERSION) asks every investor to sign again: a new row, the old ones left as they were.
+The table is evidence, so the app only ever INSERTS rows. A new version of the text (text.VERSION) asks every
+investor to sign again with their next commitment: a new row, the old ones left as they were.
 """
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, Text, func
+from sqlalchemy import BigInteger, Column, Date, DateTime, ForeignKey, Integer, Numeric, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.core.base import Base
@@ -28,7 +28,7 @@ def _now() -> datetime:
 class InvestorServiceAgreement(Base):
     __tablename__ = "investor_service_agreements"
     __table_args__ = (
-        Index("ix_investor_service_agreements_investor_version_signed", "investor_id", "version", "signed_at"),
+        UniqueConstraint("investor_id", "version", name="uq_investor_service_agreements_investor_version"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -38,6 +38,9 @@ class InvestorServiceAgreement(Base):
     version = Column(Text, nullable=False)
     # When the signed copy was uploaded and accepted.
     signed_at = Column(DateTime(timezone=True), nullable=False)
+    # The commitment it was signed with, whose Annex it carries filled in (null only for a record made outside
+    # the commitment flow, e.g. test fixtures).
+    tranche_id = Column(UUID(as_uuid=True), ForeignKey("tranches.id", ondelete="RESTRICT"), nullable=True)
     # Party B as the platform filled it in: holder_type, name, id_number, address, bank_account_number,
     # bank_account_name, bank_name (any may be null: printed as a dotted blank).
     party_b = Column(JSONB, nullable=False)
