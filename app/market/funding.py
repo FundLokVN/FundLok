@@ -9,7 +9,10 @@ hand:
   when an admin approves the SME's account and when a project goes live, whichever comes second (`publish_if_ready`),
   and an admin can run it again from the project panel.
 - `reserve_and_accept` is the investor's one "I agree" step: hold the amount and sign the acceptance of the
-  investing terms. The investor then pays the SME directly (`payment_instructions`); FundLok never holds the money.
+  investing terms, with the commitment's Investment Confirmation (Annex of Contract 4). At their first commitment
+  they then sign the Investor Service Agreement, filled in with this commitment's Annex, and upload it
+  (app/market/investor_agreement); the payment details wait for it. They then pay the SME directly
+  (`payment_instructions`); FundLok never holds the money.
 """
 from __future__ import annotations
 
@@ -34,6 +37,7 @@ from app.direct_transfer.tranche_state import transition_tranche
 from app.direct_transfer.tranches import accept_tranche
 from app.direct_transfer.windows import lock_window, open_funding_window, refresh_window_fullness
 from app.lending.models import Contract, Listing, LoanApplication, Project, ProjectOwnership, ScoreRun
+from app.market.investor_agreement import service as investor_agreement
 from app.utils.audit import append_audit
 
 logger = logging.getLogger(__name__)
@@ -265,19 +269,8 @@ async def publish_owner_projects(
 
 async def _investor_payout_account(db: AsyncSession, investor_id: UUID) -> UUID | None:
     """Where the SME repays this investor: their most recently approved account at a listed bank."""
-    return (
-        await db.execute(
-            select(PaymentAccount.id)
-            .where(
-                PaymentAccount.user_id == investor_id,
-                PaymentAccount.holder_role == "INVESTOR",
-                PaymentAccount.status == "APPROVED",
-                PaymentAccount.bank_bin.is_not(None),
-            )
-            .order_by(PaymentAccount.approved_at.desc().nulls_last(), PaymentAccount.created_at.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
+    account = await investor_agreement.payout_account(db, investor_id)
+    return account.id if account is not None else None
 
 
 async def expire_lapsed_holds(db: AsyncSession, *, window_id: UUID, now: dt.datetime) -> int:
@@ -320,12 +313,19 @@ async def reserve_and_accept(
     """Reserve `amount_vnd` on the window and sign the acceptance, in one step: the investor agrees to the
     investing terms once, and the tranche comes back SIGNED, ready for payment instructions.
 
+    The acceptance carries the commitment's Investment Confirmation (Contract 4's Annex). With a signed Investor
+    Service Agreement of the current version on file, the Annex is kept now (PDF and record) and the acceptance
+    names it and the agreement. Without one (the first commitment), the commitment is still made, code and all,
+    but no money moves: the investor next signs the agreement filled in with this commitment's Annex, and the
+    payment details are refused until they upload it (funding_router.read_payment).
+
     One transaction: if signing fails the reservation is not kept either. Replaying the Idempotency-Key returns
     the same tranche (reserve_ticket and accept_tranche are both idempotent), unless its hold has since lapsed:
     then 409 HOLD_EXPIRED, and the investor reserves again with a new key.
     """
     if terms_version != INVESTOR_TERMS_VERSION:
         raise conflict("TERMS_OUTDATED", "The investing terms have changed; read them again before investing")
+    agreement = await investor_agreement.current_signature(db, investor_id)
     account_id = payment_account_id or await _investor_payout_account(db, investor_id)
     if account_id is None:
         raise conflict("ACCOUNT_NOT_APPROVED", "Add a bank account at a listed bank before investing")
@@ -345,11 +345,34 @@ async def reserve_and_accept(
     if tranche.status == "EXPIRED":
         raise conflict("HOLD_EXPIRED", "The reservation hold has expired; reserve again")
     window = await db.get(FundingWindow, tranche.window_id)
-    # What the investor signs: the terms they read, by version, and the ticket they are taking.
+    if agreement is not None:
+        # The Annex, filled in and kept (PDF and record) before the payment details exist.
+        confirmation = await investor_agreement.record_confirmation(
+            db, tranche=tranche, window=window, agreement=agreement, storage=evidence_storage(), now=now,
+            params=params,
+        )
+        agreement_doc = {
+            "id": str(agreement.id),
+            "version": agreement.version,
+            "signed_at": agreement.signed_at.isoformat(),
+            "document_sha256": agreement.document_sha256,
+        }
+        annex_doc = investor_agreement.confirmation_document(confirmation)
+    else:
+        # First commitment: the agreement, with this Annex filled in, is signed next, before any payment.
+        terms = await investor_agreement.investment_confirmation(
+            db, window=window, amount_vnd=tranche.amount_vnd, pay_by=tranche.hold_expires_at, params=params
+        )
+        agreement_doc = {"version": investor_agreement.VERSION, "signed_with_this_commitment_next": True}
+        annex_doc = terms.as_document()
+    # What the investor signs: the terms they read, by version, the ticket they are taking, its Investment
+    # Confirmation, and the master agreement it falls under.
     document = json.dumps(
         {
             "document": "FUNDLOK_INVESTOR_ACCEPTANCE",
             "terms_version": terms_version,
+            "investor_service_agreement": agreement_doc,
+            "investment_confirmation": annex_doc,
             "window_id": str(window.id),
             "listing_id": str(window.listing_id),
             "tranche_id": str(tranche.id),

@@ -711,11 +711,14 @@ def make_listing(client):
 @pytest.fixture
 def make_eligible_investor(db_session):
     """Bring an investor to where the market accepts their orders: email
-    verified, an APPROVED GVerify KYC attempt and a saved bank account.
-    Idempotent per investor. Pass bank_account=False to stop short of the
-    account (the order endpoint refuses an investor without one)."""
+    verified, an APPROVED GVerify KYC attempt, a saved bank account and a
+    signed Investor Service Agreement (Contract 4; reserving refuses without
+    one). Idempotent per investor. Pass bank_account=False to stop short of
+    the account (the order endpoint refuses an investor without one), and
+    signed_agreement=False to stop short of the agreement (its own upload is
+    covered in tests/market/test_investor_service_agreement.py)."""
 
-    async def _make(investor: dict, bank_account: bool = True):
+    async def _make(investor: dict, bank_account: bool = True, signed_agreement: bool = True):
         from app.direct_transfer.models import PaymentAccount
         from app.gverify.models import STATUS_APPROVED, GVerifyVerification
 
@@ -755,10 +758,86 @@ def make_eligible_investor(db_session):
                         status="APPROVED",
                     )
                 )
+        if signed_agreement:
+            import datetime as _dt
+
+            from app.market.investor_agreement.models import InvestorServiceAgreement
+            from app.market.investor_agreement.service import VERSION
+
+            signed = (
+                await db_session.execute(
+                    select(InvestorServiceAgreement.id).where(
+                        InvestorServiceAgreement.investor_id == user.id, InvestorServiceAgreement.version == VERSION
+                    )
+                )
+            ).first()
+            if signed is None:
+                db_session.add(
+                    InvestorServiceAgreement(
+                        investor_id=user.id,
+                        version=VERSION,
+                        signed_at=_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=1),
+                        party_b={},
+                        signed_file_key=f"test/investor-agreement/{user.id}.pdf",
+                        document_sha256="0" * 64,
+                        file_name="signed.pdf",
+                        file_size_bytes=len(SIGNED_AGREEMENT_PDF),
+                    )
+                )
         await db_session.commit()
         return investor
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def fake_neac(monkeypatch):
+    """NEAC's signature verification, faked: tests never call neac.gov.vn.
+
+    The uploaded test PDF steers the verdict with markers in its bytes (see
+    tests/market/test_investor_service_agreement.py, _signed_copy):
+      %FAKE-NEAC-SIGNER:<id>   the signer's ID on the certificate (CCCD:<id>)
+      %FAKE-NEAC-NAME:<name>   the signer's name (CN), ASCII
+      %FAKE-NEAC:<CASE>        INVALID | MODIFIED | REVOKED | UNSIGNED | DOWN
+    Without a signer marker the certificate carries someone else's ID. The
+    calls made are kept in `.calls`."""
+    import re as _re
+    from types import SimpleNamespace
+
+    from app.market.investor_agreement import neac
+
+    state = SimpleNamespace(calls=[])
+
+    async def _verify(content: bytes, filename: str):
+        state.calls.append(filename)
+        case = _re.search(rb"%FAKE-NEAC:([A-Z]+)", content)
+        case = case.group(1).decode() if case else "VALID"
+        if case == "DOWN":
+            raise neac.NeacUnavailable("fake NEAC is down")
+        if case == "UNSIGNED":
+            return neac.NeacResult(message="Văn bản không có chữ ký số", signatures=[])
+        signer_id = _re.search(rb"%FAKE-NEAC-SIGNER:([A-Za-z0-9]+)", content)
+        name = _re.search(rb"%FAKE-NEAC-NAME:([^\r\n]+)", content)
+        signature = neac.NeacSignature(
+            issuer={"cn": "FPT Certification Authority SHA256", "o": "FPT CORPORATION", "c": "VN"},
+            signer={
+                "cn": name.group(1).decode() if name else "SOMEONE",
+                "c": "VN",
+                "cccd": f"CCCD:{signer_id.group(1).decode() if signer_id else '000000000000'}",
+            },
+            intact="Bị thay đổi" if case == "MODIFIED" else "Không bị thay đổi",
+            certificate_validity="Thời điểm có hiệu lực: 2026-03-18 11:00:40+07:00; Thời điểm hết hiệu lực: 2027-03-26",
+            validity="Không hợp lệ" if case == "INVALID" else "Hợp lệ tại thời điểm ký",
+            timestamp_status="Không",
+            signed_time="Ngày 09 tháng 11 năm 2026, 10:00:00 [UTC+07:00]",
+            reason_invalidity="Chứng thư số của tổ chức phát hành chưa được công nhận." if case == "INVALID" else "",
+            ocsp="Chứng thư số đã bị thu hồi." if case == "REVOKED" else "Chứng thư số chưa bị thu hồi. [http://ocsp3.fis.com.vn]",
+            crl="Chứng thư số chưa bị thu hồi [http://crl3.fis.com.vn]",
+        )
+        return neac.NeacResult(message="Success", signatures=[signature])
+
+    monkeypatch.setattr(neac, "verify_document", _verify)
+    return state
 
 
 @pytest.fixture

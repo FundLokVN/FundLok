@@ -61,6 +61,89 @@ class ReservationCreate(BaseModel):
     payment_account_id: UUID | None = None
 
 
+class PartyBOut(BaseModel):
+    """Party B of the Investor Service Agreement, as filled in. A null prints as a dotted blank."""
+
+    holder_type: str | None = None  # INDIVIDUAL | ENTITY
+    name: str | None = None
+    id_number: str | None = None  # personal ID number, or enterprise code
+    address: str | None = None
+    bank_account_number: str | None = None
+    bank_account_name: str | None = None
+    bank_name: str | None = None
+
+
+class SignatureCheckOut(BaseModel):
+    """NEAC's verdict on the signed copy when it was accepted."""
+
+    verified_by: str  # "NEAC"
+    checked_at: dt.datetime
+    signer_name: str | None = None  # the certificate's CN, e.g. "CÔNG TY CỔ PHẦN FUNDLOK"
+    signer_id: str | None = None  # as on the certificate, e.g. "MST:1501167629" or "CCCD:079..."
+    issuer_name: str | None = None  # the CA, e.g. "FPT Certification Authority SHA256"
+    signed_time: str | None = None  # NEAC's wording, e.g. "Ngày 20 tháng 10 năm 2026, 17:16:11 [UTC+07:00]"
+    name_matches: bool = False  # the certificate's name is the investor's verified name
+
+
+class InvestorAgreementOut(BaseModel):
+    """Whether the investor must still sign and upload the Investor Service Agreement before committing."""
+
+    # The version the platform asks for now, printed on the PDF to sign.
+    version: str
+    # True until the investor has uploaded a digitally signed copy of `version`. While true, a commitment is still
+    # made (code and all) but its payment details are refused: the agreement is signed with it first.
+    required: bool
+    # When the current version's signed copy was uploaded; null while required.
+    signed_at: dt.datetime | None = None
+    # The investor's latest signed version, of any version (an older one while a new version is required).
+    signed_version: str | None = None
+    # The signed copy's file name as uploaded.
+    file_name: str | None = None
+    # The commitment it was signed with (whose Annex it carries filled in).
+    tranche_id: UUID | None = None
+    # NEAC's verdict on the signed copy (null for records made outside the upload).
+    signature_check: SignatureCheckOut | None = None
+    # As signed when signed; else as the PDF fills it in now, from the verified profile.
+    party_b: PartyBOut
+
+
+class InvestmentConfirmationOut(BaseModel):
+    """The Annex of the Investor Service Agreement for one commitment, as it will be signed."""
+
+    listing_id: UUID
+    listing_ref: str
+    sme_name: str
+    amount_vnd: int
+    annual_rate_pct: Decimal
+    term_months: int
+    # P × 2.5% × M / 12, before VAT.
+    service_fee_vnd: int
+    service_fee_bps_per_year: int
+    expected_disbursement_date: dt.date
+
+
+class SignedInvestmentConfirmationOut(BaseModel):
+    """One commitment's Investment Confirmation as filled in and confirmed when the investor agreed to it."""
+
+    id: UUID
+    tranche_id: UUID
+    # The commitment's reference code (its transfer memo too).
+    reference_code: str
+    listing_id: UUID
+    listing_ref: str
+    sme_name: str
+    amount_vnd: int
+    annual_rate_pct: Decimal
+    term_months: int
+    # P × 2.5% × M / 12, before VAT.
+    service_fee_vnd: int
+    service_fee_bps_per_year: int
+    expected_disbursement_date: dt.date
+    confirmed_at: dt.datetime
+    # The Investor Service Agreement version it is part of.
+    agreement_version: str
+
+
 class InvestorTrancheOut(TrancheOut):
     """An investor's own ticket. Adds when they uploaded their transfer receipt (null until they do, so the page
     knows whether to ask for one) and, in their list, the project it is in and its loan term in months."""

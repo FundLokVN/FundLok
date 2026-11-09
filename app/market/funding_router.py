@@ -9,7 +9,19 @@ from uuid import UUID
 
 from decimal import Decimal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,12 +46,19 @@ from app.lending.models import Project
 from app.market import funding
 from app.market.emails import receipt_notice, send_investment_receipt_email
 from app.market.funding import expire_lapsed_holds, reserve_and_accept
+from app.market.investor_agreement import service as investor_agreement
+from app.market.investor_agreement.models import InvestorServiceAgreement
 from app.market.portfolio import business_analytics, business_transactions, investor_analytics, investor_transactions
 from app.market.projection import project_ticket, sum_by_day
 from app.market.schemas import (
     BusinessAnalyticsOut,
+    InvestmentConfirmationOut,
+    InvestorAgreementOut,
     InvestorAnalyticsOut,
     InvestorTrancheOut,
+    PartyBOut,
+    SignatureCheckOut,
+    SignedInvestmentConfirmationOut,
     ReportMissingCreate,
     ReservationCreate,
     SmeRepaymentPlanOut,
@@ -125,6 +144,7 @@ async def reserve(
     except DirectTransferError as exc:
         await _raise_mapped(db, exc)
     if not replay:
+        agreement = await investor_agreement.current_signature(db, current_user.id)  # None: signed next
         append_audit(
             db,
             entity_type="TRANCHE",
@@ -137,11 +157,244 @@ async def reserve(
                 "reference_code": tranche.reference_code,
                 "terms_version": body.terms_version,
                 "status": tranche.status,
+                # The signed master agreement this commitment (and its Investment Confirmation) falls under; at
+                # the first commitment none yet, signed with it before any payment.
+                "investor_agreement_id": str(agreement.id) if agreement else None,
+                "investor_agreement_version": agreement.version if agreement else None,
             },
             ip_address=request.client.host if request.client else None,
         )
     await db.commit()
     return InvestorTrancheOut.model_validate(tranche)
+
+
+async def _agreement_status(db: AsyncSession, investor_id: UUID) -> InvestorAgreementOut:
+    signed = await investor_agreement.current_signature(db, investor_id)
+    latest = signed or await investor_agreement.latest_signature(db, investor_id)
+    if signed is not None:
+        party = PartyBOut.model_validate(signed.party_b)
+    else:
+        party = PartyBOut.model_validate((await investor_agreement.current_party_b(db, investor_id)).as_dict())
+    return InvestorAgreementOut(
+        version=investor_agreement.VERSION,
+        required=signed is None,
+        signed_at=signed.signed_at if signed else None,
+        signed_version=latest.version if latest else None,
+        file_name=signed.file_name if signed else None,
+        tranche_id=signed.tranche_id if signed else None,
+        signature_check=_signature_check(signed.signature_check) if signed else None,
+        party_b=party,
+    )
+
+
+def _signature_check(check: dict | None) -> SignatureCheckOut | None:
+    if not check:
+        return None
+    signer, issuer = check.get("signer") or {}, check.get("issuer") or {}
+    return SignatureCheckOut(
+        verified_by=check.get("verified_by", "NEAC"),
+        checked_at=check["checked_at"],
+        signer_name=signer.get("cn"),
+        signer_id=signer.get("cccd") or signer.get("mst"),
+        issuer_name=issuer.get("cn"),
+        signed_time=check.get("signed_time"),
+        name_matches=bool(check.get("name_matches")),
+    )
+
+
+def _pdf_response(content: bytes, filename: str, download: bool) -> Response:
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'{disposition}; filename="{filename}"', "Cache-Control": "no-store"},
+    )
+
+
+@router.get("/me/investor-agreement", response_model=InvestorAgreementOut)
+async def read_my_investor_agreement(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """Whether the investor still signs and uploads the Investor Service Agreement with their next commitment
+    (their first, or the first after a new version) before its payment details open, and Party B: as signed, or as
+    the PDF fills it in now."""
+    return await _agreement_status(db, current_user.id)
+
+
+@router.get(
+    "/me/investor-agreement/document",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def read_my_investor_agreement_document(
+    tranche_id: UUID | None = Query(None, description="the commitment it is signed with: fills in its Annex"),
+    download: bool = Query(False, description="true: as an attachment, to save"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The Investor Service Agreement (Contract 4) as a PDF, the current version filled in with the investor's
+    verified details and, given `tranche_id`, that commitment's code and Annex: for them to review, sign with their
+    digital signature and upload back. Generated each time, never stored: the signed upload is the record."""
+    tranche = await _own_tranche(db, tranche_id, current_user.id) if tranche_id else None
+    pdf, filename = await investor_agreement.build_pdf(db, current_user.id, now=_now(), tranche=tranche)
+    return _pdf_response(pdf, filename, download)
+
+
+@router.post("/me/investor-agreement", response_model=InvestorAgreementOut, status_code=201)
+async def upload_my_signed_investor_agreement(
+    request: Request,
+    file: UploadFile = File(...),
+    version: str = Form(..., min_length=1, max_length=40),
+    tranche_id: UUID = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The investor's digitally signed copy of the agreement, signed with the commitment `tranche_id` (theirs, its
+    hold not lapsed): a PDF of at most 10 MB, this commitment's agreement, which NEAC verifies as validly signed,
+    unchanged and not revoked, by the investor (their eKYC ID or KYB enterprise code on the certificate). `version`
+    is the one printed on the PDF they downloaded. Keeps NEAC's verdict and that commitment's Annex, and opens its
+    payment details. One per version. NEAC takes a few seconds; 503 NEAC_UNAVAILABLE when it cannot be reached."""
+    # The agreement names a verified Party B: the same gate as reserving.
+    await _require_eligible_investor(db, current_user.id)
+    limit = DEFAULT_PARAMS.max_evidence_bytes
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
+    tranche = await _own_tranche(db, tranche_id, current_user.id)
+    now = _now()
+    try:
+        agreement = await investor_agreement.record_signed_upload(
+            db,
+            investor_id=current_user.id,
+            tranche=tranche,
+            content=content,
+            file_name=file.filename,
+            version=version,
+            storage=funding.evidence_storage(),
+            now=now,
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    except DirectTransferError as exc:
+        await _raise_mapped(db, exc)
+    append_audit(
+        db,
+        entity_type="USER",
+        entity_id=current_user.id,
+        action="INVESTOR_AGREEMENT_SIGNED",
+        actor_id=current_user.id,
+        after_state={
+            "agreement_id": str(agreement.id),
+            "version": agreement.version,
+            "tranche_id": str(tranche.id),
+            "reference_code": tranche.reference_code,
+            "document_sha256": agreement.document_sha256,
+            "file_name": agreement.file_name,
+            "file_size_bytes": agreement.file_size_bytes,
+        },
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return await _agreement_status(db, current_user.id)
+
+
+@router.get(
+    "/me/investor-agreement/signed",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def read_my_signed_investor_agreement(
+    download: bool = Query(False, description="true: as an attachment, to save"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The signed copy of the current version the investor uploaded, exactly as uploaded."""
+    signed = await investor_agreement.current_signature(db, current_user.id)
+    if signed is None:
+        raise HTTPException(status_code=404, detail="No signed agreement")
+    content = await funding.evidence_storage().get(signed.signed_file_key, max_bytes=DEFAULT_PARAMS.max_evidence_bytes)
+    filename = (signed.file_name or f"FundLok-hop-dong-dich-vu-nha-dau-tu-{signed.version}.pdf").replace('"', "")
+    return _pdf_response(content, filename, download)
+
+
+@router.get("/windows/{window_id}/investment-confirmation", response_model=InvestmentConfirmationOut)
+async def read_investment_confirmation(
+    window_id: UUID,
+    amount_vnd: int = Query(gt=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The Investment Confirmation (Annex) the investor signs with a commitment of `amount_vnd` on this window,
+    filled in as it will be signed. The amount's bounds are checked when reserving, not here."""
+    window = await db.get(FundingWindow, window_id)
+    if window is None or window.sme_user_id == current_user.id:
+        raise HTTPException(status_code=404, detail="Window not found")
+    confirmation = await investor_agreement.investment_confirmation(
+        db, window=window, amount_vnd=amount_vnd, pay_by=_now() + dt.timedelta(hours=DEFAULT_PARAMS.hold_hours)
+    )
+    return InvestmentConfirmationOut.model_validate(confirmation, from_attributes=True)
+
+
+async def _own_tranche(db: AsyncSession, tranche_id: UUID, investor_id: UUID) -> Tranche:
+    tranche = await db.get(Tranche, tranche_id)
+    if tranche is None or tranche.investor_id != investor_id:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return tranche
+
+
+async def _own_confirmation(db: AsyncSession, tranche_id: UUID, investor_id: UUID):
+    confirmation = await investor_agreement.confirmation_for(db, tranche_id)
+    if confirmation is None or confirmation.investor_id != investor_id:
+        raise HTTPException(status_code=404, detail="No investment confirmation for this ticket")
+    return confirmation
+
+
+@router.get("/tranches/{tranche_id}/investment-confirmation", response_model=SignedInvestmentConfirmationOut)
+async def read_signed_investment_confirmation(
+    tranche_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The Investment Confirmation (Annex) the investor confirmed with this commitment, as filled in then. Their
+    own tickets only; 404 for one made before confirmations were kept."""
+    confirmation = await _own_confirmation(db, tranche_id, current_user.id)
+    tranche = await db.get(Tranche, tranche_id)
+    agreement = await db.get(InvestorServiceAgreement, confirmation.agreement_id)
+    return SignedInvestmentConfirmationOut(
+        id=confirmation.id,
+        tranche_id=confirmation.tranche_id,
+        reference_code=tranche.reference_code,
+        listing_id=confirmation.listing_id,
+        listing_ref=str(confirmation.listing_id).split("-")[0].upper(),
+        sme_name=confirmation.sme_name,
+        amount_vnd=confirmation.amount_vnd,
+        annual_rate_pct=confirmation.annual_rate_pct,
+        term_months=confirmation.term_months,
+        service_fee_vnd=confirmation.service_fee_vnd,
+        service_fee_bps_per_year=confirmation.service_fee_bps_per_year,
+        expected_disbursement_date=confirmation.expected_disbursement_date,
+        confirmed_at=confirmation.confirmed_at,
+        agreement_version=agreement.version,
+    )
+
+
+@router.get(
+    "/tranches/{tranche_id}/investment-confirmation/document",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def read_signed_investment_confirmation_document(
+    tranche_id: UUID,
+    download: bool = Query(False, description="true: as an attachment, to save"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The filled-in Investment Confirmation PDF kept for this commitment, exactly as stored."""
+    confirmation = await _own_confirmation(db, tranche_id, current_user.id)
+    tranche = await db.get(Tranche, tranche_id)
+    content = await funding.evidence_storage().get(confirmation.file_key, max_bytes=DEFAULT_PARAMS.max_evidence_bytes)
+    return _pdf_response(content, f"FundLok-xac-nhan-dau-tu-{tranche.reference_code}.pdf", download)
 
 
 @router.get("/tranches/{tranche_id}/payment", response_model=PaymentOut)
@@ -150,7 +403,17 @@ async def read_payment(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_investor),
 ):
-    """Where and how to pay: the SME's account, the exact amount, the memo, and a VietQR carrying all three."""
+    """Where and how to pay: the SME's account, the exact amount, the memo, and a VietQR carrying all three.
+
+    Refused (409 INVESTOR_AGREEMENT_REQUIRED) until the investor has uploaded their signed Investor Service
+    Agreement of the current version: at their first commitment it is signed, with this commitment's Annex filled
+    in, before any money moves. Receipts are never refused for it: money already sent still reaches staff."""
+    if await investor_agreement.current_signature(db, current_user.id) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Sign the Investor Service Agreement with this commitment before paying",
+            headers={"X-Error-Code": "INVESTOR_AGREEMENT_REQUIRED"},
+        )
     try:
         instructions = await payment_instructions(db, tranche_id=tranche_id, investor_id=current_user.id, now=_now())
     except DirectTransferError as exc:
