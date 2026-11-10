@@ -486,12 +486,17 @@ class AdminKycImageUrlResponse(BaseModel):
 
 
 class AdminSignatureCheck(BaseModel):
-    """The SME's signed Service Agreement as NEAC and FundLok's own checks found it (app/loans/agreement/neac_check).
+    """A signed listing document (Service Agreement or Standing Offer) as NEAC and FundLok's own checks found it
+    (app/loans/agreement/neac_check).
 
-    status: VERIFIED (NEAC accepts the signature) | INVALID (NEAC does not; `problems` in its words) |
+    status: VERIFIED (NEAC accepts the company's signature) | INVALID (NEAC does not; `problems` in its words) |
     NO_SIGNATURE (NEAC found none) | UNAVAILABLE (NEAC could not be reached; check again).
-    right_document: the PDF carries this application's reference and the agreement version.
+    right_document: the PDF carries this application's reference and the document's version.
     signer_matches: the certificate's MST is the company's (`expected_tax_code`, from its KYB or the project).
+    terms_match: the copy carries the check code the document would carry today (the approved terms, assessment
+    and parties' details); None for a copy with no check code (signed before codes were printed).
+    guarantor_*: Standing Offer only (guarantor_required): a separate valid signature by the Personal Guarantor,
+    whose ID is the signing user's eKYC ID number.
     """
 
     status: str
@@ -513,11 +518,37 @@ class AdminSignatureCheck(BaseModel):
     crl: str | None = None
     problems: list[str] = []
     neac_message: str | None = None
+    document_type: str | None = None
+    terms_match: bool | None = None
+    check_code: str | None = None
+    guarantor_required: bool = False
+    guarantor_matches: bool | None = None
+    guarantor_expected_id: str | None = None
+    guarantor_expected_name: str | None = None
+    guarantor_name: str | None = None  # as on the certificate
+    guarantor_id: str | None = None  # as on the certificate, e.g. "CCCD:079123456789"
+    guarantor_name_matches: bool = False
+    guarantor_problems: list[str] = []
 
     @classmethod
     def from_verdict(cls, verdict: dict) -> "AdminSignatureCheck":
         signer, issuer = verdict.get("signer") or {}, verdict.get("issuer") or {}
+        guarantor = verdict.get("guarantor") or None
+        g_signer = (guarantor or {}).get("signer") or {}
+        required = bool(verdict.get("guarantor_required", guarantor is not None))
         return cls(
+            document_type=verdict.get("document_type"),
+            terms_match=verdict.get("terms_match"),
+            check_code=verdict.get("check_code"),
+            guarantor_required=required,
+            # An upload's verdict is only recorded when its guarantor checked out.
+            guarantor_matches=bool(guarantor.get("matches", True)) if guarantor else (False if required else None),
+            guarantor_expected_id=(guarantor or {}).get("expected_id"),
+            guarantor_expected_name=(guarantor or {}).get("expected_name"),
+            guarantor_name=g_signer.get("cn"),
+            guarantor_id=g_signer.get("cccd") or g_signer.get("mst"),
+            guarantor_name_matches=bool((guarantor or {}).get("name_matches")),
+            guarantor_problems=list((guarantor or {}).get("problems") or []),
             status=verdict["status"],
             checked_at=verdict["checked_at"],
             right_document=bool(verdict.get("right_document")),

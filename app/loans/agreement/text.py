@@ -1,6 +1,7 @@
 """Contract 2, "Hợp đồng dịch vụ dành cho Doanh nghiệp / SME Service
-Agreement", as the SME downloads it, signs it with its enterprise digital
-signature and uploads it back in the loan application.
+Agreement", as the SME downloads it after FundLok's assessment, signs it with
+its enterprise digital signature and uploads it back with the Standing Offer
+(app/loans/signing.py).
 
 Copied verbatim from Contract set v0.3 (5 Nov 2026), a DRAFT pending IBL
 review. If the Vietnamese and English differ, the Vietnamese prevails.

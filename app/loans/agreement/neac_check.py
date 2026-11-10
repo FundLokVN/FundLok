@@ -1,16 +1,22 @@
-"""The SME's signed Service Agreement (wizard step 4), checked with NEAC for FundLok staff.
+"""The SME's signed listing documents, checked with NEAC for FundLok staff: the Service Agreement (Contract 2) and
+the Standing Offer (Contract 3), both signed after approval (app/loans/signing.py).
 
-The SME's upload is not held up by this: the confirm step still only requires a digital signature to be present
-(app/uploads/service.py). Staff see the result in the admin project panel, where it runs the first time someone
-opens an application whose agreement has not been checked, and again on demand ("Kiểm tra lại với NEAC").
+Each signed upload is already checked on the way in, and that verdict is recorded here in the same shape, so the
+admin project panel shows it at once. Staff can check again on demand ("Kiểm tra lại với NEAC"), and the panel runs
+the check by itself the first time it opens a document that has none (an agreement signed in the old wizard).
 
-Three things are checked and shown:
-  right document   the PDF's text carries this application's reference and the agreement's version, as FundLok's
-                   own download prints them on every page (it is this application's Contract 2, not some other PDF)
+What is checked and shown:
+  right document   the PDF's text carries this application's reference and the document's version, as FundLok's
+                   own download prints them on every page (it is this application's document, not some other PDF)
+  right numbers    its check code is the one the document would carry today (pdf.check_code): the approved terms,
+                   the assessment and the parties' details are what was signed. None for a copy that carries no
+                   check code at all (signed before codes were printed)
   NEAC             NEAC's own verification (app/market/investor_agreement/neac.py): document unchanged, signature
                    valid, certificate not revoked
   right signer     the signer's MST on the certificate is the company's: its approved KYB enterprise code, or the
                    project's tax ID when there is no approved KYB; the name is compared too
+  guarantor        Standing Offer only: a separate valid signature by the Personal Guarantor, whose ID is the eKYC
+                   ID number of the user who signed and uploaded it
 
 Each check is an audit event (entity LOAN_APPLICATION_DOCUMENT, action NEAC_SIGNATURE_CHECKED), the verdict in
 after_state; the newest one is what the panel shows. No new table: the audit log is append-only evidence already.
@@ -28,12 +34,20 @@ from starlette.concurrency import run_in_threadpool
 
 from app.gverify.models import GVerifyKybVerification
 from app.lending.models import AuditLog, LoanApplication, LoanApplicationDocument, Project, ProjectOwnership
-from app.loans.agreement import text
+from app.users.models import User
+from app.loans.agreement import standing_offer_text, text
 from app.market.investor_agreement import neac  # the one NEAC client, shared with the investor agreement
 from app.utils.audit import append_audit
 from app.utils.r2 import get_bytes
 
 DOCUMENT_TYPE = "sme_service_agreement"
+STANDING_OFFER_TYPE = "sme_standing_offer"
+# The documents this checks: document type -> (version printed on it, whether a Personal Guarantor also signs).
+DOCUMENT_TYPES = {
+    DOCUMENT_TYPE: (text.VERSION, False),
+    STANDING_OFFER_TYPE: (standing_offer_text.VERSION, True),
+}
+CHECK_CODE_LABEL = "Mã đối chiếu"  # printed before the check code on every page
 AUDIT_ENTITY = "LOAN_APPLICATION_DOCUMENT"
 AUDIT_ACTION = "NEAC_SIGNATURE_CHECKED"
 MAX_BYTES = 25 * 1024 * 1024  # the upload's own limit (uploads.schemas.DOCUMENT_TYPE_RULES)
@@ -74,11 +88,43 @@ async def _company(db: AsyncSession, project: Project) -> tuple[str | None, str 
     return project.tax_id, project.legal_name, "PROJECT"
 
 
-async def check_sme_agreement(
+async def _signing_user(db: AsyncSession, document: LoanApplicationDocument, project: Project) -> User | None:
+    """Whose details the document was filled in with: the SME user who uploaded the signed copy (the actor of its
+    upload check), else the project's first owner (an agreement uploaded in the old wizard)."""
+    actor = (
+        await db.execute(
+            select(AuditLog.actor_id)
+            .where(
+                AuditLog.entity_type == AUDIT_ENTITY,
+                AuditLog.action == AUDIT_ACTION,
+                AuditLog.entity_id == document.id,
+                AuditLog.after_state["trigger"].astext == "SME_SIGNED_UPLOAD",
+            )
+            .order_by(AuditLog.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if actor is None:
+        actor = (
+            await db.execute(
+                select(ProjectOwnership.user_id)
+                .where(ProjectOwnership.project_id == project.id, ProjectOwnership.role == "OWNER")
+                .order_by(ProjectOwnership.created_at)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    return await db.get(User, actor) if actor is not None else None
+
+
+async def check_signed_document(
     db: AsyncSession, *, document: LoanApplicationDocument, actor_id: UUID | None, now: dt.datetime
 ) -> dict:
-    """Check the stored signed agreement and record the verdict (audit). Never raises for NEAC being down: the
-    verdict says UNAVAILABLE and staff check again later."""
+    """Check a stored signed listing document and record the verdict (audit). Never raises for NEAC being down:
+    the verdict says UNAVAILABLE and staff check again later."""
+    from app.loans import signing  # imports this module
+    from app.loans.agreement.standing_offer import guarantor_for
+
+    version, needs_guarantor = DOCUMENT_TYPES[document.document_type]
     application = await db.get(LoanApplication, document.loan_application_id)
     project = await db.get(Project, application.project_id)
     content = await run_in_threadpool(get_bytes, document.file_key, max_bytes=MAX_BYTES)
@@ -86,13 +132,29 @@ async def check_sme_agreement(
     ref = application_ref(application.id)
     body = _text_of(content)
     expected_id, expected_name, expected_source = await _company(db, project)
+    user = await _signing_user(db, document, project)
+    expected_code = (
+        await signing.expected_check_code(db, application, user, signing.KINDS_BY_TYPE[document.document_type])
+        if user is not None
+        else None
+    )
+    if CHECK_CODE_LABEL not in body:
+        terms_match = None  # a copy from before check codes were printed: nothing to compare
+    else:
+        terms_match = expected_code is not None and expected_code in body
+    guarantor_person = await guarantor_for(db, user) if needs_guarantor and user is not None else None
+
     verdict: dict = {
         "checked_at": now.isoformat(),
         "verified_by": "NEAC",
+        "document_type": document.document_type,
         "file_name": document.original_filename,
         "application_ref": ref,
-        "agreement_version": text.VERSION,
-        "right_document": ref in body and text.VERSION in body,
+        "agreement_version": version,
+        "right_document": ref in body and version in body,
+        "terms_match": terms_match,
+        "check_code": expected_code,
+        "signature_fields": signing.signature_fields(content),
         "expected_tax_code": expected_id,
         "expected_name": expected_name,
         "expected_source": expected_source,
@@ -105,11 +167,26 @@ async def check_sme_agreement(
         "problems": [],
         "signer_matches": False,
         "name_matches": False,
+        "guarantor_required": needs_guarantor,
+        "guarantor": (
+            {
+                "expected_id": guarantor_person.id_number if guarantor_person else None,
+                "expected_name": guarantor_person.name if guarantor_person else None,
+                "matches": False,
+                "name_matches": False,
+                "signer": None,
+                "issuer": None,
+                "signed_time": None,
+                "problems": [],
+            }
+            if needs_guarantor
+            else None
+        ),
         "neac_message": None,
         "signatures": [],
     }
     try:
-        result = await neac.verify_document(content, document.original_filename or "hop-dong-dich-vu.pdf")
+        result = await neac.verify_document(content, document.original_filename or "van-ban-da-ky.pdf")
     except neac.NeacUnavailable as exc:
         verdict.update(status=UNAVAILABLE, neac_message=str(exc))
     else:
@@ -137,6 +214,23 @@ async def check_sme_agreement(
                 signer_matches=neac.same_id(sig, expected_id),
                 name_matches=neac.same_name(sig, expected_name),
             )
+            if needs_guarantor:
+                # A signature of the Guarantor's own besides the company's: valid ones first.
+                wanted = verdict["guarantor"]["expected_id"]
+                theirs = sorted(
+                    (s for s in result.signatures if s is not sig and neac.same_id(s, wanted)),
+                    key=lambda s: bool(neac.problems(s)),
+                )
+                if theirs:
+                    g = theirs[0]
+                    verdict["guarantor"].update(
+                        matches=not neac.problems(g),
+                        name_matches=neac.same_name(g, verdict["guarantor"]["expected_name"]),
+                        signer=g.signer,
+                        issuer=g.issuer,
+                        signed_time=g.signed_time,
+                        problems=neac.problems(g),
+                    )
     append_audit(
         db,
         entity_type=AUDIT_ENTITY,
@@ -147,6 +241,10 @@ async def check_sme_agreement(
     )
     await db.flush()
     return verdict
+
+
+# The name the Service Agreement check was introduced under.
+check_sme_agreement = check_signed_document
 
 
 async def latest_checks(db: AsyncSession, document_ids: list[UUID]) -> dict[UUID, dict]:

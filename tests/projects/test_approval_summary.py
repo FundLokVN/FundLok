@@ -65,7 +65,8 @@ async def test_an_approved_request_shows_its_score_rate_and_repayment(
     rate = Decimal(str(approval["reference_rate_pct"])) / 100
     expected = Decimal(80_000_000) * (1 + rate * months / 12)
     assert abs(approval["total_repayment_vnd"] - int(expected)) <= 80_000_000 * 0.0001 * months
-    assert approval["estimated_daily_repayment_vnd"] == round(approval["total_repayment_vnd"] / (months * 22))
+    # The repayment schedule's own daily instalment (Contract 3: N0 = 21 × M, floored), the figure the SME signs.
+    assert approval["estimated_daily_repayment_vnd"] == approval["total_repayment_vnd"] // (months * 21)
 
     # The applicant-facing status still says "under review": approval is one
     # half of the gate, and no internal pricing input is exposed.

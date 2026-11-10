@@ -142,9 +142,11 @@ async def publish_project_for_funding(
     project cannot open (PROJECT_NOT_LIVE, ACCOUNT_NOT_APPROVED, TERMS_NOT_LOCKED, or the window's own:
     TARGET_ABOVE_CAP, RATE_ABOVE_CAP, LISTING_NOT_OPENABLE, ...).
 
-    The window is opened on the SME's behalf: the standing offer is signed with the mock signer and the SME's
-    outside-debt declaration is taken as zero. Collecting both from the SME is a later step (funding-window.md
-    rule 1, I-25).
+    The window is opened on the SME's behalf. The SME and its Personal Guarantor have already signed the Standing
+    Offer itself (a project is only ACTIVE once they have: app/loans/signing.py); the window's StandingOffer row is
+    still the machine-readable terms snapshot signed with the mock signer, and the SME's outside-debt declaration
+    is taken as zero. Linking the window to the SME's signed PDF and collecting the declaration are later steps
+    (funding-window.md rule 1, I-25).
     """
     p = resolve(params)
     project = await db.get(Project, project_id)

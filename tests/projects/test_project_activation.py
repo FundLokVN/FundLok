@@ -1,4 +1,5 @@
-"""A project goes on the marketplace (ACTIVE) once BOTH approvals land.
+"""A project goes on the marketplace (ACTIVE) once BOTH approvals land and the
+SME has signed its listing documents.
 
 The two-approval gate: the operator's (admin_approval == APPROVED) and the
 engine's (a LOCKED score run). Nothing used to set a project ACTIVE: creation
@@ -6,7 +7,10 @@ leaves it DRAFT, and ACTIVE was only the column's server default, so a
 genuinely approved SME never reached /projects/public.
 
 Either half can come second, so both paths are tested: approve then lock, and
-lock then approve.
+lock then approve. Those use applications whose listing documents are already
+on file (make_submitted_application's default); the signatures as the last
+part of the gate are tested at the end, and the signing itself in
+tests/loans/test_listing_signing.py.
 """
 import uuid
 
@@ -163,3 +167,37 @@ async def test_activation_is_audited(
         "application_id": application["id"],
         "score_run_id": str(run.id),
     }
+
+
+async def test_both_approvals_without_the_signed_documents_do_not_activate(
+    client, make_user, make_admin, make_submitted_application, add_run, db_session  # noqa: F811
+):
+    # Signing publishes the listing (Contract 3): approved and locked is not yet live.
+    _, project, application = await make_submitted_application(signed=False)
+    admin = await make_admin()
+    run = await add_run(application["id"])
+    await _approve(client, admin, application["id"])
+    await _lock(client, admin, run.id)
+
+    assert await _project_status(db_session, project["id"]) == "DRAFT"
+    assert not await _listed(client, make_user, project["id"])
+
+
+async def test_the_second_signature_activates_an_approved_project(
+    client, make_user, make_admin, make_submitted_application, add_run, db_session  # noqa: F811
+):
+    from app.projects.service import activate_project_if_approved
+    from conftest import attach_signed_listing_documents
+
+    _, project, application = await make_submitted_application(signed=False)
+    admin = await make_admin()
+    run = await add_run(application["id"])
+    await _approve(client, admin, application["id"])
+    await _lock(client, admin, run.id)
+
+    # What the SME's second signed upload does (app/loans/signing.record_signed).
+    await attach_signed_listing_documents(db_session, application["id"])
+    assert await activate_project_if_approved(db_session, uuid.UUID(application["id"]))
+    await db_session.commit()
+
+    assert await _project_status(db_session, project["id"]) == "ACTIVE"
