@@ -30,6 +30,10 @@ class User(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(Text, unique=True, nullable=False)
     phone = Column(Text, unique=True)
+    # When `phone` was proven by a one-time code (app/phone_verification/).
+    # NULL means the number, if any, is only what the user typed. Cleared when
+    # the number changes, so it always describes the number stored beside it.
+    phone_verified_at = Column(DateTime(timezone=True))
     password_hash = Column(String, nullable=True)
     full_name = Column(String, nullable=True)
     avatar_key = Column(Text, nullable=True)
