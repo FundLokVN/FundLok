@@ -54,7 +54,11 @@ async def update_settings(
     """Your sender name, signature and sending switch. The Google account is
     connected through /oauth/authorize, not here."""
     return await service.update_settings(
-        db, body, actor_id=current_user.id, ip_address=_ip(request)
+        db,
+        body,
+        actor_id=current_user.id,
+        actor_email=current_user.email,
+        ip_address=_ip(request),
     )
 
 

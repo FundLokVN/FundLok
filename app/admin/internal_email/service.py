@@ -162,7 +162,12 @@ async def get_settings(db: AsyncSession, *, actor_id: UUID) -> EmailSettingsOut:
 
 
 async def update_settings(
-    db: AsyncSession, body: EmailSettingsUpdate, *, actor_id: UUID, ip_address: str | None
+    db: AsyncSession,
+    body: EmailSettingsUpdate,
+    *,
+    actor_id: UUID,
+    actor_email: str | None = None,
+    ip_address: str | None,
 ) -> EmailSettingsOut:
     """Sender name, signature and the sending switch. The Google account
     itself is connected through the OAuth flow, never typed in here."""
@@ -178,6 +183,18 @@ async def update_settings(
             status.HTTP_400_BAD_REQUEST,
             "EMAIL_NOT_CONFIGURED",
             "Connect your Google account before turning sending on.",
+        )
+    if (
+        body.enabled
+        and actor_email
+        and row is not None
+        and row.gmail_address
+        and row.gmail_address.strip().lower() != actor_email.strip().lower()
+    ):
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "GMAIL_EMAIL_MISMATCH",
+            "The connected Google account does not match your signed-in account email. Connect your own Google account before turning sending on.",
         )
 
     if row is None:
@@ -268,6 +285,7 @@ OAUTH_INVALID_STATE = "invalid_state"
 OAUTH_NOT_ADMIN = "not_admin"
 OAUTH_SCOPE_MISSING = "scope_missing"
 OAUTH_EMAIL_UNVERIFIED = "email_unverified"
+OAUTH_EMAIL_MISMATCH = "email_mismatch"
 OAUTH_DOMAIN_NOT_ALLOWED = "domain_not_allowed"
 OAUTH_NO_REFRESH_TOKEN = "no_refresh_token"
 OAUTH_NOT_CONFIGURED = "not_configured"
@@ -344,7 +362,7 @@ async def complete_oauth(
     except google.GoogleUnavailable:
         raise OAuthCallbackError(OAUTH_FAILED) from None
 
-    rejection = _grant_rejection(grant)
+    rejection = _grant_rejection(grant, expected_email=actor.email)
     if rejection is not None:
         # Nothing of it is kept; do not leave the grant live at Google.
         await google.revoke(grant.refresh_token or grant.access_token)
@@ -397,7 +415,9 @@ async def complete_oauth(
         await google.revoke(previous_token)
 
 
-def _grant_rejection(grant: google.TokenGrant) -> str | None:
+def _grant_rejection(
+    grant: google.TokenGrant, *, expected_email: str | None = None
+) -> str | None:
     if google.GMAIL_SEND_SCOPE not in grant.scopes:
         # Google's consent screen lets the admin untick "Send email on your
         # behalf"; without it the connection could never send.
@@ -407,6 +427,8 @@ def _grant_rejection(grant: google.TokenGrant) -> str | None:
     allowed = settings.gmail_connect_allowed_domains
     if allowed and grant.email.rsplit("@", 1)[-1].lower() not in allowed:
         return OAUTH_DOMAIN_NOT_ALLOWED
+    if expected_email and grant.email.strip().lower() != expected_email.strip().lower():
+        return OAUTH_EMAIL_MISMATCH
     if not grant.refresh_token:
         return OAUTH_NO_REFRESH_TOKEN
     return None
@@ -657,7 +679,7 @@ async def preview(db: AsyncSession, content: EmailContent, *, actor_id: UUID) ->
 
 
 async def _connected_account(
-    db: AsyncSession, actor_id: UUID
+    db: AsyncSession, actor_id: UUID, *, actor_email: str | None = None
 ) -> tuple[EmailSettings, str]:
     """The admin's own settings row and decrypted refresh token, or the
     409/503 that says why there is nothing to send with."""
@@ -667,6 +689,15 @@ async def _connected_account(
             status.HTTP_409_CONFLICT,
             "EMAIL_NOT_CONFIGURED",
             "Connect your Google account under Email settings first.",
+        )
+    if (
+        actor_email
+        and row.gmail_address.strip().lower() != actor_email.strip().lower()
+    ):
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "GMAIL_EMAIL_MISMATCH",
+            "The connected Google account does not match your signed-in account email. Connect your own Google account under Email settings.",
         )
     try:
         token = crypto.decrypt_secret(row.refresh_token_encrypted)
@@ -890,7 +921,7 @@ async def send_test(
     """Send the test template to the signed-in admin's own address. Allowed
     while sending is paused, so the account can be checked before it is
     switched on."""
-    account, refresh_token = await _connected_account(db, actor.id)
+    account, refresh_token = await _connected_account(db, actor.id, actor_email=actor.email)
     # What is being tested, so only this token is marked verified.
     tested_address = account.gmail_address
     tested_ciphertext = account.refresh_token_encrypted
@@ -931,7 +962,7 @@ async def send_test(
 async def send(
     db: AsyncSession, body: SendEmailRequest, *, actor: User, ip_address: str | None
 ) -> InternalEmailOut:
-    account, refresh_token = await _connected_account(db, actor.id)
+    account, refresh_token = await _connected_account(db, actor.id, actor_email=actor.email)
     if not account.enabled:
         raise _error(
             status.HTTP_409_CONFLICT,
