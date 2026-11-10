@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, status
 
-from app.lending.models import LoanApplication, LoanApplicationDocument
+from app.lending.models import LoanApplication
 from app.loans.lite_grading import LiteGradingError, grade_lite
 from app.loans.schemas import (
     LoanApplicationCreate,
@@ -95,25 +95,9 @@ async def submit_application(db: AsyncSession, application_id: UUID, current_use
         raise HTTPException(status_code=403, detail="Not authorized")
     if row.status != "DRAFT":
         raise HTTPException(status_code=400, detail="Application is not in DRAFT status")
-    # The SME Service Agreement (Contract 2), signed with the SME's enterprise
-    # digital signature and uploaded back, comes with the application.
-    from app.loans.agreement.service import SERVICE_AGREEMENT_DOCUMENT_TYPE
-
-    signed = await db.scalar(
-        select(func.count())
-        .select_from(LoanApplicationDocument)
-        .where(
-            LoanApplicationDocument.loan_application_id == row.id,
-            LoanApplicationDocument.document_type == SERVICE_AGREEMENT_DOCUMENT_TYPE,
-            LoanApplicationDocument.status == "UPLOADED",
-        )
-    )
-    if not signed:
-        raise HTTPException(
-            status_code=400,
-            detail="Upload the signed SME Service Agreement before submitting.",
-            headers={"X-Error-Code": "SERVICE_AGREEMENT_REQUIRED"},
-        )
+    # The SME Service Agreement and the Standing Offer are signed after
+    # approval, with the approved terms in them (app/loans/signing.py), not
+    # with the application.
     row.status = "SUBMITTED"
     row.submitted_at = datetime.now(timezone.utc)
     db.add(row)

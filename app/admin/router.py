@@ -330,20 +330,21 @@ async def check_document_with_neac(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Check the SME's signed Service Agreement (wizard step 4) with NEAC, and record the verdict: NEAC's own
-    verification (valid, unchanged, not revoked), whether it is this application's agreement, and whether the
-    signer's MST is the company's. Admin-only; the SME is not held up by it. Takes a few seconds."""
+    """Check a signed listing document (the Service Agreement or the Standing Offer) with NEAC again, and record
+    the verdict: NEAC's own verification (valid, unchanged, not revoked), whether it is this application's
+    document with today's check code, whether the signer's MST is the company's, and on the Standing Offer the
+    Personal Guarantor's own signature. Admin-only. Takes a few seconds."""
     from datetime import datetime as _dt, timezone as _tz
 
     from app.lending.models import LoanApplicationDocument
     from app.loans.agreement import neac_check
 
     document = await db.get(LoanApplicationDocument, document_id)
-    if document is None or document.document_type != neac_check.DOCUMENT_TYPE:
-        raise HTTPException(status_code=404, detail="No signed service agreement with this id")
+    if document is None or document.document_type not in neac_check.DOCUMENT_TYPES:
+        raise HTTPException(status_code=404, detail="No signed listing document with this id")
     if document.status != "UPLOADED":
-        raise HTTPException(status_code=409, detail="The signed service agreement has not finished uploading")
-    verdict = await neac_check.check_sme_agreement(
+        raise HTTPException(status_code=409, detail="The signed document has not finished uploading")
+    verdict = await neac_check.check_signed_document(
         db, document=document, actor_id=current_user.id, now=_dt.now(_tz.utc)
     )
     await db.commit()

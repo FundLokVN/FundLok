@@ -316,3 +316,47 @@ class GradingInputsOut(BaseModel):
     tax_filings: TaxFilingsEvidenceOut | None = None
     e_invoice: EInvoiceEvidenceOut | None = None
     cic: CicEvidenceOut | None = None
+
+
+class SignerCheckOut(BaseModel):
+    role: Literal["SME", "GUARANTOR"]
+    name: str | None = None
+
+
+class ListingDocumentChecksOut(BaseModel):
+    """What the automatic check on upload established (app/loans/signing.py): NEAC accepted the signatures and
+    they are the right signers', and the signed copy carries the approved numbers (its check code)."""
+
+    checked_at: datetime | None = None
+    verified_by: str | None = None
+    terms_match: bool = False
+    signers: list[SignerCheckOut] = []
+
+
+class SignedListingDocumentOut(BaseModel):
+    """One of the two documents the SME signs after approval (app/loans/signing.py)."""
+
+    signed: bool
+    signed_at: datetime | None = None
+    file_name: str | None = None
+    checks: ListingDocumentChecksOut | None = None
+
+
+class ListingDocumentsOut(BaseModel):
+    """Where signing stands on an application.
+
+    ready: FundLok approved the request and its terms are locked, so the two
+      documents carry them and can be signed (or already are).
+    published: the project is live on the marketplace. Signing both publishes
+      it; a project that went live before this step existed is published
+      without them.
+    guarantor_verified: the signing user has an approved eKYC with an ID
+      number, which the Standing Offer's Personal Guarantor signature is
+      checked against. Without it the Standing Offer cannot be accepted.
+    """
+
+    ready: bool
+    published: bool
+    guarantor_verified: bool
+    service_agreement: SignedListingDocumentOut
+    standing_offer: SignedListingDocumentOut

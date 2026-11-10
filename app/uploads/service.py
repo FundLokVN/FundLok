@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.lending.models import Document, LoanApplication, LoanApplicationDocument, Project
-from app.loans.agreement.signature import has_digital_signature
 from app.projects.service import user_owns_project
 from app.uploads.models import CicSummary, EInvoiceSummary, TaxFilingSummary
 from app.uploads.parsers.cic import CicParseError, parse_cic_pdf
@@ -20,6 +19,7 @@ from app.uploads.parsers.tax_filings import TaxFilingsParseError, parse_tax_fili
 from app.uploads.schemas import (
     DOCUMENT_TYPE_RULES,
     EXTENSION_CONTENT_TYPES,
+    SIGNED_DOCUMENT_TYPES,
     FileCommitRequest,
     FilePresignRequest,
     UploadConfirmRequest,
@@ -46,6 +46,15 @@ def _validate_file(body: UploadPresignRequest) -> str:
     rules = DOCUMENT_TYPE_RULES.get(body.document_type)
     if rules is None:
         raise HTTPException(status_code=400, detail="Invalid document_type")
+    if body.document_type in SIGNED_DOCUMENT_TYPES:
+        # Signed after approval and checked with NEAC on the way in
+        # (POST /loans/applications/{id}/listing-documents/{kind}); a presigned
+        # upload here would land one unchecked.
+        raise HTTPException(
+            status_code=400,
+            detail="Signed listing documents are uploaded after approval, from the application's signing step",
+            headers={"X-Error-Code": "SIGNED_AFTER_APPROVAL"},
+        )
     if "." not in body.filename:
         raise HTTPException(status_code=400, detail="Filename must have an extension")
     ext = body.filename.rsplit(".", 1)[1].lower()
@@ -160,31 +169,8 @@ async def confirm_uploads(
             await _ingest_tax_filings(db, app_row, doc)
         elif doc.document_type == "cic_report":
             await _ingest_cic(db, app_row, doc)
-        elif doc.document_type == "sme_service_agreement":
-            await _check_signed_agreement(doc)
     await db.flush()
     return [by_key[k] for k in file_keys]
-
-
-async def _check_signed_agreement(doc: LoanApplicationDocument) -> None:
-    """Refuse the SME Service Agreement back without a digital signature in it.
-
-    Same contract as the evidence files: on refusal the request fails, nothing
-    is committed, the document stays PENDING and the SME uploads the signed
-    copy. Read from the STORED object, not trusted from the browser.
-    """
-
-    def fetch():
-        return get_bytes(doc.file_key, max_bytes=DOCUMENT_TYPE_RULES["sme_service_agreement"]["max_size"])
-
-    raw = await run_in_threadpool(fetch)
-    if not has_digital_signature(raw):
-        raise HTTPException(
-            status_code=422,
-            detail="The service agreement has no digital signature. Sign the PDF with the "
-            "enterprise's digital signature and upload the signed copy.",
-            headers={"X-Error-Code": "SERVICE_AGREEMENT_UNSIGNED"},
-        )
 
 
 def _einvoice_error(message: str, code: str) -> HTTPException:

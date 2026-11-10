@@ -1,12 +1,11 @@
-"""The SME Service Agreement (Contract 2) in the loan application: the SME
-downloads it filled in with its own details, signs it with its enterprise
-digital signature, uploads it back, and cannot submit without it.
+"""The SME Service Agreement (Contract 2) as the SME downloads it, filled in
+with its own details. It is signed after approval, with the Standing Offer:
+tests/loans/test_listing_signing.py.
 """
 import io
 from types import SimpleNamespace
 from uuid import UUID
 
-import pytest
 from pypdf import PdfReader
 
 from app.direct_transfer.models import PaymentAccount
@@ -17,17 +16,6 @@ from app.projects.service import verified_document_types
 from conftest import SIGNED_AGREEMENT_PDF, auth_headers
 
 TAX = "0319911223"
-
-
-@pytest.fixture
-def storage(monkeypatch):
-    """R2, holding whatever the test says the SME uploaded (`storage.stored`)."""
-    held = SimpleNamespace(stored=SIGNED_AGREEMENT_PDF)
-    monkeypatch.setattr("app.uploads.service.presign_put", lambda key, ct, **kw: f"https://r2.test/{key}")
-    monkeypatch.setattr("app.uploads.service.head_object", lambda key, **kw: {"size": 2048, "content_type": None})
-    monkeypatch.setattr("app.uploads.service.get_bytes", lambda key, **kw: held.stored)
-    monkeypatch.setattr("app.uploads.service.delete_object", lambda key: None)
-    return held
 
 
 async def _apply(client, sme, *, tax_id=TAX, amount=80_000_000, months=4) -> str:
@@ -75,23 +63,6 @@ async def _verified_with_bank(db_session, sme, *, tax_id=TAX):
 
 def _pdf_text(content: bytes) -> str:
     return "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(content)).pages)
-
-
-async def _upload(client, sme, app_id, *, document_type="sme_service_agreement", filename="signed.pdf",
-                  content_type="application/pdf"):
-    init = await client.post(
-        "/uploads/init-upload",
-        json={"loan_application_id": app_id, "document_type": document_type, "filename": filename,
-              "content_type": content_type, "size": 2048},
-        headers=auth_headers(sme),
-    )
-    if init.status_code != 201:
-        return init
-    return await client.post(
-        "/uploads/confirm",
-        json={"loan_application_id": app_id, "file_keys": [init.json()["file_key"]]},
-        headers=auth_headers(sme),
-    )
 
 
 async def test_the_agreement_is_filled_from_the_smes_verified_details(client, db_session, make_user):
@@ -157,47 +128,6 @@ async def test_only_the_owning_sme_gets_the_agreement(client, make_user):
     assert (await client.get(path)).status_code == 401
 
 
-async def test_submitting_needs_the_signed_agreement(client, make_user, storage):
-    sme = await make_user(role="SME")
-    app_id = await _apply(client, sme)
-    submit = f"/loans/applications/{app_id}/submit"
-
-    refused = await client.post(submit, headers=auth_headers(sme))
-    assert refused.status_code == 400
-    assert refused.headers["X-Error-Code"] == "SERVICE_AGREEMENT_REQUIRED"
-
-    # Only a PDF: what an enterprise digital signature signs.
-    wrong = await _upload(client, sme, app_id, filename="signed.docx",
-                          content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    assert wrong.status_code in (400, 422), wrong.text
-
-    confirmed = await _upload(client, sme, app_id)
-    assert confirmed.status_code == 200, confirmed.text
-    accepted = await client.post(submit, headers=auth_headers(sme))
-    assert accepted.status_code == 200, accepted.text
-    assert accepted.json()["status"] == "SUBMITTED"
-
-
-async def test_the_unsigned_agreement_sent_straight_back_is_refused(client, make_user, storage):
-    # The likeliest mistake: the PDF as downloaded, never signed.
-    sme = await make_user(role="SME")
-    app_id = await _apply(client, sme)
-    storage.stored = (
-        await client.get(f"/loans/applications/{app_id}/service-agreement", headers=auth_headers(sme))
-    ).content
-
-    refused = await _upload(client, sme, app_id)
-    assert refused.status_code == 422
-    assert refused.headers["X-Error-Code"] == "SERVICE_AGREEMENT_UNSIGNED"
-    # Nothing committed: the application still cannot be submitted.
-    still = await client.post(f"/loans/applications/{app_id}/submit", headers=auth_headers(sme))
-    assert still.headers["X-Error-Code"] == "SERVICE_AGREEMENT_REQUIRED"
-
-    # The same file once a signing tool has appended its signature is accepted.
-    storage.stored = storage.stored + SIGNED_AGREEMENT_PDF[SIGNED_AGREEMENT_PDF.index(b"9 0 obj"):]
-    assert (await _upload(client, sme, app_id)).status_code == 200
-
-
 def test_the_signature_check_needs_a_pdf_with_a_signature_dictionary():
     assert has_digital_signature(SIGNED_AGREEMENT_PDF)
     assert not has_digital_signature(b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n")
@@ -213,9 +143,12 @@ def test_investors_are_not_shown_the_agreement():
         documents=[
             SimpleNamespace(document_type="legal_charter", status="UPLOADED"),
             SimpleNamespace(document_type="sme_service_agreement", status="UPLOADED"),
+            SimpleNamespace(document_type="sme_standing_offer", status="UPLOADED"),
             SimpleNamespace(document_type="financial_report", status="UPLOADED"),
         ],
     )
     shown = verified_document_types(application)
     assert "sme_service_agreement" not in shown
+    # Nor the signed Standing Offer: it carries the Guarantor's personal details.
+    assert "sme_standing_offer" not in shown
     assert "financial_report" in shown
