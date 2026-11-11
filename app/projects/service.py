@@ -319,8 +319,9 @@ async def activate_project_if_approved(
 ) -> bool:
     """Put a DRAFT project on the marketplace once its application has BOTH
     approvals -- the operator's (admin_approval == APPROVED) and the engine's
-    (a LOCKED score run) -- AND the SME has signed the two documents those
-    approved terms go into: the Service Agreement and the Standing Offer
+    (a LOCKED score run) -- AND the SME has signed the three documents those
+    approved terms go into: the Service Agreement, the Standing Offer and
+    the Loan Contract template
     (app/loans/signing.py; Contract 3: "signing publishes the Listing").
     Returns True when it flipped the project to ACTIVE.
 
@@ -353,9 +354,9 @@ async def activate_project_if_approved(
         return False
     # Approved but not yet signed: the SME is asked to sign (the dashboard's
     # signing step), and its second signed upload calls this again.
-    from app.loans.signing import both_signed
+    from app.loans.signing import all_signed
 
-    if not await both_signed(db, application_id):
+    if not await all_signed(db, application_id):
         return False
 
     project = (

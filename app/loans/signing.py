@@ -1,11 +1,19 @@
 """Signing the listing documents after approval. Spec: docs/specs/loans/listing-signing.md
 
 Once FundLok has approved a request (the operator's approval and a LOCKED score run, which fixes the rate), the SME
-downloads two documents filled in with the approved terms, signs them and uploads the signed copies here:
+downloads three documents filled in with the approved terms, signs them and uploads the signed copies here:
 
   service-agreement   Contract 2, SME Service Agreement      the SME's enterprise digital signature
   standing-offer      Contract 3, Standing Offer             the SME's enterprise digital signature AND the
                                                              Personal Guarantor's personal digital signature
+  loan-contract       Contract 5, Loan Contract template     the same two signatures; each Investor's own contract
+                                                             is generated from it at commitment (a later step)
+
+The Loan Contract template cites the Standing Offer by number and date, so it is offered and accepted only once
+the Offer is on file (409 SIGNING_OFFER_FIRST). None is accepted while it still prints a party's details as a blank
+(422 SIGNING_DETAILS_MISSING; `missing_for` says which): the SME completes them (the company's on its business
+verification, project and bank account; the Guarantor's address on this step, `set_guarantor_address`) and
+downloads the document again.
 
 Nobody reviews them before they take effect, so each upload is checked automatically on the way in, the way the
 investor's signed agreement is (app/market/investor_agreement):
@@ -24,7 +32,7 @@ Nothing is accepted unchecked: NEAC down is a 503 and the SME tries again. The v
 NEAC_SIGNATURE_CHECKED audit event, which is what the admin panel shows (app/loans/agreement/neac_check.py) and what
 the SME's signing card reads back (`checks_for`).
 
-When both are on file the project goes live (projects.service.activate_project_if_approved), which also opens its
+When all three are on file the project goes live (projects.service.activate_project_if_approved), which also opens its
 funding window if the SME's bank account is approved: signing publishes the Listing (Contract 3, "Ký kết").
 """
 from __future__ import annotations
@@ -42,8 +50,9 @@ from starlette.concurrency import run_in_threadpool
 
 from app.gverify.models import GVerifyKybVerification
 from app.lending.models import LoanApplication, LoanApplicationDocument, Project, ProjectOwnership
-from app.loans.agreement import standing_offer_text
+from app.loans.agreement import loan_contract_text, standing_offer_text
 from app.loans.agreement import text as agreement_text
+from app.loans.agreement.loan_contract import contract_check_code, offer_signed_on
 from app.loans.agreement.neac_check import AUDIT_ACTION, AUDIT_ENTITY, VERIFIED, application_ref, latest_checks
 from app.loans.agreement.pdf import GUARANTOR_SIGNATURE_FIELD, SME_SIGNATURE_FIELD
 from app.loans.agreement.service import SERVICE_AGREEMENT_DOCUMENT_TYPE, agreement_data
@@ -56,7 +65,9 @@ from app.utils.audit import append_audit
 from app.utils.r2 import get_bytes, put_bytes
 
 STANDING_OFFER_DOCUMENT_TYPE = "sme_standing_offer"
+LOAN_CONTRACT_DOCUMENT_TYPE = "sme_loan_contract"
 MAX_BYTES = 25 * 1024 * 1024  # the type's own limit (uploads.schemas.DOCUMENT_TYPE_RULES)
+OFFER_FIRST = "The Loan Contract cites the signed Standing Offer: sign and upload the Standing Offer first"
 
 
 @dataclass(frozen=True)
@@ -79,7 +90,16 @@ STANDING_OFFER = Kind(
     True,
     (SME_SIGNATURE_FIELD, GUARANTOR_SIGNATURE_FIELD),
 )
-KINDS = {k.slug: k for k in (SERVICE_AGREEMENT, STANDING_OFFER)}
+LOAN_CONTRACT = Kind(
+    "loan-contract",
+    LOAN_CONTRACT_DOCUMENT_TYPE,
+    loan_contract_text.VERSION,
+    True,
+    (SME_SIGNATURE_FIELD, GUARANTOR_SIGNATURE_FIELD),
+)
+KINDS = {k.slug: k for k in (SERVICE_AGREEMENT, STANDING_OFFER, LOAN_CONTRACT)}
+# What each kind is called in a refusal.
+TITLES = {SERVICE_AGREEMENT: "Service Agreement", STANDING_OFFER: "Standing Offer", LOAN_CONTRACT: "Loan Contract"}
 KINDS_BY_TYPE = {k.document_type: k for k in KINDS.values()}
 
 
@@ -108,7 +128,7 @@ async def signed_documents(db: AsyncSession, application_id: UUID) -> dict[str, 
     return {row.document_type: row for row in rows}
 
 
-async def both_signed(db: AsyncSession, application_id: UUID) -> bool:
+async def all_signed(db: AsyncSession, application_id: UUID) -> bool:
     return len(await signed_documents(db, application_id)) == len(KINDS)
 
 
@@ -121,17 +141,60 @@ class SigningStatus:
     # The signing user has an approved eKYC with an ID number: the Standing Offer's Guarantor can be checked.
     guarantor_verified: bool
     signed: dict[str, LoanApplicationDocument]
+    # The details each kind still prints as a blank (pdf.COMPANY_NAME ... GUARANTOR_ADDRESS), by kind.
+    missing: dict[Kind, list[str]]
+    # The Guarantor's address as the documents print it, and where it came from ("EKYC", "SME" or None).
+    guarantor_address: str | None
+    guarantor_address_source: str | None
+
+
+def missing_for(data, kind: Kind) -> list[str]:
+    """The details the document of `kind` still prints as a blank, from its offer_data: the SME's on all three, the
+    Guarantor's on the two the Guarantor signs."""
+    return data.missing_details() if kind.needs_guarantor else data.sme.missing_details()
 
 
 async def status(db: AsyncSession, application: LoanApplication, user: User) -> SigningStatus:
     project = await db.get(Project, application.project_id)
-    guarantor = await guarantor_for(db, user)
+    data = await offer_data(db, application, user)
     return SigningStatus(
-        ready=await locked_terms(db, application) is not None,
+        ready=data.terms is not None,
         published=project is not None and project.status == "ACTIVE",
-        guarantor_verified=guarantor.id_number is not None,
+        guarantor_verified=data.guarantor.id_number is not None,
         signed=await signed_documents(db, application.id),
+        missing={kind: missing_for(data, kind) for kind in KINDS.values()},
+        guarantor_address=data.guarantor.address,
+        guarantor_address_source=data.guarantor.address_source,
     )
+
+
+async def set_guarantor_address(
+    db: AsyncSession, *, application: LoanApplication, user: User, address: str, ip_address: str | None = None
+) -> None:
+    """Keep the Personal Guarantor's address the SME entered, for the Standing Offer and the Loan Contract template.
+    409 SIGNING_ALREADY_SIGNED once either is on file: what they were signed with is the record. The eKYC's own
+    address still wins where it has one (standing_offer.guarantor_for)."""
+    signed = await signed_documents(db, application.id)
+    if any(k.document_type in signed for k in KINDS.values() if k.needs_guarantor):
+        raise _refuse(
+            409,
+            "SIGNING_ALREADY_SIGNED",
+            "The Standing Offer is already signed with the Guarantor's details; they can no longer change",
+        )
+    before = application.guarantor_address
+    application.guarantor_address = address
+    db.add(application)
+    append_audit(
+        db,
+        entity_type="LOAN_APPLICATION",
+        entity_id=application.id,
+        action="GUARANTOR_ADDRESS_SET",
+        actor_id=user.id,
+        before_state={"guarantor_address": before},
+        after_state={"guarantor_address": address},
+        ip_address=ip_address,
+    )
+    await db.flush()
 
 
 async def _company(db: AsyncSession, project: Project) -> tuple[str | None, str | None, str]:
@@ -174,6 +237,8 @@ async def expected_check_code(db: AsyncSession, application: LoanApplication, us
     """The check code the document of `kind` carries when generated now, for this user."""
     if kind is STANDING_OFFER:
         return (await offer_data(db, application, user)).check_code
+    if kind is LOAN_CONTRACT:
+        return contract_check_code(await offer_data(db, application, user), await offer_signed_on(db, application))
     return (await agreement_data(db, application, user)).check_code
 
 
@@ -225,7 +290,7 @@ async def _neac_verdict(
             raise _refuse(
                 422,
                 "SIGNING_GUARANTOR_MISSING",
-                f"The Standing Offer also needs the Personal Guarantor's personal digital signature "
+                f"The {TITLES[kind]} also needs the Personal Guarantor's personal digital signature "
                 f"({guarantor_name or 'the guarantor'}, ID {guarantor_id}).",
             )
         g = personal[0]
@@ -282,24 +347,37 @@ async def record_signed(
     now: dt.datetime,
     ip_address: str | None = None,
 ) -> LoanApplicationDocument:
-    """Check and keep the SME's signed copy of `kind`; when it is the second of the two, publish the project.
+    """Check and keep the SME's signed copy of `kind`; when it is the last of the three, publish the project.
 
     409 SIGNING_NOT_OPEN before FundLok has approved the request with locked terms; 409 SIGNING_ALREADY_SIGNED when
-    this document is already on file; 413 SIGNING_FILE_TOO_LARGE; 415 SIGNING_NOT_PDF; 422 SIGNING_UNSIGNED for a
+    this document is already on file; 409 SIGNING_OFFER_FIRST for the Loan Contract before the Standing Offer is on
+    file; 422 SIGNING_DETAILS_MISSING while the document still prints a party's details as a blank (the codes in
+    the detail, `missing_for`); 413 SIGNING_FILE_TOO_LARGE; 415 SIGNING_NOT_PDF; 422 SIGNING_UNSIGNED for a
     PDF with no digital signature in it; 422 SIGNING_WRONG_DOCUMENT when it is not this application's document of
     this kind and version; 422 SIGNING_DOCUMENT_OUTDATED when it is, but its check code is not the one it would
     carry today (terms, assessment or a party's details changed since it was downloaded, or it was edited); 422
-    SIGNING_GUARANTOR_MISSING before NEAC too, when the Standing Offer has fewer signed signature fields than
-    signers; 422 SIGNING_GUARANTOR_UNVERIFIED (Standing Offer) when the signing user has no approved
+    SIGNING_GUARANTOR_MISSING before NEAC too, when a guarantor-signed document has fewer signed signature fields than
+    signers; 422 SIGNING_GUARANTOR_UNVERIFIED (Standing Offer, Loan Contract) when the signing user has no approved
     eKYC with an ID number to check the Guarantor against; 422 SIGNING_SIGNATURE_INVALID when NEAC does not accept
     the signature (its reasons in the detail); 422 SIGNING_SIGNER_MISMATCH when no valid signature is the
-    company's; 422 SIGNING_GUARANTOR_MISSING when the Standing Offer has no valid personal signature of the
+    company's; 422 SIGNING_GUARANTOR_MISSING when such a document has no valid personal signature of the
     Guarantor's; 503 NEAC_UNAVAILABLE when NEAC cannot be reached.
     """
     if await locked_terms(db, application) is None:
         raise _refuse(409, "SIGNING_NOT_OPEN", "There is nothing to sign until FundLok approves the request")
-    if kind.document_type in await signed_documents(db, application.id):
+    signed = await signed_documents(db, application.id)
+    if kind.document_type in signed:
         raise _refuse(409, "SIGNING_ALREADY_SIGNED", "This document is already signed and on file")
+    if kind is LOAN_CONTRACT and STANDING_OFFER_DOCUMENT_TYPE not in signed:
+        raise _refuse(409, "SIGNING_OFFER_FIRST", OFFER_FIRST)
+    missing = missing_for(await offer_data(db, application, user), kind)
+    if missing:
+        raise _refuse(
+            422,
+            "SIGNING_DETAILS_MISSING",
+            f"The {TITLES[kind]} still has blanks: {', '.join(missing)}. Complete them, download it again and sign "
+            "that copy.",
+        )
     if len(content) > MAX_BYTES:
         raise _refuse(413, "SIGNING_FILE_TOO_LARGE", "The signed PDF is larger than 25 MB")
     if not is_pdf(content):
@@ -335,10 +413,10 @@ async def record_signed(
         raise _refuse(
             422,
             "SIGNING_GUARANTOR_MISSING",
-            f"The Standing Offer carries {len(signed_fields)} signature; it needs the company's and the Personal "
+            f"The {TITLES[kind]} carries {len(signed_fields)} signature; it needs the company's and the Personal "
             "Guarantor's, one in each signature box.",
         )
-    guarantor = await guarantor_for(db, user) if kind.needs_guarantor else None
+    guarantor = await guarantor_for(db, user, application) if kind.needs_guarantor else None
     if guarantor is not None and guarantor.id_number is None:
         raise _refuse(
             422,
@@ -359,8 +437,8 @@ async def record_signed(
         guarantor_name=guarantor.name if guarantor else None,
     )
 
-    # Serialised per application, after the slow NEAC call: two uploads at once (the two documents, or the same
-    # one twice) would otherwise each miss the other, and the second of the two documents would not publish.
+    # Serialised per application, after the slow NEAC call: uploads at once (different documents, or the same one
+    # twice) would otherwise each miss the other, and the last of the three documents would not publish.
     await db.execute(select(LoanApplication.id).where(LoanApplication.id == application.id).with_for_update())
     existing = (
         await db.execute(
@@ -413,7 +491,7 @@ async def record_signed(
     )
     await db.flush()
 
-    if await both_signed(db, application.id):
+    if await all_signed(db, application.id):
         # Imported here: app.projects.service imports this module for its gate.
         from app.projects.service import activate_project_if_approved
 

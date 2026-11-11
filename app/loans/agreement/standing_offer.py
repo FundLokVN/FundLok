@@ -5,14 +5,16 @@ Where each blank comes from:
   Offeror (SME)            as the Service Agreement's Party B (agreement/service.agreement_data): the approved KYB,
                            else the project's own name and tax id; the approved SME bank account
   Personal Guarantor       the signing SME user's approved eKYC: full name and ID number; the ID card's address when
-                           the provider returned one (GVerify's OCR does not today, so it prints as a blank)
+                           the provider returned one, else the address the SME entered on the signing step
+                           (loan_applications.guarantor_address: GVerify's OCR returns none today)
   Listing details          the approved request's terms (agreement/terms.locked_terms): target, rate, term; the
                            minimum ticket from the funding parameters; the application reference as the Listing ID
                            (one Listing per request); the template's own rules for the dates
   revenue share (s)        not computed by the platform yet, so a dotted blank
   assessment and estimate  the LOCKED score run's business score and lock date; principal, interest, total, daily
                            instalment and backstop from the repayment schedule's own rules (terms.repayment_estimate)
-Anything unknown prints as a dotted blank, as in the template.
+Anything unknown prints as a dotted blank, as in the template, and the Offer cannot be signed while a party's details
+are missing (`missing_details`).
 
 Two empty signature fields sit over the signature boxes, SME_Signature and Guarantor_Signature, and every page
 carries a check code over everything the Offer is filled in with (pdf.check_code): app/loans/signing.py works it
@@ -32,12 +34,16 @@ from app.gverify.models import STATUS_APPROVED, GVerifyVerification
 from app.lending.models import LoanApplication
 from app.loans.agreement import standing_offer_text as text
 from app.loans.agreement.pdf import (
+    GUARANTOR_ADDRESS,
+    GUARANTOR_ID,
+    GUARANTOR_NAME,
     GUARANTOR_SIGNATURE_FIELD,
     SME_SIGNATURE_FIELD,
     AgreementData,
     ContractPDF,
     check_code,
     rate,
+    signer_name,
 )
 from app.loans.agreement.service import agreement_data
 from app.loans.agreement.terms import ListingTerms, locked_terms
@@ -56,6 +62,12 @@ class Guarantor:
     name: str | None
     id_number: str | None
     address: str | None
+    # Where the address came from: "EKYC" (the ID card), "SME" (entered on the signing step) or None (none yet).
+    address_source: str | None = None
+
+    def missing_details(self) -> list[str]:
+        values = {GUARANTOR_NAME: self.name, GUARANTOR_ID: self.id_number, GUARANTOR_ADDRESS: self.address}
+        return [code for code, value in values.items() if not value]
 
 
 @dataclass(frozen=True)
@@ -64,6 +76,10 @@ class StandingOfferData:
     guarantor: Guarantor
     terms: ListingTerms | None
     min_ticket_vnd: int
+
+    def missing_details(self) -> list[str]:
+        """The parties' details the Offer (and the Loan Contract) still prints as a blank."""
+        return self.sme.missing_details() + self.guarantor.missing_details()
 
     @property
     def check_code(self) -> str:
@@ -92,8 +108,13 @@ def _clean(value) -> str | None:
     return value or None
 
 
-async def guarantor_for(db: AsyncSession, user: User) -> Guarantor:
-    """The Personal Guarantor: the signing SME user, as their approved eKYC names them."""
+def _entered(application: LoanApplication | None) -> str | None:
+    return _clean(application.guarantor_address) if application is not None else None
+
+
+async def guarantor_for(db: AsyncSession, user: User, application: LoanApplication | None = None) -> Guarantor:
+    """The Personal Guarantor: the signing SME user, as their approved eKYC names them. The address is the ID card's
+    when the eKYC has one, else the one the SME entered for `application` (none without an application)."""
     kyc = (
         await db.execute(
             select(GVerifyVerification)
@@ -106,20 +127,25 @@ async def guarantor_for(db: AsyncSession, user: User) -> Guarantor:
             .limit(1)
         )
     ).scalar_one_or_none()
+    entered = _entered(application)
     if kyc is None:
-        return Guarantor(name=_clean(user.full_name), id_number=None, address=None)
+        return Guarantor(
+            name=_clean(user.full_name), id_number=None, address=entered, address_source="SME" if entered else None
+        )
     ocr = kyc.ocr_data if isinstance(kyc.ocr_data, dict) else {}
+    on_card = next((_clean(ocr.get(key)) for key in _ADDRESS_KEYS if _clean(ocr.get(key))), None)
     return Guarantor(
         name=_clean(kyc.full_name) or _clean(user.full_name),
         id_number=_clean(kyc.person_number),
-        address=next((_clean(ocr.get(key)) for key in _ADDRESS_KEYS if _clean(ocr.get(key))), None),
+        address=on_card or entered,
+        address_source="EKYC" if on_card else ("SME" if entered else None),
     )
 
 
 async def offer_data(db: AsyncSession, application: LoanApplication, user: User) -> StandingOfferData:
     return StandingOfferData(
         sme=await agreement_data(db, application, user),
-        guarantor=await guarantor_for(db, user),
+        guarantor=await guarantor_for(db, user, application),
         terms=await locked_terms(db, application),
         min_ticket_vnd=resolve(None).min_ticket_vnd,
     )
@@ -235,7 +261,9 @@ def render(data: StandingOfferData, prepared_on: date) -> bytes:
 
     pdf.title_block(
         text.TITLE,
-        f"Mã hồ sơ / Application: {ref}   ·   Ngày lập / Prepared: {prepared_on.strftime('%d/%m/%Y')}   ·   "
+        number=text.NUMBER.format(ref=ref),
+        prepared_on=prepared_on,
+        meta=f"Văn bản số 3 / Document 3   ·   Mã hồ sơ / Application: {ref}   ·   "
         f"Phiên bản / Version: {text.VERSION}   ·   Mã đối chiếu / Check: {code}",
     )
     pdf.vi(text.PREVAILS[0])
@@ -272,7 +300,11 @@ def render(data: StandingOfferData, prepared_on: date) -> bytes:
     pdf.vi(text.ANNEX[0])
     pdf.en(text.ANNEX[1])
 
-    pdf.signature_blocks(text.SIGNATURES, fields=(SME_SIGNATURE_FIELD, GUARANTOR_SIGNATURE_FIELD))
+    pdf.signature_blocks(
+        text.SIGNATURES,
+        fields=(SME_SIGNATURE_FIELD, GUARANTOR_SIGNATURE_FIELD),
+        names=(signer_name(data.sme.legal_representative, data.sme.sme_name), data.guarantor.name),
+    )
     return pdf.output_bytes()
 
 

@@ -81,9 +81,9 @@ async def _uploaded_agreement(client, db_session, make_user, monkeypatch, *, con
     return application.project_id, document.id
 
 
-async def _uploaded_offer(client, db_session, make_user, monkeypatch):
-    """An approved application (locked terms, the owner's eKYC) whose signed Standing Offer is on file; (project id,
-    document id, the SME)."""
+async def _uploaded_offer(client, db_session, make_user, monkeypatch, *, kind="standing-offer"):
+    """An approved application (locked terms, the owner's eKYC) whose signed Standing Offer (or, with
+    kind="loan-contract", Loan Contract template) is on file; (project id, document id, the SME)."""
     sme = await make_user(role="SME")
     app_id = await _apply(client, sme)
     await _verified_with_bank(db_session, sme)
@@ -97,13 +97,24 @@ async def _uploaded_offer(client, db_session, make_user, monkeypatch):
         application_id=application.id, status="LOCKED", locked_at=dt.datetime.now(dt.timezone.utc),
         final_grade_precise=72.0, interest_rate_pct=14.5,
     ))
+    application.guarantor_address = "45 Le Loi, Phuong 4, TP. Vung Tau"
     await db_session.commit()
-    download = await client.get(f"/loans/applications/{app_id}/standing-offer", headers=auth_headers(sme))
+    if kind == "loan-contract":
+        # The Loan Contract cites the signed Offer: it is on file first.
+        db_session.add(LoanApplicationDocument(
+            loan_application_id=application.id, document_type="sme_standing_offer",
+            file_key=f"test/{uuid.uuid4()}.pdf", original_filename="standing-offer-da-ky.pdf",
+            content_type="application/pdf", file_size_bytes=1, status="UPLOADED",
+            uploaded_at=dt.datetime.now(dt.timezone.utc),
+        ))
+        await db_session.commit()
+    download = await client.get(f"/loans/applications/{app_id}/{kind}", headers=auth_headers(sme))
     assert download.status_code == 200, download.text
     content = _signed(download.content)
     document = LoanApplicationDocument(
-        loan_application_id=application.id, document_type="sme_standing_offer",
-        file_key=f"test/{uuid.uuid4()}.pdf", original_filename="de-nghi-da-ky.pdf",
+        loan_application_id=application.id,
+        document_type="sme_standing_offer" if kind == "standing-offer" else "sme_loan_contract",
+        file_key=f"test/{uuid.uuid4()}.pdf", original_filename=f"{kind}-da-ky.pdf",
         content_type="application/pdf", file_size_bytes=len(content), status="UPLOADED",
     )
     db_session.add(document)
@@ -310,3 +321,49 @@ async def test_a_copy_whose_details_changed_since_signing_no_longer_matches(
     await db_session.commit()
 
     assert (await _check(client, admin, document_id)).json()["terms_match"] is False
+
+
+async def test_a_loan_contract_template_is_checked_like_the_standing_offer(
+    client, db_session, make_user, make_admin, monkeypatch, neac_answers
+):
+    admin = await make_admin()
+    _, document_id, _ = await _uploaded_offer(client, db_session, make_user, monkeypatch, kind="loan-contract")
+    neac_answers.next = _company_and_guarantor()
+
+    check = (await _check(client, admin, document_id)).json()
+    assert check["document_type"] == "sme_loan_contract"
+    assert check["status"] == "VERIFIED" and check["right_document"] is True
+    assert check["guarantor_required"] is True and check["guarantor_matches"] is True
+    assert check["terms_match"] is True
+
+    neac_answers.next = neac.NeacResult(message="Success", signatures=[_signature()])
+    assert (await _check(client, admin, document_id)).json()["guarantor_matches"] is False
+
+
+async def test_a_copy_of_an_earlier_version_is_still_the_right_document(
+    client, db_session, make_user, make_admin, monkeypatch, neac_answers
+):
+    # Signed in production before the current text (sme-agreement-v0.3): still this application's Contract 2 and
+    # its signatures still checked, but its check code was over that text, so there is nothing to compare.
+    from app.loans.agreement import text
+
+    admin = await make_admin()
+    with monkeypatch.context() as old:
+        old.setattr(text, "VERSION", "sme-agreement-v0.3")
+        sme = await make_user(role="SME")
+        app_id = await _apply(client, sme)
+        await _verified_with_bank(db_session, sme)
+        download = await client.get(f"/loans/applications/{app_id}/service-agreement", headers=auth_headers(sme))
+        assert download.status_code == 200, download.text
+    _, document_id = await _uploaded_agreement(
+        client, db_session, make_user, monkeypatch, content=_signed(download.content), tax_id="0319911299"
+    )
+    # _uploaded_agreement made an application of its own: the document is this one's.
+    document = await db_session.get(LoanApplicationDocument, document_id)
+    document.loan_application_id = uuid.UUID(app_id)
+    await db_session.commit()
+
+    check = (await _check(client, admin, document_id)).json()
+    assert check["status"] == "VERIFIED"
+    assert check["right_document"] is True and check["agreement_version"] == "sme-agreement-v0.3"
+    assert check["terms_match"] is None
