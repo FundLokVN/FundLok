@@ -83,6 +83,7 @@ os.environ["PHONE_VERIFICATION_REQUIRED"] = "False"
 os.environ["ZALO_APP_ID"] = ""
 os.environ["ZALO_APP_SECRET"] = ""
 os.environ["ZALO_OA_REFRESH_TOKEN"] = ""
+os.environ["ZALO_ZBS_DEVELOPMENT_MODE"] = "False"
 # Belt-and-suspenders: never let tests touch real R2 / Didit even if a local
 # .env has them configured.
 os.environ["R2_ENDPOINT_URL"] = ""
@@ -741,8 +742,8 @@ def make_eligible_investor(db_session):
     signed Investor Service Agreement (Contract 4; reserving refuses without
     one). Idempotent per investor. Pass bank_account=False to stop short of
     the account (the order endpoint refuses an investor without one), and
-    signed_agreement=False to stop short of the agreement (its own upload is
-    covered in tests/market/test_investor_service_agreement.py)."""
+    signed_agreement=False to stop short of the agreement (confirming it with
+    a one-time code is covered in tests/market/test_investor_service_agreement.py)."""
 
     async def _make(investor: dict, bank_account: bool = True, signed_agreement: bool = True):
         from app.direct_transfer.models import PaymentAccount

@@ -172,6 +172,9 @@ async def access_token(*, stale: str | None = None) -> str:
     good token and should not queue behind the others.
     """
     _require("ZALO_APP_ID", "ZALO_APP_SECRET")
+    # Before any refresh: Zalo retires the old refresh token the moment it
+    # answers, so a key that cannot store the new one would lose the chain.
+    _cipher()
     app_id, seed = settings.ZALO_APP_ID, settings.ZALO_OA_REFRESH_TOKEN
     # Its own session: a refresh must be kept even when the send that asked
     # for it is rolled back, or the rotated refresh token is lost.

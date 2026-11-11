@@ -2,13 +2,13 @@
 
 Spec: docs/specs/market/investor-service-agreement.md
 
-The investor signs the master agreement once, with their first commitment, the same way an SME signs its
-service agreement. Agreeing to the commitment holds the amount and gives it a code (no money moves); they then
-download the agreement filled in with their details and that commitment's Annex, sign it with their digital
-signature and upload the signed copy. The payment details are refused until a signed copy of the current version
-is on file (funding_router.read_payment). Every later commitment signs only its own Investment Confirmation (the
-Annex), kept when the investor agrees (record_confirmation). This module fills Party B, renders the PDFs, checks
-and records the signed upload, and keeps each commitment's Annex.
+The investor confirms the master agreement once, with their first commitment. Agreeing to the commitment holds the
+amount and gives it a code (no money moves); they then read the agreement filled in with their details and that
+commitment's Annex, ask for a one-time code on their phone by Zalo, and confirm with it. The code is their
+signature: investors are individuals and rarely hold a digital signature. The payment details are refused until
+the current version is confirmed (funding_router.read_payment). Every later commitment confirms only its own
+Investment Confirmation (the Annex), kept when the investor agrees (record_confirmation). This module fills Party
+B, renders the PDFs, sends and checks the code, records the confirmed agreement, and keeps each commitment's Annex.
 
 Where Party B's blanks come from:
   name, ID number         an individual's approved eKYC (full name, ID card number); an organisation's approved
@@ -18,38 +18,50 @@ Where Party B's blanks come from:
   registered bank account the investor's approved account at a listed bank, the one the SME repays into
 Anything unknown is None and prints as a dotted blank, as in the template.
 
-The signed upload is checked in three ways before it counts: it is this commitment's agreement (its code and the
-version are in the text), NEAC (neac.py, the national authority's own verification) says the signature is valid,
-the document unchanged and the certificate not revoked, and the signer's ID on the certificate is the investor's
-(eKYC ID number, or KYB enterprise code). NEAC's verdict is kept with the agreement.
+What makes the code a signature on this document: it is sent only to the phone number on the investor's account,
+it is bound to the commitment and the agreement version it was asked for (a code for one cannot confirm another),
+it is single use, short lived and dies after a few wrong guesses, and what was confirmed is kept: the PDF as the
+investor saw it plus a line saying when they confirmed and the number the code went to, with its hash, the code's
+record, the IP address and the browser.
 """
 from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-import io
+import hashlib
+import hmac
+import logging
+import math
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from pypdf import PdfReader
-
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.direct_transfer import fees
 from app.core.timezone import ICT
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.config import DirectTransferParams, resolve
-from app.direct_transfer.errors import DirectTransferError, conflict
+from app.direct_transfer.errors import DirectTransferError, bad_request, conflict
 from app.direct_transfer.evidence import store_evidence_file
 from app.direct_transfer.models import FundingWindow, PaymentAccount, Tranche
 from app.direct_transfer.storage import EvidenceStorage
 from app.lending.models import Project
-from app.loans.agreement.signature import has_digital_signature, is_pdf
-from app.market.investor_agreement import neac, text
-from app.market.investor_agreement.models import InvestorServiceAgreement, SignedInvestmentConfirmation
+from app.core.config import settings
+from app.market.investor_agreement import text
+from app.market.investor_agreement.models import (
+    AgreementSigningCode,
+    InvestorServiceAgreement,
+    SignedInvestmentConfirmation,
+)
 from app.market.investor_agreement.pdf import AgreementData, AnnexData, annex_rows_for, render, render_annex
+from app.phone_verification import service as phone_codes
+from app.phone_verification import zalo
+from app.phone_verification.phone import canonical_vn_mobile, zalo_number
 from app.users.models import User
+from app.utils.locks import advisory_xact_lock
+
+logger = logging.getLogger(__name__)
 
 # Contract set v0.3 (5 Nov 2026), DRAFT pending IBL review. Printed on every page of the PDF.
 VERSION = text.VERSION
@@ -148,12 +160,19 @@ async def current_party_b(db: AsyncSession, investor_id: UUID) -> PartyB:
 # the PDF to sign
 # --------------------------------------------------------------------------- #
 async def build_pdf(
-    db: AsyncSession, investor_id: UUID, *, now: dt.datetime, tranche: Tranche | None = None
+    db: AsyncSession,
+    investor_id: UUID,
+    *,
+    now: dt.datetime,
+    tranche: Tranche | None = None,
+    party: PartyB | None = None,
+    confirmed_phone: str | None = None,
 ) -> tuple[bytes, str]:
     """(pdf bytes, file name): the current version filled in with the investor's details and, given the commitment
-    it is signed with, that commitment's code and Annex. Generated each time, never stored: the signed upload is
-    the record."""
-    party = await current_party_b(db, investor_id)
+    it is confirmed with, that commitment's code and Annex. Generated each time for reading. With
+    `confirmed_phone` it is the copy kept as the record: the same document, plus the line saying Party B confirmed
+    at `now` with the code sent to that (masked) number."""
+    party = party or await current_party_b(db, investor_id)
     account = (
         f"{party.bank_account_number} ({party.bank_account_name})"
         if party.bank_account_number and party.bank_account_name
@@ -185,13 +204,15 @@ async def build_pdf(
         bank_name=party.bank_name,
         commitment_ref=tranche.reference_code if tranche is not None else None,
         annex=annex,
+        confirmed_at=now.astimezone(ICT) if confirmed_phone else None,
+        confirmed_phone=confirmed_phone,
     )
     suffix = f"-{tranche.reference_code}" if tranche is not None else ""
     return render(data), f"FundLok-hop-dong-dich-vu-nha-dau-tu-{ref}{suffix}-{VERSION}.pdf"
 
 
 # --------------------------------------------------------------------------- #
-# the signed copy
+# the confirmed agreement
 # --------------------------------------------------------------------------- #
 async def current_signature(db: AsyncSession, investor_id: UUID) -> InvestorServiceAgreement | None:
     """The investor's signed copy of the CURRENT version, or None: then they sign it with their next commitment,
@@ -217,66 +238,187 @@ async def latest_signature(db: AsyncSession, investor_id: UUID) -> InvestorServi
     ).scalar_one_or_none()
 
 
-async def record_signed_upload(
+# --------------------------------------------------------------------------- #
+# confirming with a one-time code
+# --------------------------------------------------------------------------- #
+CODE_TTL = dt.timedelta(minutes=5)
+RESEND_COOLDOWN = dt.timedelta(seconds=60)
+MAX_CODES_PER_DAY = 5
+MAX_ATTEMPTS_PER_CODE = 5
+SIGNED_BY = "ZALO_OTP"
+
+
+def masked_phone(canonical: str) -> str:
+    """+84703564489 -> 0703***489: enough for the investor to recognise their number, not to learn it."""
+    national = "0" + canonical[3:]
+    return f"{national[:4]}***{national[-3:]}"
+
+
+async def signing_phone(db: AsyncSession, investor_id: UUID) -> str | None:
+    """The number the code goes to: the account's phone, when it is a Vietnamese mobile (canonical +84...)."""
+    user = await db.get(User, investor_id)
+    return canonical_vn_mobile(user.phone) if user is not None and user.phone else None
+
+
+def _hash_code(row: AgreementSigningCode, code: str) -> str:
+    # Bound to the row and to what it signs: a code for one commitment or version proves nothing about another.
+    message = f"investor-agreement:{row.id}:{row.tranche_id}:{row.version}:{code}".encode()
+    return hmac.new(settings.SECRET_KEY.encode(), message, hashlib.sha256).hexdigest()
+
+
+def _too_many(code: str, detail: str, retry_after: dt.timedelta) -> DirectTransferError:
+    exc = DirectTransferError(429, detail, code)
+    exc.retry_after = max(1, math.ceil(retry_after.total_seconds()))  # the router's Retry-After header
+    return exc
+
+
+async def _check_can_sign(db: AsyncSession, investor_id: UUID, tranche: Tranche, version: str, now: dt.datetime):
+    if version != VERSION:
+        raise conflict(
+            "INVESTOR_AGREEMENT_OUTDATED",
+            "The Investor Service Agreement has changed; read the new version and confirm it",
+        )
+    if await current_signature(db, investor_id) is not None:
+        raise conflict("INVESTOR_AGREEMENT_ALREADY_SIGNED", "Your agreement is already confirmed")
+    if tranche.status not in ("RESERVED", "SIGNED") or now > tranche.hold_expires_at:
+        raise conflict("HOLD_EXPIRED", "The commitment's hold has lapsed; commit again and confirm with it")
+
+
+async def send_signing_code(
+    db: AsyncSession, *, investor_id: UUID, tranche: Tranche, version: str, now: dt.datetime
+) -> AgreementSigningCode:
+    """Send the investor a fresh one-time code, by Zalo to the phone number on their account, to confirm the
+    current agreement with the commitment `tranche` (theirs; the caller checks). The new row retires any earlier
+    code. The caller commits.
+
+    409 INVESTOR_AGREEMENT_OUTDATED, INVESTOR_AGREEMENT_ALREADY_SIGNED or HOLD_EXPIRED as for signing; 409
+    PHONE_REQUIRED when the account has no Vietnamese mobile number; 429 CODE_COOLDOWN (one code a minute) or
+    CODE_DAILY_LIMIT (five a day); 400 PHONE_NO_ZALO when the number has no Zalo account that can receive it; 502
+    CODE_NOT_SENT when Zalo refuses or cannot be reached; 503 CODE_UNAVAILABLE when Zalo is not configured.
+    """
+    await _check_can_sign(db, investor_id, tranche, version, now)
+    phone = await signing_phone(db, investor_id)
+    if phone is None:
+        raise conflict(
+            "PHONE_REQUIRED",
+            "Add a Vietnamese mobile number to your profile: the confirmation code is sent to it by Zalo",
+        )
+
+    await advisory_xact_lock(db, f"investor-agreement-code:{investor_id}")
+    sends, first, last = (
+        await db.execute(
+            select(
+                func.count(AgreementSigningCode.id),
+                func.min(AgreementSigningCode.created_at),
+                func.max(AgreementSigningCode.created_at),
+            ).where(
+                AgreementSigningCode.investor_id == investor_id,
+                AgreementSigningCode.created_at >= now - dt.timedelta(days=1),
+            )
+        )
+    ).one()
+    if last is not None and now - last < RESEND_COOLDOWN:
+        raise _too_many("CODE_COOLDOWN", "Please wait before requesting another code", RESEND_COOLDOWN - (now - last))
+    if sends >= MAX_CODES_PER_DAY:
+        raise _too_many(
+            "CODE_DAILY_LIMIT", "Too many codes requested today. Try again later.", first + dt.timedelta(days=1) - now
+        )
+
+    code = phone_codes._new_code()
+    try:
+        channel = phone_codes._channel()  # zalo, or log (DEBUG only), as for phone verification
+        row = AgreementSigningCode(
+            id=uuid4(), investor_id=investor_id, tranche_id=tranche.id, version=VERSION, phone=phone,
+            channel=channel, expires_at=now + CODE_TTL, created_at=now,
+        )
+        row.code_hash = _hash_code(row, code)
+        db.add(row)
+        await db.flush()  # before the send: a database error should not cost a Zalo message
+        if channel == "zalo":
+            await zalo.send_otp(zalo_number(phone), code, tracking_id=row.id.hex)
+        else:
+            logger.warning(
+                "Investor agreement code for %s (commitment %s): %s (PHONE_OTP_CHANNEL=log)",
+                phone, tranche.reference_code, code,
+            )
+    except zalo.ZaloNotConfigured as exc:
+        await db.rollback()
+        logger.error("Investor agreement code unavailable: %s", exc)
+        raise DirectTransferError(503, "The confirmation code is not available right now", "CODE_UNAVAILABLE") from exc
+    except zalo.ZaloError as exc:
+        # Rolled back, so an undelivered code neither counts against the limits nor starts a cooldown.
+        await db.rollback()
+        if exc.code in phone_codes.NO_ZALO_ERRORS:
+            raise DirectTransferError(
+                400, "Your phone number has no Zalo account that can receive the code", "PHONE_NO_ZALO"
+            ) from exc
+        raise DirectTransferError(502, "Could not send the confirmation code. Please try again.", "CODE_NOT_SENT") from exc
+    return row
+
+
+async def sign_with_code(
     db: AsyncSession,
     *,
     investor_id: UUID,
     tranche: Tranche,
-    content: bytes,
-    file_name: str | None,
     version: str,
+    code: str,
     storage: EvidenceStorage,
     now: dt.datetime,
     ip_address: str | None = None,
     user_agent: str | None = None,
     params: DirectTransferParams | None = None,
 ) -> InvestorServiceAgreement:
-    """Check and record the investor's signed copy of the current version, signed with the commitment `tranche`
-    (theirs; the caller checks), and keep that commitment's Annex. The payment details then open.
+    """Confirm the current agreement with the commitment `tranche` (theirs; the caller checks) by redeeming the
+    investor's latest one-time code, and keep that commitment's Annex. The payment details then open.
 
-    409 INVESTOR_AGREEMENT_OUTDATED when `version` (the one printed on the PDF they downloaded) is not the current
-    one; 415 UNSUPPORTED_TYPE for anything but a PDF; 422 INVESTOR_AGREEMENT_UNSIGNED for a PDF with no digital
-    signature in it; 409 INVESTOR_AGREEMENT_ALREADY_SIGNED when this version is already on file; 409 HOLD_EXPIRED
-    when the commitment's hold lapsed (they commit again, and sign with the new commitment); 422
-    INVESTOR_AGREEMENT_WRONG_DOCUMENT when it is not this commitment's agreement; 422
-    INVESTOR_AGREEMENT_SIGNATURE_INVALID when NEAC does not accept the signature (NEAC's reasons in the detail); 422
-    INVESTOR_AGREEMENT_SIGNER_MISMATCH when the valid signature is someone else's; 503 NEAC_UNAVAILABLE when NEAC
-    cannot be reached (nothing is accepted unchecked: they try again).
+    The agreement is rendered once more, as the investor read it plus the line saying when they confirmed and the
+    number the code went to, and that PDF is the record: stored as evidence with its hash. 409
+    INVESTOR_AGREEMENT_OUTDATED, INVESTOR_AGREEMENT_ALREADY_SIGNED or HOLD_EXPIRED; 400 CODE_EXPIRED when there is
+    no live code for this commitment and version (none, used, expired, exhausted, or sent for another commitment);
+    400 CODE_INCORRECT, or CODE_TOO_MANY_ATTEMPTS on the fifth wrong guess (both counted: the error is marked
+    `persist`).
     """
-    if version != VERSION:
-        raise conflict(
-            "INVESTOR_AGREEMENT_OUTDATED",
-            "The Investor Service Agreement has changed; download the new version and sign it",
+    await _check_can_sign(db, investor_id, tranche, version, now)
+    await advisory_xact_lock(db, f"investor-agreement-code:{investor_id}")
+    row = (
+        await db.execute(
+            select(AgreementSigningCode)
+            .where(AgreementSigningCode.investor_id == investor_id)
+            .order_by(AgreementSigningCode.created_at.desc())
+            .limit(1)
         )
-    if not is_pdf(content):
-        raise DirectTransferError(415, "Upload the signed agreement as a PDF", "UNSUPPORTED_TYPE")
-    if not has_digital_signature(content):
-        raise DirectTransferError(
-            422,
-            "The agreement has no digital signature. Sign the PDF with your digital signature and upload the "
-            "signed copy.",
-            "INVESTOR_AGREEMENT_UNSIGNED",
+    ).scalar_one_or_none()
+    if (
+        row is None
+        or row.consumed_at is not None
+        or row.expires_at <= now
+        or row.attempts >= MAX_ATTEMPTS_PER_CODE
+        or row.tranche_id != tranche.id
+        or row.version != VERSION
+    ):
+        raise bad_request("This code has expired. Request a new one.", "CODE_EXPIRED")
+    if not hmac.compare_digest(row.code_hash, _hash_code(row, code)):
+        row.attempts += 1
+        exhausted = row.attempts >= MAX_ATTEMPTS_PER_CODE
+        exc = bad_request(
+            "Too many incorrect attempts. Request a new code." if exhausted else "Incorrect code",
+            "CODE_TOO_MANY_ATTEMPTS" if exhausted else "CODE_INCORRECT",
         )
-    if await current_signature(db, investor_id) is not None:
-        raise conflict("INVESTOR_AGREEMENT_ALREADY_SIGNED", "Your signed agreement is already on file")
-    if tranche.status not in ("RESERVED", "SIGNED") or now > tranche.hold_expires_at:
-        raise conflict("HOLD_EXPIRED", "The commitment's hold has lapsed; commit again and sign with it")
-    if not _is_this_agreement(content, tranche.reference_code):
-        raise DirectTransferError(
-            422,
-            f"This is not the agreement for commitment {tranche.reference_code}. Download it from this step, sign "
-            "it, and upload that file.",
-            "INVESTOR_AGREEMENT_WRONG_DOCUMENT",
-        )
+        exc.persist = True  # the wrong guess is counted even though the request fails
+        raise exc
+    row.consumed_at = now
+
     party = await current_party_b(db, investor_id)
-    check = await _check_with_neac(content, file_name, party, now)
+    masked = masked_phone(row.phone)
+    content, file_name = await build_pdf(
+        db, investor_id, now=now, tranche=tranche, party=party, confirmed_phone=masked
+    )
     stored = await store_evidence_file(
         db, storage, owner_user_id=investor_id, purpose="SIGNED_DOCUMENT", content=content,
-        content_type="application/pdf",
-        filename=file_name or f"investor-service-agreement-{VERSION}-{investor_ref(investor_id)}.pdf",
-        params=params,
+        content_type="application/pdf", filename=file_name, params=params,
     )
-    row = InvestorServiceAgreement(
+    agreement = InvestorServiceAgreement(
         investor_id=investor_id,
         version=VERSION,
         signed_at=now,
@@ -284,77 +426,29 @@ async def record_signed_upload(
         party_b=party.as_dict(),
         signed_file_key=stored.storage_key,
         document_sha256=stored.sha256,
-        file_name=(file_name or "")[:255] or None,
+        file_name=file_name,
         file_size_bytes=len(content),
         ip_address=ip_address,
         user_agent=(user_agent or "")[:500] or None,
-        signature_check=check,
+        signature_check={
+            "verified_by": SIGNED_BY,
+            "checked_at": now.isoformat(),
+            "phone": row.phone,
+            "phone_masked": masked,
+            "channel": row.channel,
+            "code_id": str(row.id),
+            "code_sent_at": row.created_at.isoformat(),
+        },
         signature_checked_at=now,
     )
-    db.add(row)
+    db.add(agreement)
     await db.flush()
-    # The commitment's Annex, as filled in the agreement just signed.
+    # The commitment's Annex, as filled in the agreement just confirmed.
     await record_confirmation(
-        db, tranche=tranche, window=await db.get(FundingWindow, tranche.window_id), agreement=row,
+        db, tranche=tranche, window=await db.get(FundingWindow, tranche.window_id), agreement=agreement,
         storage=storage, now=now, params=params,
     )
-    return row
-
-
-def _is_this_agreement(content: bytes, reference_code: str) -> bool:
-    """Whether the PDF is FundLok's agreement for this commitment: its text carries the commitment code (printed in
-    the Annex) and the current version (on every page). Signing adds to a PDF; it keeps the original text."""
-    try:
-        reader = PdfReader(io.BytesIO(content))
-        body = "\n".join((page.extract_text() or "") for page in reader.pages)
-    except Exception:  # an unreadable PDF is not this agreement
-        return False
-    return reference_code in body and VERSION in body
-
-
-async def _check_with_neac(content: bytes, file_name: str | None, party: PartyB, now: dt.datetime) -> dict:
-    """NEAC's verdict on the signed copy, required to be valid and the investor's; what is kept with it."""
-    try:
-        result = await neac.verify_document(content, file_name or "hop-dong-da-ky.pdf")
-    except neac.NeacUnavailable as exc:
-        raise DirectTransferError(
-            503,
-            "The digital signature could not be checked with NEAC right now. Please try again in a few minutes.",
-            "NEAC_UNAVAILABLE",
-        ) from exc
-    if not result.signatures:
-        raise DirectTransferError(
-            422, f"NEAC: {result.message or 'no digital signature found'}", "INVESTOR_AGREEMENT_SIGNATURE_INVALID"
-        )
-    valid = [sig for sig in result.signatures if not neac.problems(sig)]
-    if not valid:
-        reasons = "; ".join(neac.problems(result.signatures[0]))
-        raise DirectTransferError(422, f"NEAC: {reasons}", "INVESTOR_AGREEMENT_SIGNATURE_INVALID")
-    mine = [sig for sig in valid if neac.same_id(sig, party.id_number)]
-    if not mine:
-        found = valid[0].signer
-        raise DirectTransferError(
-            422,
-            f"The agreement is signed by {found.get('cn') or 'someone else'} "
-            f"({found.get('cccd') or found.get('mst') or 'no ID'}), not by the investor ({party.id_number or 'no ID on file'}).",
-            "INVESTOR_AGREEMENT_SIGNER_MISMATCH",
-        )
-    sig = mine[0]
-    return {
-        "verified_by": "NEAC",
-        "verify_url": neac.VERIFY_URL,
-        "checked_at": now.isoformat(),
-        "valid": True,
-        "signer": sig.signer,
-        "issuer": sig.issuer,
-        "signed_time": sig.signed_time,
-        "certificate_validity": sig.certificate_validity,
-        "ocsp": sig.ocsp,
-        "crl": sig.crl,
-        "name_matches": neac.same_name(sig, party.name),
-        "message": result.message,
-        "signatures": [s.as_dict() for s in result.signatures],
-    }
+    return agreement
 
 
 # --------------------------------------------------------------------------- #

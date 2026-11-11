@@ -1,21 +1,24 @@
-"""The Investor Service Agreement (Contract 4) each investor signed and uploaded, and which version.
+"""The Investor Service Agreement (Contract 4) each investor confirmed, and which version.
 
 ONE ROW PER INVESTOR PER VERSION
-The investor signs it with their first commitment: agreeing to the commitment holds the amount and gives it a
-code (no money moves), then they download the agreement filled in with their details and that commitment's
-Annex (GET /funding/me/investor-agreement/document?tranche_id=), sign it with their digital signature and upload
-the signed PDF (POST /funding/me/investor-agreement). Until then the payment details are refused (409
-INVESTOR_AGREEMENT_REQUIRED). The row is the platform's record: when, which version, the commitment it was signed
-with, Party B as filled in, and the signed file kept as evidence with its hash. Every later commitment signs only
-its own Investment Confirmation (investment_confirmations).
+The investor confirms it with their first commitment: agreeing to the commitment holds the amount and gives it a
+code (no money moves), then they read the agreement filled in with their details and that commitment's Annex
+(GET /funding/me/investor-agreement/document?tranche_id=), ask for a one-time code on their phone by Zalo
+(POST /funding/me/investor-agreement/code) and confirm with it (POST /funding/me/investor-agreement). Until then
+the payment details are refused (409 INVESTOR_AGREEMENT_REQUIRED). The row is the platform's record: when, which
+version, the commitment it was confirmed with, Party B as filled in, how it was confirmed (signature_check), and the
+confirmed PDF kept as evidence with its hash. Every later commitment confirms only its own Investment Confirmation
+(investment_confirmations).
 
 The table is evidence, so the app only ever INSERTS rows. A new version of the text (text.VERSION) asks every
-investor to sign again with their next commitment: a new row, the old ones left as they were.
+investor to confirm again with their next commitment: a new row, the old ones left as they were.
 """
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Column, Date, DateTime, ForeignKey, Integer, Numeric, Text, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, Text, UniqueConstraint, func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.core.base import Base
@@ -51,8 +54,9 @@ class InvestorServiceAgreement(Base):
     file_size_bytes = Column(BigInteger, nullable=False)
     ip_address = Column(Text, nullable=True)
     user_agent = Column(Text, nullable=True)
-    # NEAC's verdict on the signed copy when it was accepted (neac.py): signer, issuer, validity, OCSP/CRL, signing
-    # time, and NEAC's raw answer. Null only for records made outside the upload (e.g. test fixtures).
+    # How it was confirmed. Since v0.3.1: {verified_by: "ZALO_OTP", checked_at, phone, channel, code_id}, the
+    # one-time code the investor confirmed with. Rows of v0.3 hold NEAC's verdict on an uploaded, digitally signed
+    # copy instead (verified_by "NEAC", signer, issuer, ...). Null only for records made outside the flow (fixtures).
     signature_check = Column(JSONB, nullable=True)
     signature_checked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now, server_default=func.now())
@@ -88,4 +92,30 @@ class SignedInvestmentConfirmation(Base):
     file_key = Column(Text, nullable=False)
     document_sha256 = Column(Text, nullable=False)
     confirmed_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now, server_default=func.now())
+
+
+class AgreementSigningCode(Base):
+    """One one-time code sent to an investor to confirm the Investor Service Agreement with a commitment.
+
+    The code is the investor's signature on Contract 4 (service.sign_with_code), so it is bound to what it signs:
+    the commitment and the agreement version it was asked for. Only the investor's most recent row can be redeemed.
+    Rows are kept after use: they are the send counter (cooldown, daily limit) and the trail behind the signature.
+    """
+
+    __tablename__ = "investor_agreement_codes"
+    __table_args__ = (Index("ix_investor_agreement_codes_investor_created", "investor_id", "created_at"),)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    tranche_id = Column(UUID(as_uuid=True), ForeignKey("tranches.id", ondelete="RESTRICT"), nullable=False)
+    version = Column(Text, nullable=False)
+    # Canonical +84xxxxxxxxx: the account's phone number when the code was sent.
+    phone = Column(Text, nullable=False)
+    # HMAC-SHA256 of the code, keyed by SECRET_KEY and bound to this row, commitment and version. Never the code.
+    code_hash = Column(Text, nullable=False)
+    channel = Column(Text, nullable=False)  # zalo | log
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    attempts = Column(Integer, nullable=False, server_default="0")
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now, server_default=func.now())
