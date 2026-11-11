@@ -1,5 +1,6 @@
 """The SME's signed listing documents, checked with NEAC for FundLok staff: the Service Agreement (Contract 2) and
-the Standing Offer (Contract 3), both signed after approval (app/loans/signing.py).
+the Standing Offer (Contract 3) and the Loan Contract template (Contract 5), signed after approval
+(app/loans/signing.py).
 
 Each signed upload is already checked on the way in, and that verdict is recorded here in the same shape, so the
 admin project panel shows it at once. Staff can check again on demand ("Kiểm tra lại với NEAC"), and the panel runs
@@ -15,8 +16,8 @@ What is checked and shown:
                    valid, certificate not revoked
   right signer     the signer's MST on the certificate is the company's: its approved KYB enterprise code, or the
                    project's tax ID when there is no approved KYB; the name is compared too
-  guarantor        Standing Offer only: a separate valid signature by the Personal Guarantor, whose ID is the eKYC
-                   ID number of the user who signed and uploaded it
+  guarantor        Standing Offer and Loan Contract template: a separate valid signature by the Personal Guarantor,
+                   whose ID is the eKYC ID number of the user who signed and uploaded it
 
 Each check is an audit event (entity LOAN_APPLICATION_DOCUMENT, action NEAC_SIGNATURE_CHECKED), the verdict in
 after_state; the newest one is what the panel shows. No new table: the audit log is append-only evidence already.
@@ -35,17 +36,27 @@ from starlette.concurrency import run_in_threadpool
 from app.gverify.models import GVerifyKybVerification
 from app.lending.models import AuditLog, LoanApplication, LoanApplicationDocument, Project, ProjectOwnership
 from app.users.models import User
-from app.loans.agreement import standing_offer_text, text
+from app.loans.agreement import loan_contract_text, standing_offer_text, text
 from app.market.investor_agreement import neac  # the one NEAC client, shared with the investor agreement
 from app.utils.audit import append_audit
 from app.utils.r2 import get_bytes
 
 DOCUMENT_TYPE = "sme_service_agreement"
 STANDING_OFFER_TYPE = "sme_standing_offer"
-# The documents this checks: document type -> (version printed on it, whether a Personal Guarantor also signs).
+LOAN_CONTRACT_TYPE = "sme_loan_contract"
+# The documents this checks: document type -> (the version printed on it, whether a Personal Guarantor also signs).
 DOCUMENT_TYPES = {
     DOCUMENT_TYPE: (text.VERSION, False),
     STANDING_OFFER_TYPE: (standing_offer_text.VERSION, True),
+    LOAN_CONTRACT_TYPE: (loan_contract_text.VERSION, True),
+}
+# Earlier versions copies on file may carry (signed before the current one), by document type. Such a copy is
+# still the right document and its signatures are checked the same; its check code was worked out over that
+# version's text, so there is nothing to compare it with today (terms_match None).
+EARLIER_VERSIONS = {
+    DOCUMENT_TYPE: ("sme-agreement-v0.3",),
+    STANDING_OFFER_TYPE: ("standing-offer-v0.3.1",),
+    LOAN_CONTRACT_TYPE: (),
 }
 CHECK_CODE_LABEL = "Mã đối chiếu"  # printed before the check code on every page
 AUDIT_ENTITY = "LOAN_APPLICATION_DOCUMENT"
@@ -138,11 +149,15 @@ async def check_signed_document(
         if user is not None
         else None
     )
-    if CHECK_CODE_LABEL not in body:
-        terms_match = None  # a copy from before check codes were printed: nothing to compare
+    earlier = None
+    if version not in body:
+        earlier = next((v for v in EARLIER_VERSIONS[document.document_type] if v in body), None)
+        version = earlier or version
+    if CHECK_CODE_LABEL not in body or earlier is not None:
+        terms_match = None  # a copy from before check codes were printed, or of an earlier text: nothing to compare
     else:
         terms_match = expected_code is not None and expected_code in body
-    guarantor_person = await guarantor_for(db, user) if needs_guarantor and user is not None else None
+    guarantor_person = await guarantor_for(db, user, application) if needs_guarantor and user is not None else None
 
     verdict: dict = {
         "checked_at": now.isoformat(),

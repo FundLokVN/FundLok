@@ -10,9 +10,13 @@ differ, the Vietnamese prevails. VERSION is printed on every page, so a signed c
 whenever a word here changes.
 """
 
-VERSION = "standing-offer-v0.3.1"
+# v0.4: laid out as a Vietnamese contract (national header, date, number); the Guarantor's address the SME enters.
+VERSION = "standing-offer-v0.4"
 
 TITLE = ("3. Đề nghị giao kết hợp đồng cho vay", "Standing Offer to Conclude Loan Contracts")
+
+# The number under the title (Đề nghị giao kết), which the Loan Contract cites as the Offer's.
+NUMBER = "{ref}/ĐNGK-FL"
 
 PREVAILS = ("Bản tiếng Việt được ưu tiên áp dụng.", "The Vietnamese text prevails.")
 

@@ -334,12 +334,36 @@ class ListingDocumentChecksOut(BaseModel):
 
 
 class SignedListingDocumentOut(BaseModel):
-    """One of the two documents the SME signs after approval (app/loans/signing.py)."""
+    """One of the three documents the SME signs after approval (app/loans/signing.py).
+
+    missing_details: the details it still prints as a blank, which must be completed before it can be signed
+      (COMPANY_NAME, ENTERPRISE_CODE, COMPANY_ADDRESS, LEGAL_REPRESENTATIVE, BANK_ACCOUNT, and on the two the
+      Guarantor signs GUARANTOR_NAME, GUARANTOR_ID, GUARANTOR_ADDRESS). Empty once signed.
+    waiting_for: the document that must be signed first ("standing-offer" for the Loan Contract until the Offer is
+      on file), else null.
+    """
 
     signed: bool
     signed_at: datetime | None = None
     file_name: str | None = None
     checks: ListingDocumentChecksOut | None = None
+    missing_details: list[str] = []
+    waiting_for: str | None = None
+
+
+class GuarantorAddressIn(BaseModel):
+    """The Personal Guarantor's address (their permanent residence, as on the ID card), for the Standing Offer and
+    the Loan Contract template when the eKYC carries none."""
+
+    address: str = Field(min_length=8, max_length=300)
+
+    @field_validator("address")
+    @classmethod
+    def _one_line(cls, value: str) -> str:
+        value = " ".join(value.split())
+        if len(value) < 8:
+            raise ValueError("Enter the full address")
+        return value
 
 
 class ListingDocumentsOut(BaseModel):
@@ -347,16 +371,21 @@ class ListingDocumentsOut(BaseModel):
 
     ready: FundLok approved the request and its terms are locked, so the two
       documents carry them and can be signed (or already are).
-    published: the project is live on the marketplace. Signing both publishes
-      it; a project that went live before this step existed is published
-      without them.
+    published: the project is live on the marketplace. Signing all three
+      publishes it; a project that went live earlier is published without them.
     guarantor_verified: the signing user has an approved eKYC with an ID
-      number, which the Standing Offer's Personal Guarantor signature is
-      checked against. Without it the Standing Offer cannot be accepted.
+      number, which the Personal Guarantor's signature (on the Standing Offer
+      and the Loan Contract template) is checked against. Without it neither
+      can be accepted.
     """
 
     ready: bool
     published: bool
     guarantor_verified: bool
+    # The Personal Guarantor's address as the Standing Offer and the Loan Contract print it, and where it came
+    # from: "EKYC" (the ID card), "SME" (entered on this step, PUT .../guarantor-address) or null (none yet).
+    guarantor_address: str | None = None
+    guarantor_address_source: Literal["EKYC", "SME"] | None = None
     service_agreement: SignedListingDocumentOut
     standing_offer: SignedListingDocumentOut
+    loan_contract: SignedListingDocumentOut

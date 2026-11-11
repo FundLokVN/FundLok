@@ -1,9 +1,9 @@
 """Signing the listing documents after approval (docs/specs/loans/listing-signing.md).
 
 FundLok approves the request (the operator's approval and a LOCKED score run, which fixes the rate); the SME then
-downloads the SME Service Agreement and the Standing Offer filled in with those terms, signs them (the Standing
-Offer also by the Personal Guarantor) and uploads them back. Each upload is checked with NEAC (faked: conftest
-fake_neac); the second one publishes the project.
+downloads the SME Service Agreement, the Standing Offer and the Loan Contract template filled in with those terms,
+signs them (the Standing Offer and the Loan Contract also by the Personal Guarantor) and uploads them back. Each
+upload is checked with NEAC (faked: conftest fake_neac); the last of the three publishes the project.
 """
 import asyncio
 import datetime as dt
@@ -22,7 +22,7 @@ from pypdf import PdfWriter
 from pypdf.generic import ArrayObject, ByteStringObject, DictionaryObject, NameObject, NumberObject
 
 from app.direct_transfer.models import PaymentAccount
-from app.loans.agreement import standing_offer_text
+from app.loans.agreement import loan_contract_text, standing_offer_text
 from app.loans.agreement import text as agreement_text
 from app.loans.signing import signature_fields
 from conftest import auth_headers
@@ -30,6 +30,7 @@ from tests.loans.test_service_agreement import TAX, _apply, _verified_with_bank
 
 GUARANTOR_ID = "079123456789"
 GUARANTOR_NAME = "TRAN VAN OWNER"
+GUARANTOR_ADDRESS = "45 Le Loi, Phuong 4, TP. Vung Tau"
 
 
 @pytest.fixture
@@ -56,15 +57,23 @@ async def _kyc(db_session, sme, *, person_number=GUARANTOR_ID):
 
 @pytest.fixture
 def approved(client, db_session, make_user, make_admin, attach_required_documents):
-    """An SME whose request FundLok approved, with locked terms (14.5% a year), its KYB, an approved bank account
-    and its owner's eKYC: everything signing needs, nothing signed yet."""
+    """An SME whose request FundLok approved, with locked terms (14.5% a year), its KYB, an approved bank account,
+    its owner's eKYC and the Guarantor's address (entered on the signing step: the eKYC carries none): everything
+    signing needs, nothing signed yet."""
 
-    async def _make(*, lock=True, kyc=True, approve=True, tax_id=TAX):
+    async def _make(*, lock=True, kyc=True, approve=True, tax_id=TAX, guarantor_address=True):
         sme = await make_user(role="SME")
         app_id = await _apply(client, sme, tax_id=tax_id)
         await _verified_with_bank(db_session, sme, tax_id=tax_id)
         if kyc:
             await _kyc(db_session, sme)
+        if guarantor_address:
+            entered = await client.put(
+                f"/loans/applications/{app_id}/guarantor-address",
+                json={"address": GUARANTOR_ADDRESS},
+                headers=auth_headers(sme),
+            )
+            assert entered.status_code == 200, entered.text
         submitted = await client.post(f"/loans/applications/{app_id}/submit", headers=auth_headers(sme))
         assert submitted.status_code == 200, submitted.text
         await attach_required_documents(app_id)
@@ -134,7 +143,7 @@ ALL_FIELDS = ("SME_Signature", "Guarantor_Signature")
 
 
 async def _download(client, case, kind: str) -> bytes:
-    path = "service-agreement" if kind == "service-agreement" else "standing-offer"
+    path = kind  # service-agreement | standing-offer | loan-contract
     resp = await client.get(f"/loans/applications/{case.app_id}/{path}", headers=auth_headers(case.sme))
     assert resp.status_code == 200, resp.text
     return resp.content
@@ -155,6 +164,15 @@ async def _upload(client, case, kind: str, content: bytes, filename="da-ky.pdf")
     )
 
 
+async def _sign_offer(client, case):
+    """The Standing Offer signed by the company and the Guarantor and on file: the Loan Contract cites it."""
+    resp = await _upload(
+        client, case, "standing-offer", await _signed(client, case, "standing-offer", signers=(TAX, GUARANTOR_ID))
+    )
+    assert resp.status_code == 200, resp.text
+    return resp
+
+
 async def _project_status(db_session, app_id) -> str:
     db_session.expire_all()
     return (
@@ -167,7 +185,8 @@ async def _project_status(db_session, app_id) -> str:
 
 
 def _text(pdf: bytes) -> str:
-    return "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages)
+    """The PDF's text, every run of whitespace one space: a value wrapped at the end of a line still reads whole."""
+    return " ".join("\n".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages).split())
 
 
 async def test_submitting_no_longer_needs_a_signed_agreement(client, make_user):
@@ -185,9 +204,10 @@ async def test_nothing_can_be_signed_before_fundlok_approves(client, approved, s
     assert status.status_code == 200, status.text
     assert status.json()["ready"] is False and status.json()["published"] is False
 
-    offer = await client.get(f"/loans/applications/{case.app_id}/standing-offer", headers=auth_headers(case.sme))
-    assert offer.status_code == 409
-    assert offer.headers["X-Error-Code"] == "SIGNING_NOT_OPEN"
+    for path in ("standing-offer", "loan-contract"):
+        early = await client.get(f"/loans/applications/{case.app_id}/{path}", headers=auth_headers(case.sme))
+        assert early.status_code == 409, path
+        assert early.headers["X-Error-Code"] == "SIGNING_NOT_OPEN"
 
     pdf = _with_fake_signature(await _download(client, case, "service-agreement"), f"FAKE-NEAC-SIGNER:{TAX}")
     refused = await _upload(client, case, "service-agreement", pdf)
@@ -202,7 +222,7 @@ async def test_an_operator_approval_without_locked_terms_is_not_ready(client, ap
     assert status.json()["ready"] is False
 
 
-async def test_both_documents_carry_the_approved_terms(client, approved):
+async def test_the_agreement_and_the_offer_carry_the_approved_terms(client, approved):
     case = await approved()
 
     agreement = _text(await _download(client, case, "service-agreement"))
@@ -229,9 +249,155 @@ async def test_both_documents_carry_the_approved_terms(client, approved):
     assert offer.count(standing_offer_text.VERSION) >= 2  # on every page
     # The whole offer, not a stub: the last article and the Annex.
     assert "Điều 8." in offer and "văn bản số 5" in offer
+    # Laid out as a Vietnamese contract: the national title and motto, the date, the title and its number; every
+    # party's details filled in (the one dotted blank left is the revenue share, which nothing sets yet), and who
+    # signs under each box.
+    for expected in ("CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM", "Độc lập - Tự do - Hạnh phúc",
+                     "THE SOCIALIST REPUBLIC OF VIETNAM", "Independence - Freedom - Happiness",
+                     "ĐỀ NGHỊ GIAO KẾT HỢP ĐỒNG CHO VAY", f"Số / No.: {ref}/ĐNGK-FL", "tháng", "năm",
+                     GUARANTOR_ADDRESS, "12 Nguyen Hue", "Tran Van Owner (Giam doc)"):
+        assert expected in offer, expected
+    assert offer.count(agreement_text.BLANK) == 1
+    assert "HỢP ĐỒNG DỊCH VỤ DÀNH CHO DOANH NGHIỆP" in agreement and f"Số / No.: {ref}/HĐDV-FL" in agreement
+    assert agreement.count(agreement_text.BLANK) == 0 and agreement_text.PARTY_A_SIGNER in agreement
 
 
-async def test_signing_both_publishes_the_project(client, db_session, approved, stored, fake_neac, make_admin):
+async def test_the_loan_contract_template_carries_the_parties_and_the_approved_terms(
+    client, approved, stored, fake_neac
+):
+    case = await approved()
+    await _sign_offer(client, case)
+    contract_pdf = await _download(client, case, "loan-contract")
+    contract = _text(contract_pdf)
+    ref = case.app_id.split("-")[0].upper()
+    offer_date = dt.datetime.now(dt.timezone(dt.timedelta(hours=7))).strftime("%d/%m/%Y")
+    # Borrower and Guarantor as on the Offer; the rate, term, N0 = 21 × 4 and backstop ceil(4 × 84 / 3) = 112; the
+    # signed Offer it cites, by number and the day it was accepted.
+    for expected in ("HỢP ĐỒNG CHO VAY", "CONG TY TNHH AGREEMENT TEST", TAX, "0071000123456", GUARANTOR_NAME,
+                     GUARANTOR_ID, GUARANTOR_ADDRESS, "14,5%/năm", "4 tháng", "84 ngày làm việc", "112",
+                     f"Đề nghị giao kết số {ref}/ĐNGK-FL ngày {offer_date}", "Điều 15.", "Lịch trả nợ",
+                     "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM", f"Số / No.: {ref}/HĐCV-FL"):
+        assert expected in contract, expected
+    assert contract.count(loan_contract_text.VERSION) >= 2  # on every page
+    # What each Investor's copy fills in, as the rule it follows, and the amounts at the 10M minimum ticket:
+    # I = 10M × 14.5% × 4/12, T = P + I, A = floor(T / 84), the rest on the last day; cap = the approved 80M.
+    for expected in ("Nhà đầu tư chấp nhận Đề nghị giao kết số", "từ 10.000.000 VND",
+                     "không vượt 80.000.000 VND", "P × 14,5% × 4 / 12", "483.333 VND", "10.483.333 VND",
+                     "124.801 VND", "124.850 VND", "Ngày đăng + 14 ngày", "thời điểm cam kết"):
+        assert expected in contract, expected
+    # The one dotted blank left is the revenue share, which nothing sets yet.
+    assert contract.count(agreement_text.BLANK) == 1
+    # One empty signature field per signer: the SME and the Guarantor sign this template now.
+    assert signature_fields(contract_pdf) == {"SME_Signature": False, "Guarantor_Signature": False}
+
+
+async def test_the_loan_contract_waits_for_the_signed_offer(client, approved, stored, fake_neac):
+    case = await approved()
+    status = (
+        await client.get(f"/loans/applications/{case.app_id}/listing-documents", headers=auth_headers(case.sme))
+    ).json()
+    assert status["loan_contract"]["waiting_for"] == "standing-offer"
+    assert status["standing_offer"]["waiting_for"] is None
+
+    early = await client.get(f"/loans/applications/{case.app_id}/loan-contract", headers=auth_headers(case.sme))
+    assert early.status_code == 409 and early.headers["X-Error-Code"] == "SIGNING_OFFER_FIRST"
+    # Nor is a copy accepted before then (a template from somewhere else, say).
+    pdf = _with_fake_signature(await _download(client, case, "standing-offer"), f"FAKE-NEAC-SIGNER:{TAX}")
+    refused = await _upload(client, case, "loan-contract", pdf)
+    assert refused.status_code == 409 and refused.headers["X-Error-Code"] == "SIGNING_OFFER_FIRST"
+
+    signed = await _sign_offer(client, case)
+    assert signed.json()["loan_contract"]["waiting_for"] is None
+    assert (await client.get(f"/loans/applications/{case.app_id}/loan-contract", headers=auth_headers(case.sme))
+            ).status_code == 200
+
+
+async def test_missing_details_must_be_completed_before_signing(client, db_session, approved, stored, fake_neac):
+    # The Guarantor's eKYC carries no address: the Offer and the Loan Contract print it as a blank until the SME
+    # enters it; the Service Agreement does not name the Guarantor and can be signed meanwhile.
+    case = await approved(guarantor_address=False)
+    status = (
+        await client.get(f"/loans/applications/{case.app_id}/listing-documents", headers=auth_headers(case.sme))
+    ).json()
+    assert status["standing_offer"]["missing_details"] == ["GUARANTOR_ADDRESS"]
+    assert status["loan_contract"]["missing_details"] == ["GUARANTOR_ADDRESS"]
+    assert status["service_agreement"]["missing_details"] == []
+    assert status["guarantor_address"] is None and status["guarantor_address_source"] is None
+
+    blank = await _signed(client, case, "standing-offer", signers=(TAX, GUARANTOR_ID))
+    refused = await _upload(client, case, "standing-offer", blank)
+    assert refused.status_code == 422 and refused.headers["X-Error-Code"] == "SIGNING_DETAILS_MISSING"
+    assert "GUARANTOR_ADDRESS" in refused.json()["detail"]
+    assert fake_neac.calls == []
+    assert (await _upload(client, case, "service-agreement", await _signed(client, case, "service-agreement"))
+            ).status_code == 200
+
+    too_short = await client.put(
+        f"/loans/applications/{case.app_id}/guarantor-address", json={"address": "  Hue  "},
+        headers=auth_headers(case.sme),
+    )
+    assert too_short.status_code == 422
+    entered = await client.put(
+        f"/loans/applications/{case.app_id}/guarantor-address",
+        json={"address": "  45 Le Loi,\n Phuong 4,   TP. Vung Tau "},
+        headers=auth_headers(case.sme),
+    )
+    assert entered.status_code == 200, entered.text
+    body = entered.json()
+    assert body["guarantor_address"] == GUARANTOR_ADDRESS and body["guarantor_address_source"] == "SME"
+    assert body["standing_offer"]["missing_details"] == [] and body["loan_contract"]["missing_details"] == []
+    audit = (
+        await db_session.execute(select(AuditLog).where(AuditLog.action == "GUARANTOR_ADDRESS_SET"))
+    ).scalar_one()
+    assert audit.after_state == {"guarantor_address": GUARANTOR_ADDRESS} and str(audit.actor_id) == case.sme["id"]
+
+    # The copy signed with the blank is outdated now; a fresh one carries the address and is accepted.
+    assert (await _upload(client, case, "standing-offer", blank)).headers["X-Error-Code"] == "SIGNING_DOCUMENT_OUTDATED"
+    fresh = await _signed(client, case, "standing-offer", signers=(TAX, GUARANTOR_ID))
+    assert GUARANTOR_ADDRESS in _text(fresh)
+    assert (await _upload(client, case, "standing-offer", fresh)).status_code == 200
+
+    # Signed with it: it no longer changes.
+    late = await client.put(
+        f"/loans/applications/{case.app_id}/guarantor-address", json={"address": "1 Tran Hung Dao, Ha Noi"},
+        headers=auth_headers(case.sme),
+    )
+    assert late.status_code == 409 and late.headers["X-Error-Code"] == "SIGNING_ALREADY_SIGNED"
+
+
+async def test_the_companys_address_comes_from_the_project_without_one_on_the_kyb(client, db_session, approved):
+    from app.gverify.models import GVerifyKybVerification
+
+    case = await approved()
+    kyb = (
+        await db_session.execute(
+            select(GVerifyKybVerification).where(GVerifyKybVerification.user_id == UUID(case.sme["id"]))
+        )
+    ).scalar_one()
+    kyb.company_address = None
+    project = (
+        await db_session.execute(
+            select(Project).join(LoanApplication, LoanApplication.project_id == Project.id)
+            .where(LoanApplication.id == UUID(case.app_id))
+        )
+    ).scalar_one()
+    project.address = {"street": "88 Dong Khoi", "city": "Ho Chi Minh City", "state": "", "postal_code": "700000",
+                       "country": "Vietnam"}
+    await db_session.commit()
+    agreement = _text(await _download(client, case, "service-agreement"))
+    assert "88 Dong Khoi, Ho Chi Minh City, 700000, Vietnam" in agreement
+
+    # Neither: a blank the SME must fill (on its project) before signing.
+    project.address = None
+    await db_session.commit()
+    status = (
+        await client.get(f"/loans/applications/{case.app_id}/listing-documents", headers=auth_headers(case.sme))
+    ).json()
+    assert status["service_agreement"]["missing_details"] == ["COMPANY_ADDRESS"]
+    assert "COMPANY_ADDRESS" in status["standing_offer"]["missing_details"]
+
+
+async def test_signing_all_three_publishes_the_project(client, db_session, approved, stored, fake_neac, make_admin):
     case = await approved()
     assert await _project_status(db_session, case.app_id) == "DRAFT", "approved is not yet published"
 
@@ -239,26 +405,35 @@ async def test_signing_both_publishes_the_project(client, db_session, approved, 
     assert first.status_code == 200, first.text
     body = first.json()
     assert body["service_agreement"]["signed"] is True
-    assert body["standing_offer"]["signed"] is False
+    assert body["standing_offer"]["signed"] is False and body["loan_contract"]["signed"] is False
     assert body["published"] is False
-    assert await _project_status(db_session, case.app_id) == "DRAFT", "one of two is not enough"
+    assert await _project_status(db_session, case.app_id) == "DRAFT", "one of three is not enough"
 
     second = await _upload(
         client, case, "standing-offer",
         await _signed(client, case, "standing-offer", signers=(TAX, GUARANTOR_ID)),
     )
     assert second.status_code == 200, second.text
-    assert second.json()["published"] is True
+    assert second.json()["published"] is False
+    assert await _project_status(db_session, case.app_id) == "DRAFT", "two of three is not enough"
+
+    third = await _upload(
+        client, case, "loan-contract",
+        await _signed(client, case, "loan-contract", signers=(TAX, GUARANTOR_ID)),
+    )
+    assert third.status_code == 200, third.text
+    assert third.json()["published"] is True and third.json()["loan_contract"]["signed"] is True
     assert await _project_status(db_session, case.app_id) == "ACTIVE"
 
-    # Kept: both as documents of the application, each with NEAC's verdict in the audit log.
+    # Kept: all three as documents of the application, each with NEAC's verdict in the audit log.
     docs = (
         await db_session.execute(
             select(LoanApplicationDocument).where(LoanApplicationDocument.loan_application_id == UUID(case.app_id))
         )
     ).scalars().all()
-    signed = {d.document_type: d for d in docs if d.document_type in ("sme_service_agreement", "sme_standing_offer")}
-    assert set(signed) == {"sme_service_agreement", "sme_standing_offer"}
+    kinds = ("sme_service_agreement", "sme_standing_offer", "sme_loan_contract")
+    signed = {d.document_type: d for d in docs if d.document_type in kinds}
+    assert set(signed) == set(kinds)
     assert all(d.status == "UPLOADED" and d.file_key in stored for d in signed.values())
     verdicts = (
         await db_session.execute(
@@ -268,7 +443,7 @@ async def test_signing_both_publishes_the_project(client, db_session, approved, 
             )
         )
     ).scalars().all()
-    assert len(verdicts) == 2 and all(v["status"] == "VERIFIED" and v["terms_match"] for v in verdicts)
+    assert len(verdicts) == 3 and all(v["status"] == "VERIFIED" and v["terms_match"] for v in verdicts)
     offer_verdict = next(v for v in verdicts if v["agreement_version"] == standing_offer_text.VERSION)
     assert offer_verdict["guarantor"]["expected_id"] == GUARANTOR_ID
     assert offer_verdict["signature_fields"] == {"SME_Signature": True, "Guarantor_Signature": True}
@@ -281,6 +456,7 @@ async def test_signing_both_publishes_the_project(client, db_session, approved, 
     assert offer_checks["terms_match"] is True and offer_checks["verified_by"] == "NEAC"
     assert [s["role"] for s in offer_checks["signers"]] == ["SME", "GUARANTOR"]
     assert [s["role"] for s in status["service_agreement"]["checks"]["signers"]] == ["SME"]
+    assert [s["role"] for s in status["loan_contract"]["checks"]["signers"]] == ["SME", "GUARANTOR"]
 
     # Staff see the same verdict in the admin project panel straight away, guarantor and numbers included.
     admin = await make_admin()
@@ -295,6 +471,7 @@ async def test_signing_both_publishes_the_project(client, db_session, approved, 
     assert shown["sme_standing_offer"]["terms_match"] is True
     assert shown["sme_standing_offer"]["expected_source"] == "KYB"
     assert shown["sme_service_agreement"]["guarantor_required"] is False
+    assert shown["sme_loan_contract"]["guarantor_matches"] is True and shown["sme_loan_contract"]["terms_match"]
 
     # The SME can read back exactly what it uploaded.
     copy = await client.get(
@@ -329,16 +506,26 @@ async def test_the_standing_offer_needs_the_guarantors_own_signature(client, app
     assert only_guarantor.status_code == 422
     assert only_guarantor.headers["X-Error-Code"] == "SIGNING_SIGNER_MISMATCH"
 
+    # The Loan Contract template too, once the Offer is signed: both boxes, not only the company's.
+    await _sign_offer(client, case)
+    contract_one_box = await _upload(
+        client, case, "loan-contract",
+        await _signed(client, case, "loan-contract", signers=(TAX, GUARANTOR_ID), fields=("SME_Signature",)),
+    )
+    assert contract_one_box.headers["X-Error-Code"] == "SIGNING_GUARANTOR_MISSING"
+
 
 async def test_the_standing_offer_needs_a_verified_guarantor(client, approved, stored):
+    # Without the eKYC there is no ID number to print, or to check the Guarantor's signature against.
     case = await approved(kyc=False)
     status = await client.get(f"/loans/applications/{case.app_id}/listing-documents", headers=auth_headers(case.sme))
     assert status.json()["guarantor_verified"] is False
+    assert status.json()["standing_offer"]["missing_details"] == ["GUARANTOR_ID"]
     refused = await _upload(
         client, case, "standing-offer", await _signed(client, case, "standing-offer", signers=(TAX, GUARANTOR_ID))
     )
     assert refused.status_code == 422
-    assert refused.headers["X-Error-Code"] == "SIGNING_GUARANTOR_UNVERIFIED"
+    assert refused.headers["X-Error-Code"] == "SIGNING_DETAILS_MISSING"
 
 
 @pytest.mark.parametrize(
@@ -420,6 +607,7 @@ async def test_only_the_owning_sme_signs(client, approved, make_user, stored):
         for resp in (
             await client.get(f"/loans/applications/{case.app_id}/listing-documents", headers=auth_headers(who)),
             await client.get(f"/loans/applications/{case.app_id}/standing-offer", headers=auth_headers(who)),
+            await client.get(f"/loans/applications/{case.app_id}/loan-contract", headers=auth_headers(who)),
             await client.post(
                 f"/loans/applications/{case.app_id}/listing-documents/service-agreement",
                 files={"file": ("x.pdf", pdf, "application/pdf")},
@@ -427,7 +615,7 @@ async def test_only_the_owning_sme_signs(client, approved, make_user, stored):
             ),
         ):
             assert resp.status_code == 403, resp.text
-    unknown = await _upload(client, case, "loan-contract", pdf)
+    unknown = await _upload(client, case, "credit-memo", pdf)
     assert unknown.status_code == 404
 
 
@@ -435,7 +623,7 @@ async def test_the_wizard_cannot_upload_a_signed_document_unchecked(client, make
     # Signed listing documents arrive only through the NEAC-checked endpoint.
     sme = await make_user(role="SME")
     app_id = await _apply(client, sme)
-    for document_type in ("sme_service_agreement", "sme_standing_offer"):
+    for document_type in ("sme_service_agreement", "sme_standing_offer", "sme_loan_contract"):
         resp = await client.post(
             "/uploads/init-upload",
             json={"loan_application_id": app_id, "document_type": document_type, "filename": "signed.pdf",
@@ -446,18 +634,19 @@ async def test_the_wizard_cannot_upload_a_signed_document_unchecked(client, make
         assert resp.headers["X-Error-Code"] == "SIGNED_AFTER_APPROVAL"
 
 
-async def test_two_uploads_at_once_still_publish(client, db_session, approved, stored):
-    # The two documents sent together: each upload must see the other's, or neither publishes. Two sessions of
-    # their own, as two requests have (the test client shares one session between requests).
+async def test_two_uploads_at_once_still_publish(client, db_session, approved, stored, fake_neac):
+    # The last two documents sent together, once the Offer is on file: each upload must see the other's, or
+    # neither publishes. Sessions of their own, as two requests have (the test client shares one session).
     from app.core.database import SessionLocal
     from app.lending.models import LoanApplication as _Application
     from app.loans import signing
     from app.users.models import User
 
     case = await approved()
+    await _sign_offer(client, case)
     contents = {
         "service-agreement": await _signed(client, case, "service-agreement"),
-        "standing-offer": await _signed(client, case, "standing-offer", signers=(TAX, GUARANTOR_ID)),
+        "loan-contract": await _signed(client, case, "loan-contract", signers=(TAX, GUARANTOR_ID)),
     }
 
     async def sign(slug: str) -> None:
@@ -473,5 +662,28 @@ async def test_two_uploads_at_once_still_publish(client, db_session, approved, s
             )
             await session.commit()
 
-    await asyncio.gather(sign("service-agreement"), sign("standing-offer"))
+    await asyncio.gather(sign("service-agreement"), sign("loan-contract"))
     assert await _project_status(db_session, case.app_id) == "ACTIVE"
+
+
+def test_every_character_of_the_three_contracts_has_a_glyph():
+    # A character the embedded font lacks prints as nothing in the PDF a party signs (Contract 5's Δ did): every
+    # character of the texts and of the layout, in every style.
+    import inspect
+
+    from fontTools.ttLib import TTFont
+
+    from app.loans.agreement import pdf
+    from app.loans.agreement import text as agreement_text_module
+
+    for file in pdf.SERIF_FILES.values():
+        cmap = set(TTFont(str(pdf.FONT_DIR / file)).getBestCmap())
+        for module in (agreement_text_module, standing_offer_text, loan_contract_text, pdf):
+            missing = {ch for ch in inspect.getsource(module) if ord(ch) > 127 and ord(ch) not in cmap}
+            assert not missing, (style, module.__name__, missing)
+
+
+async def test_the_loan_contracts_extension_formula_keeps_its_delta(client, approved, stored, fake_neac):
+    case = await approved()
+    await _sign_offer(client, case)
+    assert "Δ = (U / số phải trả trong tháng × 21)" in _text(await _download(client, case, "loan-contract"))

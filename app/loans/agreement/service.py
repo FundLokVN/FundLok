@@ -4,7 +4,8 @@ platform already knows about the SME, rendered as the PDF the SME signs.
 Where each blank comes from:
   name, enterprise code, address, legal representative
       the SME's approved business verification (KYB) when there is one, as the
-      state registry confirmed it; else the project's own name and tax id
+      state registry confirmed it; else the project's own name, tax id and
+      address (the company form). The legal representative comes from KYB only
   registered bank account
       the SME's approved payment account (Settings > bank account)
   Annex amount and term
@@ -28,7 +29,7 @@ from app.direct_transfer.calendar_utils import ict_date
 from app.gverify import kyb_service
 from app.lending.models import LoanApplication, Project
 from app.loans.agreement import text
-from app.loans.agreement.pdf import AgreementData, render
+from app.loans.agreement.pdf import AgreementData, address_line, render
 from app.loans.agreement.terms import locked_terms
 from app.projects.service import user_owns_project
 from app.users.models import Role, User
@@ -67,7 +68,7 @@ async def agreement_data(db: AsyncSession, application: LoanApplication, user: U
         prepared_on=ict_date(datetime.now(timezone.utc)),
         sme_name=(verified.business_name if verified else None) or (project.legal_name if project else None),
         enterprise_code=(verified.tax_code if verified else None) or (project.tax_id if project else None),
-        address=verified.company_address if verified else None,
+        address=(verified.company_address if verified else None) or address_line(project.address if project else None),
         legal_representative=_representative(verified.representatives) if verified else None,
         bank_account=f"{account.account_number} ({account.account_name})" if account else None,
         bank_name=account.bank_name if account else None,

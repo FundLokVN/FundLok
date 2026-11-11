@@ -9,9 +9,14 @@ VERSION is printed on every page, so a signed copy says which text it was;
 bump it whenever a word here changes.
 """
 
-VERSION = "sme-agreement-v0.3"
+# v0.4: laid out as a Vietnamese contract (national header, date, number); the company address falls back to the
+# project's own.
+VERSION = "sme-agreement-v0.4"
 
 TITLE = ("2. Hợp đồng dịch vụ dành cho Doanh nghiệp", "SME Service Agreement")
+
+# The number under the title: the application reference, the document (Hợp đồng dịch vụ) and FundLok.
+NUMBER = "{ref}/HĐDV-FL"
 
 PREVAILS = ("Bản tiếng Việt được ưu tiên áp dụng.", "The Vietnamese text prevails.")
 
@@ -257,6 +262,8 @@ RATE_AFTER_ASSESSMENT = (
     "Proposed by FundLok after its assessment, at most 20% a year",
 )
 
+# Who signs for Party A (PARTY_A), printed under its block.
+PARTY_A_SIGNER = "Vương Vĩnh Lộc (Tổng Giám đốc)"
 SIGNATURES = (
     ("ĐẠI DIỆN BÊN A / FOR PARTY A", "Công ty Cổ phần FundLok"),
     ("ĐẠI DIỆN BÊN B / FOR PARTY B", "Ký số doanh nghiệp / Enterprise digital signature"),

@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.loans.schemas import (
+    GuarantorAddressIn,
     LoanApplicationCreate,
     LoanApplicationFiguresIn,
     LoanApplicationFiguresOut,
@@ -134,7 +135,12 @@ async def _listing_documents(db: AsyncSession, application, user: User) -> Listi
     def one(kind: signing.Kind) -> SignedListingDocumentOut:
         doc = state.signed.get(kind.document_type)
         if doc is None:
-            return SignedListingDocumentOut(signed=False)
+            first = kind is signing.LOAN_CONTRACT and signing.STANDING_OFFER_DOCUMENT_TYPE not in state.signed
+            return SignedListingDocumentOut(
+                signed=False,
+                missing_details=state.missing[kind],
+                waiting_for=signing.STANDING_OFFER.slug if first else None,
+            )
         verdict = checks.get(doc.id)
         return SignedListingDocumentOut(
             signed=True,
@@ -158,8 +164,11 @@ async def _listing_documents(db: AsyncSession, application, user: User) -> Listi
         ready=state.ready,
         published=state.published,
         guarantor_verified=state.guarantor_verified,
+        guarantor_address=state.guarantor_address,
+        guarantor_address_source=state.guarantor_address_source,
         service_agreement=one(signing.SERVICE_AGREEMENT),
         standing_offer=one(signing.STANDING_OFFER),
+        loan_contract=one(signing.LOAN_CONTRACT),
     )
 
 
@@ -169,7 +178,7 @@ async def get_listing_documents(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_sme),
 ):
-    """Where signing the two listing documents stands (docs/specs/loans/listing-signing.md). Owner only."""
+    """Where signing the three listing documents stands (docs/specs/loans/listing-signing.md). Owner only."""
     from app.loans.agreement.service import owned_application
 
     application = await owned_application(db, application_id, current_user)
@@ -206,6 +215,68 @@ async def get_standing_offer(
     return _pdf(pdf, filename, download)
 
 
+@router.get(
+    "/applications/{application_id}/loan-contract",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def get_loan_contract(
+    application_id: UUID,
+    download: bool = Query(False, description="true: as an attachment, to save"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The Loan Contract template (Contract 5) as a PDF, filled in with the SME, its Personal Guarantor, the
+    approved terms and the signed Standing Offer's number and date, for the SME and the Guarantor to sign and
+    upload back; each Investor's own contract is generated from it at commitment. Only once FundLok has approved
+    the request (409 SIGNING_NOT_OPEN before that) and the Standing Offer is signed (409 SIGNING_OFFER_FIRST).
+    Generated each time, never stored: the signed upload is the record. Owner only."""
+    from app.loans import signing
+    from app.loans.agreement import loan_contract
+    from app.loans.agreement.service import owned_application
+    from app.loans.agreement.terms import locked_terms
+
+    application = await owned_application(db, application_id, current_user)
+    if await locked_terms(db, application) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="The Loan Contract is ready once FundLok approves the request",
+            headers={"X-Error-Code": "SIGNING_NOT_OPEN"},
+        )
+    if signing.STANDING_OFFER_DOCUMENT_TYPE not in await signing.signed_documents(db, application.id):
+        raise HTTPException(
+            status_code=409, detail=signing.OFFER_FIRST, headers={"X-Error-Code": "SIGNING_OFFER_FIRST"}
+        )
+    pdf, filename = await loan_contract.build_pdf(db, application, current_user)
+    return _pdf(pdf, filename, download)
+
+
+@router.put("/applications/{application_id}/guarantor-address", response_model=ListingDocumentsOut)
+async def put_guarantor_address(
+    application_id: UUID,
+    body: GuarantorAddressIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The Personal Guarantor's address, for the Standing Offer and the Loan Contract template when the
+    Guarantor's eKYC carries none (GUARANTOR_ADDRESS in missing_details). 409 SIGNING_ALREADY_SIGNED once either
+    is signed. Returns where signing stands afterwards. Owner only."""
+    from app.loans import signing
+    from app.loans.agreement.service import owned_application
+
+    application = await owned_application(db, application_id, current_user)
+    await signing.set_guarantor_address(
+        db,
+        application=application,
+        user=current_user,
+        address=body.address,
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return await _listing_documents(db, application, current_user)
+
+
 @router.post("/applications/{application_id}/listing-documents/{kind}", response_model=ListingDocumentsOut)
 async def upload_signed_listing_document(
     application_id: UUID,
@@ -215,9 +286,9 @@ async def upload_signed_listing_document(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_sme),
 ):
-    """Upload the signed copy of a listing document: `kind` is "service-agreement" or "standing-offer". Checked
-    with NEAC before it counts (app/loans/signing.record_signed lists the refusals); the second of the two
-    publishes the project. Returns where signing stands afterwards. Owner only."""
+    """Upload the signed copy of a listing document: `kind` is "service-agreement", "standing-offer" or
+    "loan-contract". Checked with NEAC before it counts (app/loans/signing.record_signed lists the refusals); the
+    last of the three publishes the project. Returns where signing stands afterwards. Owner only."""
     from app.loans import signing
     from app.loans.agreement.service import owned_application
 
