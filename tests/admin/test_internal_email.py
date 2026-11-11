@@ -367,8 +367,8 @@ async def test_every_admin_can_connect_and_send_but_only_a_system_admin_sets_pol
 async def test_each_admin_has_their_own_account(
     client, make_admin, make_system_admin, db_session, fake_google
 ):
-    alice = await make_admin()
-    bob = await make_admin()
+    alice = await make_admin(email="alice@fundlok.com")
+    bob = await make_admin(email="bob@fundlok.com")
     sysadmin = await make_system_admin()
     await _connect(client, fake_google, alice, "alice@fundlok.com", from_name="Alice")
 
@@ -503,7 +503,7 @@ async def test_the_sign_in_client_is_reused_when_no_gmail_client_is_set(
 async def test_connecting_stores_the_refresh_token_encrypted_and_never_returns_it(
     client, make_admin, db_session, fake_google
 ):
-    admin = await make_admin()
+    admin = await make_admin(email="ops.lead@fundlok.com")
     assert await _oauth(client, fake_google, admin, "ops.lead@fundlok.com") == {"connected": "true"}
 
     row = await _row(db_session, admin)
@@ -610,14 +610,31 @@ async def test_the_connect_domain_allowlist_applies(
     client, make_admin, db_session, fake_google, monkeypatch
 ):
     monkeypatch.setattr(settings, "GMAIL_CONNECT_ALLOWED_DOMAINS", "fundlok.com, @FundLok.vn")
-    admin = await make_admin()
-    outcome = await _oauth(client, fake_google, admin, "someone@gmail.com", refresh_token="1//g")
+    outsider = await make_admin(email="someone@gmail.com")
+    outcome = await _oauth(client, fake_google, outsider, "someone@gmail.com", refresh_token="1//g")
     assert outcome == {"error": "domain_not_allowed"}
     assert fake_google.revoked == ["1//g"]
-    assert await _row(db_session, admin) is None
+    assert await _row(db_session, outsider) is None
 
     for account in ("ops@fundlok.com", "ops@FundLok.vn"):
+        admin = await make_admin(email=account)
         assert await _oauth(client, fake_google, admin, account) == {"connected": "true"}
+
+
+async def test_connecting_a_different_email_from_the_admin_account_is_refused(
+    client, make_admin, db_session, fake_google
+):
+    admin = await make_admin(email="phat.huynh@fundlok.com")
+    outcome = await _oauth(
+        client,
+        fake_google,
+        admin,
+        "other.account@fundlok.com",
+        refresh_token="1//mismatched",
+    )
+    assert outcome == {"error": "email_mismatch"}
+    assert fake_google.revoked == ["1//mismatched"]
+    assert await _row(db_session, admin) is None
 
 
 async def test_a_grant_without_a_refresh_token_is_refused(client, make_admin, db_session, fake_google):
@@ -666,26 +683,30 @@ async def test_the_callback_refuses_someone_no_longer_an_admin(
 async def test_reconnecting_keeps_the_profile_and_resets_verification(
     client, make_admin, db_session, fake_google
 ):
-    admin = await make_admin()
+    admin = await make_admin(email="ops@fundlok.com")
     await _connect(client, fake_google, admin, "ops@fundlok.com", signature_name="Lan Nguyen")
     assert (await client.post(f"{SETTINGS}/test", headers=admin["headers"])).status_code == 200
     first = crypto.decrypt_secret((await _row(db_session, admin)).refresh_token_encrypted)
 
     # The same account again: a new token, and the old one is NOT revoked
     # (revoking it would revoke the whole grant, the new token included).
-    assert await _oauth(client, fake_google, admin, "ops@fundlok.com") == {"connected": "true"}
+    assert await _oauth(client, fake_google, admin, "Ops@FundLok.com") == {"connected": "true"}
     row = await _row(db_session, admin)
     assert crypto.decrypt_secret(row.refresh_token_encrypted) != first
     assert fake_google.revoked == []
     assert row.last_verified_at is None
     assert (row.enabled, row.from_name, row.signature_name) == (True, "FundLok Team", "Lan Nguyen")
 
-    # A different account replaces it, and the old account's grant is given up.
+    # Trying to replace it with a different Google account is refused and
+    # revoked; the existing connection stays intact.
     second = crypto.decrypt_secret(row.refresh_token_encrypted)
-    assert await _oauth(client, fake_google, admin, "other@fundlok.com") == {"connected": "true"}
+    assert await _oauth(
+        client, fake_google, admin, "other@fundlok.com", refresh_token="1//other"
+    ) == {"error": "email_mismatch"}
     row = await _row(db_session, admin)
-    assert row.gmail_address == "other@fundlok.com"
-    assert fake_google.revoked == [second]
+    assert row.gmail_address == "Ops@FundLok.com"
+    assert crypto.decrypt_secret(row.refresh_token_encrypted) == second
+    assert fake_google.revoked == ["1//other"]
 
 
 async def test_connecting_is_audited_without_the_token(client, make_admin, db_session, fake_google):
@@ -852,7 +873,7 @@ async def test_disconnecting_works_when_google_cannot_be_reached(
 async def test_the_test_email_goes_to_the_admin_and_marks_verified(
     client, make_system_admin, db_session, fake_google
 ):
-    sysadmin = await make_system_admin()
+    sysadmin = await make_system_admin(email="team@fundlok.com")
     await _connect(client, fake_google, sysadmin, "team@fundlok.com", enabled=False)  # works while paused
 
     resp = await client.post(f"{SETTINGS}/test", headers=sysadmin["headers"])
@@ -878,7 +899,7 @@ async def test_the_test_email_goes_to_the_admin_and_marks_verified(
 async def test_a_revoked_grant_asks_to_reconnect(client, make_system_admin, db_session, fake_google):
     # The admin removed FundLok under "Third-party access" in their Google
     # account: Google answers invalid_grant to the refresh.
-    sysadmin = await make_system_admin()
+    sysadmin = await make_system_admin(email="team@fundlok.com")
     await _connect(client, fake_google, sysadmin, "team@fundlok.com", signature_name="Lan")
     token = crypto.decrypt_secret((await _row(db_session, sysadmin)).refresh_token_encrypted)
     fake_google.invalid_grant.add(token)
@@ -1048,7 +1069,7 @@ async def test_sending_requires_configured_and_enabled(client, make_system_admin
 async def test_a_send_reaches_gmail_with_the_rendered_template(
     client, make_system_admin, db_session, fake_google
 ):
-    sysadmin = await make_system_admin()
+    sysadmin = await make_system_admin(email="team@fundlok.com")
     await _connect(client, fake_google, sysadmin, "team@fundlok.com")
 
     resp = await client.post(
@@ -1250,8 +1271,8 @@ async def test_the_hourly_limit_applies(client, make_system_admin, fake_google, 
 
 async def test_the_hourly_limit_is_per_admin(client, make_admin, fake_google, monkeypatch):
     # One admin using up the hour must not block another.
-    alice = await make_admin()
-    bob = await make_admin()
+    alice = await make_admin(email="alice@fundlok.com")
+    bob = await make_admin(email="bob@fundlok.com")
     await _connect(client, fake_google, alice, "alice@fundlok.com")
     await _connect(client, fake_google, bob, "bob@fundlok.com")
     monkeypatch.setattr(service, "RECIPIENTS_PER_HOUR", 1)

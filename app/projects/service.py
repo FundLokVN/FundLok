@@ -299,14 +299,16 @@ def verified_document_types(application: LoanApplication) -> list[str]:
         return []
     from app.admin.service import REQUIRED_DOCUMENT_TYPES
 
-    from app.loans.agreement.service import SERVICE_AGREEMENT_DOCUMENT_TYPE
+    from app.uploads.schemas import SIGNED_DOCUMENT_TYPES
 
-    # The SME Service Agreement is between the SME and FundLok, not evidence
-    # about the business: investors are not shown it (Contract 2 Art. 8).
+    # The documents the SME signs after approval are not evidence about the
+    # business: the Service Agreement is between the SME and FundLok (Contract
+    # 2 Art. 8), and the signed Standing Offer carries the Guarantor's
+    # personal details. Investors are not shown them.
     uploaded = dict.fromkeys(
         d.document_type
         for d in application.documents
-        if d.status == "UPLOADED" and d.document_type != SERVICE_AGREEMENT_DOCUMENT_TYPE
+        if d.status == "UPLOADED" and d.document_type not in SIGNED_DOCUMENT_TYPES
     )
     return [*REQUIRED_DOCUMENT_TYPES, *(t for t in uploaded if t not in REQUIRED_DOCUMENT_TYPES)]
 
@@ -316,11 +318,16 @@ async def activate_project_if_approved(
     db: AsyncSession, application_id: UUID, *, actor_id: UUID | None = None
 ) -> bool:
     """Put a DRAFT project on the marketplace once its application has BOTH
-    approvals: the operator's (admin_approval == APPROVED) and the engine's
-    (a LOCKED score run). Returns True when it flipped the project to ACTIVE.
+    approvals -- the operator's (admin_approval == APPROVED) and the engine's
+    (a LOCKED score run) -- AND the SME has signed the three documents those
+    approved terms go into: the Service Agreement, the Standing Offer and
+    the Loan Contract template
+    (app/loans/signing.py; Contract 3: "signing publishes the Listing").
+    Returns True when it flipped the project to ACTIVE.
 
-    Called from both places a half of the gate lands (admin decide_application
-    and underwriting approve_score_run), because either can come second.
+    Called from every place a part of the gate lands (admin
+    decide_application, underwriting approve_score_run, and the SME's second
+    signed upload), because any of them can come last.
 
     Before this, nothing ever set a project ACTIVE: creation leaves it DRAFT,
     ACTIVE was only the column's server default, so a genuinely approved SME
@@ -344,6 +351,12 @@ async def activate_project_if_approved(
         )
     ).scalar_one_or_none()
     if locked is None:
+        return False
+    # Approved but not yet signed: the SME is asked to sign (the dashboard's
+    # signing step), and its second signed upload calls this again.
+    from app.loans.signing import all_signed
+
+    if not await all_signed(db, application_id):
         return False
 
     project = (
@@ -388,10 +401,9 @@ async def approval_for(db: AsyncSession, application):
     a request is decided, so that run is final. An approval made without any
     graded run still returns, with the score fields empty.
     """
-    from decimal import ROUND_HALF_UP, Decimal
+    from decimal import Decimal
 
     from app.lending.models import ScoreRun
-    from app.projects.engine_constraints import params
     from app.projects.schemas import LoanApprovalOut
     from app.underwriting.models import ScoreRunInput
 
@@ -415,12 +427,21 @@ async def approval_for(db: AsyncSession, application):
         # The term the rate was priced on.
         duration = snapshot.duration_months if snapshot else duration
     if run is not None and run.interest_rate_pct is not None and duration:
-        # INV-2: flat interest on the principal, charged once.
-        rate = Decimal(str(run.interest_rate_pct)) / Decimal("100")
-        total_dec = Decimal(int(application.requested_amount)) * (1 + rate * Decimal(duration) / Decimal(12))
-        days = Decimal(str(params().repayment["working_days_per_month"])) * Decimal(duration)
-        total = int(total_dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-        daily = int((total_dec / days).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        # INV-2: flat interest on the principal, charged once. The same estimate the Standing Offer prints and the
+        # repayment schedule charges (agreement/terms.repayment_estimate: 21 working days a month, the daily
+        # instalment floored), so the figures on this card are the ones the SME then signs.
+        from app.loans.agreement.terms import repayment_estimate
+
+        try:
+            estimate = repayment_estimate(
+                int(application.requested_amount),
+                Decimal(str(run.interest_rate_pct)).quantize(Decimal("0.001")),
+                duration,
+            )
+        except ValueError:  # a rate the schedule refuses (above the cap): no estimate rather than a wrong one
+            estimate = None
+        if estimate is not None:
+            total, daily = estimate.total_vnd, estimate.daily_vnd
 
     return LoanApprovalOut(
         approved_at=application.decided_at,

@@ -252,10 +252,11 @@ NONE ──connect──▶ CONNECTED ──disconnect──▶ NONE (address cl
 1. **Fixed hosts.** Google's authorize, token, revoke and Gmail send URLs are
    constants (`google.py`), not settings, so nothing on the settings screen can
    point the server at another host. All calls use `httpx` with a 20 s timeout.
-2. **Scope check.** Google's consent screen lets the admin untick "Send email on
-   your behalf". A grant without `gmail.send`, without a verified email, outside
-   `GMAIL_CONNECT_ALLOWED_DOMAINS`, or without a refresh token is refused and
-   revoked at Google; nothing is stored.
+2. **Scope and identity check.** Google's consent screen lets the admin untick
+   "Send email on your behalf". A grant without `gmail.send`, without a verified
+   email, outside `GMAIL_CONNECT_ALLOWED_DOMAINS`, whose email does not match
+   the signed-in admin's account email, or without a refresh token is refused
+   and revoked at Google; nothing is stored.
 3. **Reconnecting.** The same Google account: the new token replaces the old,
    and the old one is **not** revoked (Google revokes the whole grant, which
    would kill the new token too). A different account: the old account's
@@ -325,6 +326,7 @@ NONE ──connect──▶ CONNECTED ──disconnect──▶ NONE (address cl
 | Validation (format, lengths, non-https URL, CR/LF, unknown field) | 422 | — |
 | OAuth client not configured (`/oauth/authorize`) | 503 | `GMAIL_OAUTH_NOT_CONFIGURED` |
 | Turn sending on without a connected account | 400 | `EMAIL_NOT_CONFIGURED` |
+| Send/test/enable when connected Google email differs from signed-in account | 409 | `GMAIL_EMAIL_MISMATCH` |
 | Send/test while not connected | 409 | `EMAIL_NOT_CONFIGURED` |
 | Send while paused | 409 | `EMAIL_DISABLED` |
 | Encryption key not configured (send/test) | 503 | `EMAIL_ENCRYPTION_UNAVAILABLE` |
@@ -341,9 +343,10 @@ NONE ──connect──▶ CONNECTED ──disconnect──▶ NONE (address cl
 OAuth callback outcomes (`?error=` on the redirect back; never Google's text):
 `cancelled` (admin pressed Cancel), `invalid_state` (bad/expired state, missing
 or mismatched binding cookie, no code), `not_admin`, `scope_missing`,
-`email_unverified`, `domain_not_allowed`, `no_refresh_token`, `not_configured`,
-`encryption_unavailable`, `failed` (exchange refused, Google unreachable, any
-other Google error).
+`email_unverified`, `email_mismatch` (connected Google email does not match the
+signed-in admin's account email), `domain_not_allowed`, `no_refresh_token`,
+`not_configured`, `encryption_unavailable`, `failed` (exchange refused, Google
+unreachable, any other Google error).
 
 `GMAIL_AUTH_FAILED` is no longer produced; the console keeps its copy for send
 log rows written before v2.0.

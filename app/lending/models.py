@@ -133,6 +133,10 @@ class LoanApplication(Base):
     # confirmed fact.
     self_reported_figures = Column(JSONB)
     figures_updated_at = Column(DateTime(timezone=True))
+    # The Personal Guarantor's address as the SME entered it, for the Standing Offer and the Loan Contract template
+    # (app/loans/agreement/standing_offer.guarantor_for). Used only when the guarantor's approved eKYC carries no
+    # address (GVerify's OCR returns none today); self-reported, like the figures above.
+    guarantor_address = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

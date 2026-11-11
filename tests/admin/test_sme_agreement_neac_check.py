@@ -1,7 +1,9 @@
-"""The SME's signed Service Agreement (wizard step 4), checked with NEAC for staff: NEAC's own verification, whether
-it is this application's agreement, and whether the signer's MST is the company's, shown in the admin project panel.
-Tests never call NEAC: neac.verify_document is replaced per test.
+"""The SME's signed listing documents (the Service Agreement and the Standing Offer), checked with NEAC for staff:
+NEAC's own verification, whether it is this application's document with today's check code, whether the signer's
+MST is the company's, and on the Standing Offer the Personal Guarantor's own signature, shown in the admin project
+panel. Tests never call NEAC: neac.verify_document is replaced per test.
 """
+import datetime as dt
 import re
 import uuid
 from types import SimpleNamespace
@@ -9,16 +11,22 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
-from app.lending.models import AuditLog, LoanApplication, LoanApplicationDocument
+from app.direct_transfer.models import PaymentAccount
+from app.gverify.models import STATUS_APPROVED, GVerifyVerification
+from app.lending.models import AuditLog, LoanApplication, LoanApplicationDocument, ScoreRun
 from app.market.investor_agreement import neac
 from conftest import SIGNED_AGREEMENT_PDF, auth_headers
 from tests.loans.test_service_agreement import TAX, _apply, _verified_with_bank
 
 
-def _signature(*, signer_mst=TAX, signer_name="CONG TY TNHH AGREEMENT TEST", case="VALID"):
+GUARANTOR_ID = "079123456789"
+GUARANTOR_NAME = "TRAN VAN OWNER"
+
+
+def _signature(*, signer_mst=TAX, signer_name="CONG TY TNHH AGREEMENT TEST", case="VALID", cccd=None):
     return neac.NeacSignature(
         issuer={"cn": "FPT Certification Authority SHA256", "o": "FPT CORPORATION", "c": "VN"},
-        signer={"cn": signer_name, "c": "VN", "cccd": f"MST:{signer_mst}"},
+        signer={"cn": signer_name, "c": "VN", "cccd": f"CCCD:{cccd}" if cccd else f"MST:{signer_mst}"},
         intact="Bị thay đổi" if case == "MODIFIED" else "Không bị thay đổi",
         certificate_validity="Thời điểm có hiệu lực: 2026-03-18; Thời điểm hết hiệu lực: 2027-03-26",
         validity="Không hợp lệ" if case == "INVALID" else "Hợp lệ tại thời điểm ký",
@@ -73,6 +81,54 @@ async def _uploaded_agreement(client, db_session, make_user, monkeypatch, *, con
     return application.project_id, document.id
 
 
+async def _uploaded_offer(client, db_session, make_user, monkeypatch, *, kind="standing-offer"):
+    """An approved application (locked terms, the owner's eKYC) whose signed Standing Offer (or, with
+    kind="loan-contract", Loan Contract template) is on file; (project id, document id, the SME)."""
+    sme = await make_user(role="SME")
+    app_id = await _apply(client, sme)
+    await _verified_with_bank(db_session, sme)
+    db_session.add(GVerifyVerification(
+        user_id=uuid.UUID(sme["id"]), verification_type="KYC", status=STATUS_APPROVED,
+        full_name=GUARANTOR_NAME, person_number=GUARANTOR_ID,
+    ))
+    application = await db_session.get(LoanApplication, uuid.UUID(app_id))
+    application.admin_approval = "APPROVED"
+    db_session.add(ScoreRun(
+        application_id=application.id, status="LOCKED", locked_at=dt.datetime.now(dt.timezone.utc),
+        final_grade_precise=72.0, interest_rate_pct=14.5,
+    ))
+    application.guarantor_address = "45 Le Loi, Phuong 4, TP. Vung Tau"
+    await db_session.commit()
+    if kind == "loan-contract":
+        # The Loan Contract cites the signed Offer: it is on file first.
+        db_session.add(LoanApplicationDocument(
+            loan_application_id=application.id, document_type="sme_standing_offer",
+            file_key=f"test/{uuid.uuid4()}.pdf", original_filename="standing-offer-da-ky.pdf",
+            content_type="application/pdf", file_size_bytes=1, status="UPLOADED",
+            uploaded_at=dt.datetime.now(dt.timezone.utc),
+        ))
+        await db_session.commit()
+    download = await client.get(f"/loans/applications/{app_id}/{kind}", headers=auth_headers(sme))
+    assert download.status_code == 200, download.text
+    content = _signed(download.content)
+    document = LoanApplicationDocument(
+        loan_application_id=application.id,
+        document_type="sme_standing_offer" if kind == "standing-offer" else "sme_loan_contract",
+        file_key=f"test/{uuid.uuid4()}.pdf", original_filename=f"{kind}-da-ky.pdf",
+        content_type="application/pdf", file_size_bytes=len(content), status="UPLOADED",
+    )
+    db_session.add(document)
+    await db_session.commit()
+    monkeypatch.setattr("app.loans.agreement.neac_check.get_bytes", lambda key, **kw: content)
+    return application.project_id, document.id, sme
+
+
+def _company_and_guarantor():
+    return neac.NeacResult(
+        message="Success", signatures=[_signature(), _signature(signer_name=GUARANTOR_NAME, cccd=GUARANTOR_ID)]
+    )
+
+
 async def _check(client, admin, document_id):
     return await client.post(f"/admin/documents/{document_id}/neac-check", headers=admin["headers"])
 
@@ -106,6 +162,9 @@ async def test_a_valid_agreement_signed_by_the_company_shows_as_verified_and_mat
     assert check["signer_id"] == f"MST:{TAX}"
     assert check["issuer_name"] == "FPT Certification Authority SHA256"
     assert check["problems"] == []
+    # Its check code is the one the agreement carries today; no guarantor on Contract 2.
+    assert check["terms_match"] is True and check["check_code"]
+    assert check["guarantor_required"] is False and check["guarantor_matches"] is None
     # Recorded, and what the panel shows from now on.
     audit = (
         await db_session.execute(select(AuditLog).where(AuditLog.action == "NEAC_SIGNATURE_CHECKED"))
@@ -156,6 +215,7 @@ async def test_another_companys_signature_or_another_pdf_is_flagged(
     )
     charter = (await _check(client, admin, charter_id)).json()
     assert charter["right_document"] is False
+    assert charter["terms_match"] is None  # no check code in it to compare
 
 
 async def test_without_an_approved_kyb_the_project_tax_id_is_the_reference(
@@ -203,3 +263,107 @@ async def test_only_staff_check_and_only_the_signed_agreement(
     await db_session.commit()
     assert (await _check(client, admin, other.id)).status_code == 404
     assert neac_answers.calls == 0
+
+
+async def test_a_standing_offer_signed_by_the_company_and_the_guarantor_is_verified(
+    client, db_session, make_user, make_admin, monkeypatch, neac_answers
+):
+    admin = await make_admin()
+    project_id, document_id, _ = await _uploaded_offer(client, db_session, make_user, monkeypatch)
+    neac_answers.next = _company_and_guarantor()
+
+    check = (await _check(client, admin, document_id)).json()
+
+    assert check["document_type"] == "sme_standing_offer"
+    assert check["status"] == "VERIFIED" and check["right_document"] is True
+    assert check["signer_matches"] is True and check["signer_id"] == f"MST:{TAX}"
+    assert check["guarantor_required"] is True and check["guarantor_matches"] is True
+    assert check["guarantor_id"] == f"CCCD:{GUARANTOR_ID}" and check["guarantor_expected_id"] == GUARANTOR_ID
+    assert check["guarantor_name_matches"] is True
+    assert check["terms_match"] is True
+    shown = await _panel_document(client, admin, project_id, document_id)
+    assert shown["signature_check"]["guarantor_matches"] is True
+
+
+async def test_a_standing_offer_without_the_guarantors_own_signature_is_flagged(
+    client, db_session, make_user, make_admin, monkeypatch, neac_answers
+):
+    admin = await make_admin()
+    _, document_id, _ = await _uploaded_offer(client, db_session, make_user, monkeypatch)
+
+    # The company's signature only.
+    neac_answers.next = neac.NeacResult(message="Success", signatures=[_signature()])
+    only_company = (await _check(client, admin, document_id)).json()
+    assert only_company["status"] == "VERIFIED" and only_company["signer_matches"] is True
+    assert only_company["guarantor_matches"] is False and only_company["guarantor_id"] is None
+
+    # The guarantor's signature is there, but NEAC does not accept it.
+    neac_answers.next = neac.NeacResult(message="Success", signatures=[
+        _signature(), _signature(signer_name=GUARANTOR_NAME, cccd=GUARANTOR_ID, case="INVALID"),
+    ])
+    invalid = (await _check(client, admin, document_id)).json()
+    assert invalid["guarantor_matches"] is False and invalid["guarantor_problems"]
+
+
+async def test_a_copy_whose_details_changed_since_signing_no_longer_matches(
+    client, db_session, make_user, make_admin, monkeypatch, neac_answers
+):
+    admin = await make_admin()
+    _, document_id, sme = await _uploaded_offer(client, db_session, make_user, monkeypatch)
+    neac_answers.next = _company_and_guarantor()
+    assert (await _check(client, admin, document_id)).json()["terms_match"] is True
+
+    # The bank account investors pay into changed after signing: the signed copy names the old one.
+    account = (
+        await db_session.execute(select(PaymentAccount).where(PaymentAccount.user_id == uuid.UUID(sme["id"])))
+    ).scalar_one()
+    account.account_number = "0071000999999"
+    await db_session.commit()
+
+    assert (await _check(client, admin, document_id)).json()["terms_match"] is False
+
+
+async def test_a_loan_contract_template_is_checked_like_the_standing_offer(
+    client, db_session, make_user, make_admin, monkeypatch, neac_answers
+):
+    admin = await make_admin()
+    _, document_id, _ = await _uploaded_offer(client, db_session, make_user, monkeypatch, kind="loan-contract")
+    neac_answers.next = _company_and_guarantor()
+
+    check = (await _check(client, admin, document_id)).json()
+    assert check["document_type"] == "sme_loan_contract"
+    assert check["status"] == "VERIFIED" and check["right_document"] is True
+    assert check["guarantor_required"] is True and check["guarantor_matches"] is True
+    assert check["terms_match"] is True
+
+    neac_answers.next = neac.NeacResult(message="Success", signatures=[_signature()])
+    assert (await _check(client, admin, document_id)).json()["guarantor_matches"] is False
+
+
+async def test_a_copy_of_an_earlier_version_is_still_the_right_document(
+    client, db_session, make_user, make_admin, monkeypatch, neac_answers
+):
+    # Signed in production before the current text (sme-agreement-v0.3): still this application's Contract 2 and
+    # its signatures still checked, but its check code was over that text, so there is nothing to compare.
+    from app.loans.agreement import text
+
+    admin = await make_admin()
+    with monkeypatch.context() as old:
+        old.setattr(text, "VERSION", "sme-agreement-v0.3")
+        sme = await make_user(role="SME")
+        app_id = await _apply(client, sme)
+        await _verified_with_bank(db_session, sme)
+        download = await client.get(f"/loans/applications/{app_id}/service-agreement", headers=auth_headers(sme))
+        assert download.status_code == 200, download.text
+    _, document_id = await _uploaded_agreement(
+        client, db_session, make_user, monkeypatch, content=_signed(download.content), tax_id="0319911299"
+    )
+    # _uploaded_agreement made an application of its own: the document is this one's.
+    document = await db_session.get(LoanApplicationDocument, document_id)
+    document.loan_application_id = uuid.UUID(app_id)
+    await db_session.commit()
+
+    check = (await _check(client, admin, document_id)).json()
+    assert check["status"] == "VERIFIED"
+    assert check["right_document"] is True and check["agreement_version"] == "sme-agreement-v0.3"
+    assert check["terms_match"] is None

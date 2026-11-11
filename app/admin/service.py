@@ -486,11 +486,14 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
     kyb = await _latest_kyb_for_project(db, project_id)
     registration_verified = bool(kyb and kyb.is_approved)
 
-    # The newest NEAC check of each signed Service Agreement, in one query.
+    # The newest NEAC check of each signed listing document (the Service
+    # Agreement and the Standing Offer, checked when the SME uploaded them),
+    # in one query.
     from app.loans.agreement import neac_check
+    from app.uploads.schemas import SIGNED_DOCUMENT_TYPES
 
     checks = await neac_check.latest_checks(
-        db, [d.id for r in rows for d in r.documents if d.document_type == neac_check.DOCUMENT_TYPE]
+        db, [d.id for r in rows for d in r.documents if d.document_type in SIGNED_DOCUMENT_TYPES]
     )
 
     def _row(application) -> AdminLoanApplicationRow:

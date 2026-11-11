@@ -27,13 +27,15 @@ def make_submitted_application(
 ):
     """An SME with a submitted application — the state an operator reviews."""
 
-    async def _make():
+    async def _make(*, signed: bool = True):
         sme = await make_user(role="SME")
         project = await make_project(sme)
         application = await make_loan_application(
             sme, project["id"], requested_amount="50000000"
         )
-        resp = await submit_loan_application(sme, application["id"])
+        # signed: the listing documents on file up front (conftest
+        # attach_signed_listing_documents), so the approvals alone publish.
+        resp = await submit_loan_application(sme, application["id"], signed=signed)
         assert resp.status_code == 200, resp.text
         # Complete, so an approval is not refused for missing documents.
         await attach_required_documents(application["id"])

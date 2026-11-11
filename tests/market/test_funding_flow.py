@@ -14,12 +14,14 @@ from app.direct_transfer.vietqr import parse_tlv, verify_crc
 from app.lending.models import AuditLog, Contract, Listing, LoanApplication, Project, ProjectOwnership, ScoreRun
 from app.market.funding import INVESTOR_TERMS_VERSION
 from app.projects.service import activate_project_if_approved
+from conftest import attach_signed_listing_documents
 
 SME_ACCOUNT = "19036789012"
 
 
 async def _project(db_session, sme, *, requested=80_000_000, status="ACTIVE", rate=16.0, term=4):
-    """A project with an approved request and LOCKED terms (what the admin and the engine leave behind); its id."""
+    """A project with an approved request, LOCKED terms and the SME's signed listing documents (what the admin, the
+    engine and the SME's signing leave behind); its id."""
     project = Project(legal_name=f"ABC Co {uuid.uuid4().hex[:6]}", tax_id=f"TAX-{uuid.uuid4().hex[:10]}", status=status)
     db_session.add(project)
     await db_session.flush()
@@ -37,6 +39,7 @@ async def _project(db_session, sme, *, requested=80_000_000, status="ACTIVE", ra
         )
     )
     await db_session.commit()
+    await attach_signed_listing_documents(db_session, application.id)
     return project.id
 
 

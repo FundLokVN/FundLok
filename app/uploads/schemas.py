@@ -25,11 +25,19 @@ DOCUMENT_TYPE_RULES: dict[str, dict] = {
     # the statement XML alone. Parsed at confirm by
     # app/uploads/parsers/tax_filings.py.
     "tax_filings": {"extensions": {"zip", "xml"}, "max_size": 100 * MB},
-    # Step 4: the SME Service Agreement the SME downloaded from
-    # GET /loans/applications/{id}/service-agreement, signed with its
-    # enterprise digital signature. A signed PDF. Required to submit.
+    # The three documents the SME signs after approval (app/loans/signing.py):
+    # the SME Service Agreement, the Standing Offer and the Loan Contract
+    # template, each a signed PDF.
+    # They are uploaded through POST /loans/applications/{id}/listing-documents/
+    # {kind}, never through the wizard's presigned upload (SIGNED_DOCUMENT_TYPES).
     "sme_service_agreement": {"extensions": {"pdf"}, "max_size": 25 * MB},
+    "sme_standing_offer": {"extensions": {"pdf"}, "max_size": 25 * MB},
+    "sme_loan_contract": {"extensions": {"pdf"}, "max_size": 25 * MB},
 }
+
+# Signed after approval, checked with NEAC on the way in: the wizard's
+# presigned upload refuses them, so none can arrive unchecked.
+SIGNED_DOCUMENT_TYPES = frozenset({"sme_service_agreement", "sme_standing_offer", "sme_loan_contract"})
 
 EXTENSION_CONTENT_TYPES: dict[str, frozenset[str]] = {
     "pdf": frozenset({"application/pdf"}),

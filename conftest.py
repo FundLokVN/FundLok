@@ -527,41 +527,53 @@ SIGNED_AGREEMENT_PDF = (
 )
 
 
-async def attach_signed_service_agreement(db_session, application_id) -> None:
-    """The SME uploaded its signed SME Service Agreement, as the wizard does
-    before Send (submit refuses without it). Test setup: the upload itself is
-    covered in tests/loans/test_service_agreement.py."""
+async def attach_signed_listing_documents(db_session, application_id) -> None:
+    """The SME's signed Service Agreement and Standing Offer on file, as rows.
+
+    A project goes live only once both are signed after approval
+    (app/loans/signing.py). Most suites are about what happens once it is
+    live, not about signing, so they attach both up front and an approval
+    publishes as it did before signing existed. The signing itself is covered
+    in tests/loans/test_listing_signing.py, and the gate in
+    tests/projects/test_project_activation.py, which submit with signed=False.
+    """
     from sqlalchemy import select as _select
 
     from app.lending.models import LoanApplicationDocument
-    from app.loans.agreement.service import SERVICE_AGREEMENT_DOCUMENT_TYPE
+    from app.loans.signing import KINDS
 
     app_id = uuid.UUID(str(application_id))
-    existing = await db_session.scalar(
-        _select(LoanApplicationDocument.id).where(
-            LoanApplicationDocument.loan_application_id == app_id,
-            LoanApplicationDocument.document_type == SERVICE_AGREEMENT_DOCUMENT_TYPE,
-        )
+    held = set(
+        (
+            await db_session.execute(
+                _select(LoanApplicationDocument.document_type).where(
+                    LoanApplicationDocument.loan_application_id == app_id
+                )
+            )
+        ).scalars()
     )
-    if existing is None:
+    for kind in KINDS.values():
+        if kind.document_type in held:
+            continue
         db_session.add(
             LoanApplicationDocument(
                 loan_application_id=app_id,
-                document_type=SERVICE_AGREEMENT_DOCUMENT_TYPE,
-                file_key=f"test/{app_id}/signed-service-agreement-{uuid.uuid4().hex}.pdf",
-                original_filename="hop-dong-dich-vu-da-ky.pdf",
+                document_type=kind.document_type,
+                file_key=f"test/{app_id}/signed-{kind.slug}-{uuid.uuid4().hex}.pdf",
+                original_filename=f"{kind.slug}-da-ky.pdf",
                 content_type="application/pdf",
                 file_size_bytes=1024,
                 status="UPLOADED",
             )
         )
-        await db_session.commit()
+    await db_session.commit()
 
 
 @pytest.fixture
 def submit_loan_application(client, db_session):
-    async def _submit(sme: dict, application_id: str):
-        await attach_signed_service_agreement(db_session, application_id)
+    async def _submit(sme: dict, application_id: str, *, signed: bool = True):
+        if signed:
+            await attach_signed_listing_documents(db_session, application_id)
         return await client.post(
             f"/loans/applications/{application_id}/submit",
             headers=auth_headers(sme),
@@ -830,14 +842,24 @@ def fake_neac(monkeypatch):
             raise neac.NeacUnavailable("fake NEAC is down")
         if case == "UNSIGNED":
             return neac.NeacResult(message="Văn bản không có chữ ký số", signatures=[])
-        signer_id = _re.search(rb"%FAKE-NEAC-SIGNER:([A-Za-z0-9]+)", content)
-        name = _re.search(rb"%FAKE-NEAC-NAME:([^\r\n]+)", content)
-        signature = neac.NeacSignature(
+        # One signature per signer marker (the Standing Offer carries two: the
+        # company's and the guarantor's), each named by the NAME marker in the
+        # same position.
+        signer_ids = [m.decode() for m in _re.findall(rb"%FAKE-NEAC-SIGNER:([A-Za-z0-9]+)", content)]
+        names = [m.decode() for m in _re.findall(rb"%FAKE-NEAC-NAME:([^\r\n]+)", content)]
+        signatures = [
+            _signature(case, signer_id, names[i] if i < len(names) else (names[0] if names else "SOMEONE"))
+            for i, signer_id in enumerate(signer_ids or ["000000000000"])
+        ]
+        return neac.NeacResult(message="Success", signatures=signatures)
+
+    def _signature(case: str, signer_id: str, name: str):
+        return neac.NeacSignature(
             issuer={"cn": "FPT Certification Authority SHA256", "o": "FPT CORPORATION", "c": "VN"},
             signer={
-                "cn": name.group(1).decode() if name else "SOMEONE",
+                "cn": name,
                 "c": "VN",
-                "cccd": f"CCCD:{signer_id.group(1).decode() if signer_id else '000000000000'}",
+                "cccd": f"CCCD:{signer_id}",
             },
             intact="Bị thay đổi" if case == "MODIFIED" else "Không bị thay đổi",
             certificate_validity="Thời điểm có hiệu lực: 2026-03-18 11:00:40+07:00; Thời điểm hết hiệu lực: 2027-03-26",
@@ -848,7 +870,6 @@ def fake_neac(monkeypatch):
             ocsp="Chứng thư số đã bị thu hồi." if case == "REVOKED" else "Chứng thư số chưa bị thu hồi. [http://ocsp3.fis.com.vn]",
             crl="Chứng thư số chưa bị thu hồi [http://crl3.fis.com.vn]",
         )
-        return neac.NeacResult(message="Success", signatures=[signature])
 
     monkeypatch.setattr(neac, "verify_document", _verify)
     return state
