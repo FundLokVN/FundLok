@@ -6,8 +6,8 @@
 | **Owner** | Phat |
 | **Implementer(s)** | Phat (backend + frontend) |
 | **Module** | `app/admin/internal_email/`, `emails/` (React Email templates), `app/utils/email.py` |
-| **Version** | 2.0 (Google OAuth 2.0 + Gmail API replace SMTP + App Password) |
-| **Date** | 2026-11-07 (v1.2: 2026-10-07) |
+| **Version** | 2.1 (a system admin picks the account that sends repayment reminders) |
+| **Date** | 2026-11-12 (v2.0: 2026-11-07, v1.2: 2026-10-07) |
 | **Related ADR** | — |
 | **Depends on** | — |
 
@@ -39,6 +39,13 @@ fills them in with Jinja, so the API needs no Node at runtime.
 email, and compose and send templated email from their own address, with every
 send on record.
 
+**v2.1: repayment reminder sender.** Automatic repayment reminders to users
+will go out through the Gmail API from one admin's already-connected account,
+rather than a paid email service. A SYSTEM_ADMIN picks that account under
+System settings. This release adds the setting and the lookup the reminder job
+will call (`service.resolve_reminder_sender`). The job itself, its template and
+its schedule are not built yet.
+
 ---
 
 ## 2. Out of Scope
@@ -51,8 +58,11 @@ send on record.
   accounts and domain-wide delegation.
 - Attachments, CC/BCC, scheduled sends, mailing lists, open tracking.
 - HTML or Markdown authored by the admin beyond the sanitised subset (§6.7).
-- More than one connected account per admin, or sending from another admin's
-  account.
+- More than one connected account per admin, or an admin sending from another
+  admin's account. (The v2.1 reminder sender is the system sending from the
+  chosen account, not another admin.)
+- The repayment reminder job itself: which repayments it reminds about, when,
+  its template and its ARQ schedule (`app/scheduler/`).
 
 ---
 
@@ -94,6 +104,17 @@ state that admin's browser started), never by an id from a request body.
 
 Set by a SYSTEM_ADMIN. It applies to every admin's sends. A per-admin list
 would restrict nothing, since each admin could widen their own.
+
+### Reminder sender: `system_settings` key `repayment_reminder_sender` (v2.1)
+
+```
+{ "user_id": "<admin uuid>" | null }   -- null or absent = no reminders go out
+```
+
+Set by a SYSTEM_ADMIN. Only the admin's id is stored. The address, token and
+sending switch are read from that admin's `email_settings` row on every use,
+so the owner's later changes apply at once. No migration: `system_settings`
+is a key-value table.
 
 ### Table: `internal_emails` (send log, one row per send attempt)
 
@@ -145,7 +166,8 @@ python -c "from app.admin.internal_email.crypto import generate_encryption_key a
 
 Every endpoint is **admins only** (ADMIN and SYSTEM_ADMIN; 403 for everyone
 else, 401 if not signed in), except the OAuth callback (below). Only
-`PUT /admin/email/policy` is SYSTEM_ADMIN only. `/settings` always means the
+`PUT /admin/email/policy` and both `/admin/email/reminder-sender` endpoints
+are SYSTEM_ADMIN only. `/settings` always means the
 signed-in admin's own. Errors are `{"detail": "<English>"}`. Failures the UI
 translates also carry an `X-Error-Code` header.
 
@@ -163,6 +185,8 @@ translates also carry an `X-Error-Code` header.
 | GET | `/admin/email/recipients?q=&fundlok_only=&limit=200` | — | `list[RecipientOut]` |
 | GET | `/admin/email/policy` | — | `EmailPolicyOut` |
 | PUT | `/admin/email/policy` | `EmailPolicyUpdate` (SYSTEM_ADMIN) | `EmailPolicyOut` |
+| GET | `/admin/email/reminder-sender` | — (SYSTEM_ADMIN) | `ReminderSenderOut` |
+| PUT | `/admin/email/reminder-sender` | `ReminderSenderUpdate` (SYSTEM_ADMIN) | `ReminderSenderOut` |
 
 v2.0 removed `DELETE /admin/email/settings` (use `POST /disconnect`) and the
 `gmail_address` / `app_password` fields of `EmailSettingsUpdate`.
@@ -174,13 +198,22 @@ EmailSettingsOut      { configured: bool,            -- a Google token is stored
                                                      -- access, or migrated from App Password
                         connected_at: datetime | null,
                         last_verified_at: datetime | null, updated_at: datetime | null,
-                        signature_name/title/phone: str | null }
+                        signature_name/title/phone: str | null,
+                        is_reminder_sender: bool }   -- v2.1: chosen to send repayment reminders
 EmailSettingsUpdate   { from_name: str (1–80), enabled: bool,
                         signature_name: str | null (≤ 80), signature_title: str | null (≤ 120),
                         signature_phone: str | null (≤ 40) }      -- extra fields → 422
 EmailOAuthStart       { authorization_url: str }
 EmailPolicyOut        { allowed_domains: str[], updated_at: datetime | null, updated_by: UUID | null }
 EmailPolicyUpdate     { allowed_domains: str[] (≤ 20) }
+ReminderSenderStatus  "READY" | "PAUSED" | "NEEDS_RECONNECT" | "NOT_CONNECTED" | "NOT_ADMIN"
+ReminderSenderAccount { user_id: UUID, full_name: str | null, gmail_address: str | null,
+                        from_name: str | null, status: ReminderSenderStatus }
+ReminderSenderOut     { sender: ReminderSenderAccount | null,
+                        candidates: ReminderSenderAccount[],   -- active admins with a token,
+                                                               -- plus the chosen one in any state
+                        updated_at: datetime | null, updated_by: UUID | null }
+ReminderSenderUpdate  { user_id: UUID | null }               -- null stops reminders; extra fields → 422
 EmailTestResult       { sent_to: str, last_verified_at: datetime }
 EmailContent          { template: "general" | "announcement" | "action_required",
                         subject: str (1–200), heading: str | null (≤ 200),
@@ -315,6 +348,27 @@ NONE ──connect──▶ CONNECTED ──disconnect──▶ NONE (address cl
     searched by name or email (LIKE wildcards escaped). `fundlok_only` keeps
     addresses on `FUNDLOK_EMAIL_DOMAINS` (`fundlok.com`, `fundlok.vn`). Admins
     already see every user in the console, so this exposes nothing new.
+16. **Reminder sender status (v2.1).** Computed from the chosen admin's user
+    and settings rows, in this order: `NOT_ADMIN` (role is not ADMIN or
+    SYSTEM_ADMIN, or suspended), `NOT_CONNECTED` (no Google address),
+    `NEEDS_RECONNECT` (no token, or the Google address differs from the
+    admin's sign-in email: the same checks as an admin's own send), `PAUSED`
+    (the owner's sending switch is off), else `READY`.
+17. **Choosing the sender.** Only a `READY` or `PAUSED` account can be chosen.
+    The owner may switch a paused account on later, and the System settings
+    card says it is paused. Each change is audited as `REMINDER_SENDER_CHANGED`
+    (`SYSTEM_SETTING`, before/after `{user_id, gmail_address}`, never a token).
+18. **The owner stays in control.** Pausing sending, disconnecting, or the
+    owner losing the admin role stops reminders without touching the setting.
+    The System settings card shows the chosen account's new status. The
+    owner's Admin > Email screen says their account sends the reminders
+    (`is_reminder_sender`), so they know what pausing or disconnecting stops.
+19. **The reminder job's lookup.** `service.resolve_reminder_sender(db)`
+    returns `{user, account, refresh_token}` when the sender is `READY` and its
+    token decrypts. Otherwise it returns `None`, logs why (never the token),
+    and the job skips its run. The job sends through `_send_logged` with
+    `user` as the actor. Each reminder is then in `internal_emails` under
+    that admin and counts towards their `RECIPIENTS_PER_HOUR`.
 
 ---
 
@@ -333,6 +387,7 @@ NONE ──connect──▶ CONNECTED ──disconnect──▶ NONE (address cl
 | Stored token cannot be decrypted (key rotated) | 409 | `GMAIL_RECONNECT_REQUIRED` |
 | Google refused the token (revoked, expired, scope removed) | 409, row `FAILED` | `GMAIL_RECONNECT_REQUIRED` |
 | Recipient outside allowed domains | 400 | `RECIPIENT_DOMAIN_NOT_ALLOWED` |
+| Reminder sender is not an active admin with a connected account (`READY`/`PAUSED`) | 400 | `REMINDER_SENDER_UNAVAILABLE` |
 | Over the hourly limit | 429 | `EMAIL_RATE_LIMITED` |
 | Gmail refused every recipient | 502 | `GMAIL_RECIPIENT_REFUSED` |
 | Gmail API not enabled on the OAuth client's Cloud project (`SERVICE_DISABLED` / `accessNotConfigured`) | 502, row `FAILED` | `GMAIL_API_DISABLED` |
@@ -419,6 +474,13 @@ Sending
 - `test_a_send_past_its_time_budget_returns_the_rest_undelivered`
 - `test_failed_and_undelivered_copies_do_not_use_up_the_hour`
 
+Repayment reminder sender (v2.1)
+- `test_only_a_system_admin_chooses_the_reminder_sender`
+- `test_the_reminder_sender_is_chosen_from_connected_admins_and_audited`
+- `test_only_an_admin_with_a_connected_account_can_send_reminders`
+- `test_the_reminder_sender_follows_its_owners_switches`
+- `test_clearing_the_reminder_sender_stops_reminders`
+
 Directory, preview, log
 - `test_the_recipient_directory_lists_active_verified_users`
 - `test_only_admins_can_list_recipients`
@@ -444,6 +506,13 @@ Directory, preview, log
   either revokes it for both (the other sees "Reconnect").
 - Retention of `internal_emails.content`. It is kept indefinitely as the record
   of what each admin sent.
+- **Reminder volume vs. Gmail's limits (v2.1).** Gmail caps one Workspace
+  mailbox at about 2,000 recipients a day (500 for a consumer account), and
+  `RECIPIENTS_PER_HOUR` (200) applies to the reminder sender too. Decide,
+  when the job is built, whether reminders get their own hourly allowance or
+  move to a dedicated `reminders@` mailbox once volume nears the cap. An OAuth
+  client still in "Testing" expires refresh tokens after 7 days, which would
+  stop reminders weekly (see the consent-screen question above).
 
 ---
 

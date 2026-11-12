@@ -16,6 +16,7 @@ import html
 import logging
 import re
 import secrets
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from html.parser import HTMLParser
@@ -49,6 +50,9 @@ from app.admin.internal_email.schemas import (
     EmailTestResult,
     InternalEmailOut,
     RecipientOut,
+    ReminderSenderAccount,
+    ReminderSenderOut,
+    ReminderSenderUpdate,
     SendEmailRequest,
 )
 from app.core.config import settings
@@ -69,6 +73,11 @@ TEMPLATE_FILES = {
 
 # system_settings key for the org-wide policy (EmailPolicyOut).
 POLICY_KEY = "internal_email_policy"
+
+# system_settings key for whose connected account sends FundLok's automatic
+# repayment reminders: {"user_id": "<admin uuid>" | null}. Set by a
+# SYSTEM_ADMIN under System settings; read by the reminder job.
+REMINDER_SENDER_KEY = "repayment_reminder_sender"
 
 # Recipients per admin per rolling hour, test emails included (one each).
 # Counted in recipients, not sends, since each recipient is its own message.
@@ -120,9 +129,14 @@ async def _row(
     return (await db.execute(query)).scalar_one_or_none()
 
 
-def _out(row: EmailSettings | None) -> EmailSettingsOut:
+def _out(row: EmailSettings | None, *, is_reminder_sender: bool = False) -> EmailSettingsOut:
     if row is None:
-        return EmailSettingsOut(configured=False, enabled=False, needs_reconnect=False)
+        return EmailSettingsOut(
+            configured=False,
+            enabled=False,
+            needs_reconnect=False,
+            is_reminder_sender=is_reminder_sender,
+        )
     connected = bool(row.refresh_token_encrypted)
     return EmailSettingsOut(
         configured=connected,
@@ -138,6 +152,7 @@ def _out(row: EmailSettings | None) -> EmailSettingsOut:
         signature_name=row.signature_name,
         signature_title=row.signature_title,
         signature_phone=row.signature_phone,
+        is_reminder_sender=is_reminder_sender,
     )
 
 
@@ -158,7 +173,9 @@ def _audit_state(row: EmailSettings | None) -> dict | None:
 
 
 async def get_settings(db: AsyncSession, *, actor_id: UUID) -> EmailSettingsOut:
-    return _out(await _row(db, actor_id))
+    return _out(
+        await _row(db, actor_id), is_reminder_sender=await _is_reminder_sender(db, actor_id)
+    )
 
 
 async def update_settings(
@@ -226,7 +243,7 @@ async def update_settings(
             detail="Your email settings were changed at the same time. Reload and try again.",
         ) from None
     await db.refresh(row)
-    return _out(row)
+    return _out(row, is_reminder_sender=await _is_reminder_sender(db, actor_id))
 
 
 async def disconnect(
@@ -237,7 +254,7 @@ async def disconnect(
     The token is revoked at Google afterwards, best effort."""
     row = await _row(db, actor_id, for_update=True)
     if row is None:
-        return _out(None)
+        return _out(None, is_reminder_sender=await _is_reminder_sender(db, actor_id))
     token = _decrypt_quietly(row.refresh_token_encrypted)
     if row.refresh_token_encrypted or row.gmail_address:
         before = _audit_state(row)
@@ -262,7 +279,7 @@ async def disconnect(
     if token:
         # After the commit: the row no longer holds it whatever Google says.
         await google.revoke(token)
-    return _out(row)
+    return _out(row, is_reminder_sender=await _is_reminder_sender(db, actor_id))
 
 
 def _decrypt_quietly(stored: str | None) -> str | None:
@@ -480,6 +497,192 @@ async def update_policy(
     )
     await db.commit()
     return await get_policy(db)
+
+
+# --------------------------------------------------------------------------- #
+# Repayment reminder sender
+# --------------------------------------------------------------------------- #
+#
+# Automatic repayment reminders go out through the Gmail API from one admin's
+# connected account, the one a SYSTEM_ADMIN picks under System settings. This
+# reuses an account the admin already connected (no paid email service). The
+# account's owner keeps control of it: pausing sending or disconnecting stops
+# the reminders too, and their Admin > Email screen says the account is used
+# for them (EmailSettingsOut.is_reminder_sender).
+
+_ADMIN_ROLES = (Role.ADMIN.value, Role.SYSTEM_ADMIN.value)
+# The states a sender can be chosen in. PAUSED is allowed: the owner may
+# switch sending on later, and the System settings card says it is paused.
+_CHOOSABLE = ("READY", "PAUSED")
+
+
+async def _reminder_sender_setting(
+    db: AsyncSession,
+) -> tuple[UUID | None, SystemSetting | None]:
+    """The chosen admin's id (None when none is chosen) and the settings row."""
+    row = await db.get(SystemSetting, REMINDER_SENDER_KEY, populate_existing=True)
+    raw = (row.value or {}).get("user_id") if row is not None else None
+    if not isinstance(raw, str):
+        return None, row
+    try:
+        return UUID(raw), row
+    except ValueError:
+        return None, row
+
+
+async def _is_reminder_sender(db: AsyncSession, user_id: UUID) -> bool:
+    return (await _reminder_sender_setting(db))[0] == user_id
+
+
+def _sender_status(user: User, account: EmailSettings | None) -> str:
+    """ReminderSenderStatus for this admin's account (see schemas.py)."""
+    if user.role not in _ADMIN_ROLES or user.status == USER_STATUS_SUSPENDED:
+        return "NOT_ADMIN"
+    if account is None or not account.gmail_address:
+        return "NOT_CONNECTED"
+    # The same checks _connected_account makes before an admin's own send.
+    if (
+        not account.refresh_token_encrypted
+        or account.gmail_address.strip().lower() != (user.email or "").strip().lower()
+    ):
+        return "NEEDS_RECONNECT"
+    if not account.enabled:
+        return "PAUSED"
+    return "READY"
+
+
+def _sender_account(user: User, account: EmailSettings | None) -> ReminderSenderAccount:
+    return ReminderSenderAccount(
+        user_id=user.id,
+        full_name=user.full_name,
+        gmail_address=account.gmail_address if account is not None else None,
+        from_name=account.from_name if account is not None else None,
+        status=_sender_status(user, account),
+    )
+
+
+async def get_reminder_sender(db: AsyncSession) -> ReminderSenderOut:
+    """SYSTEM_ADMIN only (router). The chosen sender and every account that
+    could be chosen: active admins with a connected Google account."""
+    sender_id, setting = await _reminder_sender_setting(db)
+    pairs = (
+        await db.execute(
+            select(User, EmailSettings)
+            .join(EmailSettings, EmailSettings.user_id == User.id)
+            .where(
+                User.role.in_(_ADMIN_ROLES),
+                User.status != USER_STATUS_SUSPENDED,
+                EmailSettings.refresh_token_encrypted.is_not(None),
+            )
+            .order_by(func.lower(func.coalesce(User.full_name, User.email)), User.email)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    candidates = [_sender_account(user, account) for user, account in pairs]
+    sender = next((c for c in candidates if c.user_id == sender_id), None)
+    if sender_id is not None and sender is None:
+        # Chosen, then disconnected or no longer an admin. Still shown (and
+        # listed, so the picker can display it) so the system admin sees why
+        # reminders stopped. A deleted user reads as none chosen.
+        user = await db.get(User, sender_id, populate_existing=True)
+        if user is not None:
+            sender = _sender_account(user, await _row(db, sender_id))
+            candidates.append(sender)
+    return ReminderSenderOut(
+        sender=sender,
+        candidates=candidates,
+        updated_at=setting.updated_at if setting is not None else None,
+        updated_by=setting.updated_by if setting is not None else None,
+    )
+
+
+async def update_reminder_sender(
+    db: AsyncSession, body: ReminderSenderUpdate, *, actor_id: UUID, ip_address: str | None
+) -> ReminderSenderOut:
+    """SYSTEM_ADMIN only (router). Choose whose account sends repayment
+    reminders, or none (null) to stop them. Audited: it decides which
+    mailbox writes to customers in FundLok's name."""
+    before = (await get_reminder_sender(db)).sender
+    account: EmailSettings | None = None
+    if body.user_id is not None:
+        user = await db.get(User, body.user_id, populate_existing=True)
+        account = await _row(db, body.user_id) if user is not None else None
+        if user is None or _sender_status(user, account) not in _CHOOSABLE:
+            raise _error(
+                status.HTTP_400_BAD_REQUEST,
+                "REMINDER_SENDER_UNAVAILABLE",
+                "Only an active admin with a connected Google account can send repayment reminders.",
+            )
+    value = {"user_id": str(body.user_id) if body.user_id is not None else None}
+    row = await db.get(SystemSetting, REMINDER_SENDER_KEY)
+    if row is None:
+        db.add(
+            SystemSetting(
+                key=REMINDER_SENDER_KEY,
+                value=value,
+                description="Admin > Email: the admin whose connected Gmail account sends repayment reminders",
+                updated_by=actor_id,
+            )
+        )
+    else:
+        row.value = value
+        row.updated_by = actor_id
+    append_audit(
+        db,
+        entity_type="SYSTEM_SETTING",
+        entity_id=None,
+        action="REMINDER_SENDER_CHANGED",
+        actor_id=actor_id,
+        before_state={
+            "user_id": str(before.user_id) if before is not None else None,
+            "gmail_address": before.gmail_address if before is not None else None,
+        },
+        after_state={
+            "user_id": value["user_id"],
+            "gmail_address": account.gmail_address if account is not None else None,
+        },
+        ip_address=ip_address,
+    )
+    await db.commit()
+    return await get_reminder_sender(db)
+
+
+@dataclass(frozen=True)
+class ReminderSender:
+    """What the reminder job sends with. Pass `user` as the actor to
+    _send_logged, so each reminder is in the send log under that admin and
+    counts towards their hourly limit like any other send."""
+
+    user: User
+    account: EmailSettings
+    refresh_token: str = field(repr=False)
+
+
+async def resolve_reminder_sender(db: AsyncSession) -> ReminderSender | None:
+    """For the repayment-reminder job: the chosen account and its decrypted
+    token, or None when reminders cannot go out now (none chosen; the owner
+    paused sending, disconnected, lost Google access or is no longer an
+    admin; or the token cannot be decrypted). The job skips its run on None.
+    Why is logged; the token never is."""
+    sender_id, _ = await _reminder_sender_setting(db)
+    if sender_id is None:
+        logger.info("Repayment reminders: no sender account is chosen")
+        return None
+    user = await db.get(User, sender_id, populate_existing=True)
+    account = await _row(db, sender_id) if user is not None else None
+    state = _sender_status(user, account) if user is not None else "NOT_ADMIN"
+    if state != "READY" or account is None:
+        logger.warning("Repayment reminders: the sender account is %s", state)
+        return None
+    try:
+        token = crypto.decrypt_secret(account.refresh_token_encrypted)
+    except crypto.EncryptionUnavailable:
+        logger.error("Repayment reminders: the email encryption key is not configured")
+        return None
+    if token is None:
+        logger.warning("Repayment reminders: the sender's token was written under a rotated key")
+        return None
+    return ReminderSender(user=user, account=account, refresh_token=token)
 
 
 # --------------------------------------------------------------------------- #

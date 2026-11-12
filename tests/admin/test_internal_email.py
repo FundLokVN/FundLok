@@ -41,6 +41,7 @@ AUTHORIZE = "/admin/email/oauth/authorize"
 CALLBACK = "/admin/email/oauth/callback"
 DISCONNECT = "/admin/email/disconnect"
 POLICY = "/admin/email/policy"
+REMINDER_SENDER = "/admin/email/reminder-sender"
 
 
 def _gmail_error(status: int, reason: str, status_name: str) -> httpx.Response:
@@ -327,6 +328,8 @@ ENDPOINTS = [
     ("get", "/admin/email/messages", None),
     ("get", POLICY, None),
     ("put", POLICY, {"allowed_domains": []}),
+    ("get", REMINDER_SENDER, None),
+    ("put", REMINDER_SENDER, {"user_id": None}),
 ]
 
 
@@ -1610,3 +1613,156 @@ async def test_html_formatting_in_email_preview(client, make_system_admin):
     assert '<a href="https://fundlok.com"' in preview["html"]
     assert "color:#16a34a" in preview["html"]
     assert "<ul><li>Item 1</li><li>Item 2</li></ul>" in preview["html"]
+
+
+# --------------------------------------------------------------------------- #
+# Repayment reminder sender
+# --------------------------------------------------------------------------- #
+
+
+async def test_only_a_system_admin_chooses_the_reminder_sender(client, make_admin, fake_google):
+    admin = await make_admin()
+    await _connect(client, fake_google, admin)
+    assert (await client.get(REMINDER_SENDER, headers=admin["headers"])).status_code == 403
+    resp = await client.put(
+        REMINDER_SENDER, json={"user_id": admin["id"]}, headers=admin["headers"]
+    )
+    assert resp.status_code == 403
+
+
+async def test_the_reminder_sender_is_chosen_from_connected_admins_and_audited(
+    client, make_admin, make_system_admin, db_session, fake_google
+):
+    alice = await make_admin(email="alice@fundlok.com")
+    bob = await make_admin(email="bob@fundlok.com")
+    sysadmin = await make_system_admin()
+    await _connect(client, fake_google, alice, "alice@fundlok.com", from_name="Alice")
+
+    # Nothing chosen yet; only Alice has a connected account to choose.
+    start = (await client.get(REMINDER_SENDER, headers=sysadmin["headers"])).json()
+    assert start["sender"] is None and start["updated_at"] is None
+    assert [(c["gmail_address"], c["status"]) for c in start["candidates"]] == [
+        ("alice@fundlok.com", "READY")
+    ]
+
+    resp = await client.put(
+        REMINDER_SENDER, json={"user_id": alice["id"]}, headers=sysadmin["headers"]
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sender"] == {
+        "user_id": alice["id"],
+        "full_name": body["sender"]["full_name"],
+        "gmail_address": "alice@fundlok.com",
+        "from_name": "Alice",
+        "status": "READY",
+    }
+    assert body["updated_by"] == sysadmin["id"] and body["updated_at"] is not None
+    assert "refresh_token" not in json.dumps(body)
+
+    # Alice's own screen says her account sends the reminders; Bob's does not.
+    alices = (await client.get(SETTINGS, headers=alice["headers"])).json()
+    assert alices["is_reminder_sender"] is True
+    assert (await client.get(SETTINGS, headers=bob["headers"])).json()["is_reminder_sender"] is False
+    saved = await client.put(SETTINGS, json=_profile(from_name="Alice"), headers=alice["headers"])
+    assert saved.json()["is_reminder_sender"] is True
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "REMINDER_SENDER_CHANGED")
+        )
+    ).scalar_one()
+    assert str(audit.actor_id) == sysadmin["id"]
+    assert audit.before_state == {"user_id": None, "gmail_address": None}
+    assert audit.after_state == {"user_id": alice["id"], "gmail_address": "alice@fundlok.com"}
+
+
+async def test_only_an_admin_with_a_connected_account_can_send_reminders(
+    client, make_admin, make_system_admin, make_user, fake_google
+):
+    bob = await make_admin(email="bob@fundlok.com")
+    investor = await make_user(role="INVESTOR")
+    sysadmin = await make_system_admin()
+    for user_id in (bob["id"], investor["id"], "00000000-0000-0000-0000-000000000000"):
+        resp = await client.put(
+            REMINDER_SENDER, json={"user_id": user_id}, headers=sysadmin["headers"]
+        )
+        assert resp.status_code == 400, (user_id, resp.text)
+        assert resp.headers["X-Error-Code"] == "REMINDER_SENDER_UNAVAILABLE"
+    resp = await client.put(REMINDER_SENDER, json={"user_id": "not-a-uuid"}, headers=sysadmin["headers"])
+    assert resp.status_code == 422
+    resp = await client.put(
+        REMINDER_SENDER, json={"user_id": None, "extra": 1}, headers=sysadmin["headers"]
+    )
+    assert resp.status_code == 422
+
+
+async def test_the_reminder_sender_follows_its_owners_switches(
+    client, make_admin, make_system_admin, db_session, fake_google
+):
+    alice = await make_admin(email="alice@fundlok.com")
+    sysadmin = await make_system_admin()
+    await _connect(client, fake_google, alice, "alice@fundlok.com")
+    await client.put(REMINDER_SENDER, json={"user_id": alice["id"]}, headers=sysadmin["headers"])
+
+    async def sender_status() -> str:
+        body = (await client.get(REMINDER_SENDER, headers=sysadmin["headers"])).json()
+        # The chosen account stays in the picker whatever its state.
+        assert alice["id"] in [c["user_id"] for c in body["candidates"]]
+        return body["sender"]["status"]
+
+    ready = await service.resolve_reminder_sender(db_session)
+    assert ready is not None and str(ready.user.id) == alice["id"]
+    assert ready.account.gmail_address == "alice@fundlok.com"
+    assert fake_google.accounts[ready.refresh_token] == "alice@fundlok.com"
+    assert ready.refresh_token not in repr(ready)
+
+    # Alice pauses sending: the reminders pause with it.
+    await client.put(SETTINGS, json=_profile(enabled=False), headers=alice["headers"])
+    assert await sender_status() == "PAUSED"
+    assert await service.resolve_reminder_sender(db_session) is None
+    # A paused account can still be chosen; the card says it is paused.
+    resp = await client.put(
+        REMINDER_SENDER, json={"user_id": alice["id"]}, headers=sysadmin["headers"]
+    )
+    assert resp.status_code == 200, resp.text
+
+    await client.put(SETTINGS, json=_profile(enabled=True), headers=alice["headers"])
+    assert await sender_status() == "READY"
+
+    # Disconnected: still chosen, shown as such, but nothing can go out and
+    # it cannot be chosen again until reconnected.
+    await client.post(DISCONNECT, headers=alice["headers"])
+    assert await sender_status() == "NOT_CONNECTED"
+    assert await service.resolve_reminder_sender(db_session) is None
+    resp = await client.put(
+        REMINDER_SENDER, json={"user_id": alice["id"]}, headers=sysadmin["headers"]
+    )
+    assert resp.headers["X-Error-Code"] == "REMINDER_SENDER_UNAVAILABLE"
+
+    await _connect(client, fake_google, alice, "alice@fundlok.com")
+    assert await sender_status() == "READY"
+
+    # No longer an admin: off, whatever the account's state.
+    row = await db_session.get(User, UUID(alice["id"]))
+    row.role = "INVESTOR"
+    await db_session.commit()
+    assert await sender_status() == "NOT_ADMIN"
+    assert await service.resolve_reminder_sender(db_session) is None
+
+
+async def test_clearing_the_reminder_sender_stops_reminders(
+    client, make_system_admin, db_session, fake_google
+):
+    sysadmin = await make_system_admin()
+    await _connect(client, fake_google, sysadmin)
+    await client.put(REMINDER_SENDER, json={"user_id": sysadmin["id"]}, headers=sysadmin["headers"])
+    assert await service.resolve_reminder_sender(db_session) is not None
+
+    resp = await client.put(REMINDER_SENDER, json={"user_id": None}, headers=sysadmin["headers"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["sender"] is None
+    assert len(resp.json()["candidates"]) == 1
+    assert await service.resolve_reminder_sender(db_session) is None
+    assert (await client.get(SETTINGS, headers=sysadmin["headers"])).json()["is_reminder_sender"] is False
+

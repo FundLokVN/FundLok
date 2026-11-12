@@ -70,6 +70,10 @@ class EmailSettingsOut(BaseModel):
     signature_name: str | None = None
     signature_title: str | None = None
     signature_phone: str | None = None
+    # A system admin chose this account to send FundLok's automatic
+    # repayment reminders (System settings), so disconnecting it or pausing
+    # sending also stops those.
+    is_reminder_sender: bool = False
 
 
 class EmailSettingsUpdate(BaseModel):
@@ -210,6 +214,49 @@ class SendEmailRequest(EmailContent):
     @classmethod
     def _to(cls, values: list[str]) -> list[str]:
         return [_plain_address(value) for value in values]
+
+
+# Whether an admin's connected account can send repayment reminders now.
+#   READY:           connected, sending on, the owner an active admin.
+#   PAUSED:          connected, but its owner switched sending off.
+#   NEEDS_RECONNECT: Google no longer accepts the token, or it belongs to
+#                    another address than the owner's sign-in email.
+#   NOT_CONNECTED:   no Google account connected (or disconnected since).
+#   NOT_ADMIN:       the owner is no longer an active admin.
+ReminderSenderStatus = Literal[
+    "READY", "PAUSED", "NEEDS_RECONNECT", "NOT_CONNECTED", "NOT_ADMIN"
+]
+
+
+class ReminderSenderAccount(BaseModel):
+    """An admin's connected account, as the reminder-sender picker shows it.
+    Never the token."""
+
+    user_id: UUID
+    full_name: str | None = None
+    gmail_address: str | None = None
+    from_name: str | None = None
+    status: ReminderSenderStatus
+
+
+class ReminderSenderOut(BaseModel):
+    """SYSTEM_ADMIN only. Whose connected Gmail account sends the automatic
+    repayment reminders, and which accounts could."""
+
+    # Null: none chosen, so no automatic reminder goes out.
+    sender: ReminderSenderAccount | None = None
+    # Active admins with a connected Google account, the chosen one included
+    # whatever its state.
+    candidates: list[ReminderSenderAccount]
+    updated_at: datetime | None = None
+    updated_by: UUID | None = None
+
+
+class ReminderSenderUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # The admin whose connected account sends reminders. Null stops them.
+    user_id: UUID | None
 
 
 class RecipientOut(BaseModel):

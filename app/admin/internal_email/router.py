@@ -15,6 +15,8 @@ from app.admin.internal_email.schemas import (
     EmailTestResult,
     InternalEmailOut,
     RecipientOut,
+    ReminderSenderOut,
+    ReminderSenderUpdate,
     SendEmailRequest,
 )
 from app.core.config import settings
@@ -218,5 +220,28 @@ async def update_policy(
 ):
     """SYSTEM_ADMIN only. Applies to every admin's next send."""
     return await service.update_policy(
+        db, body, actor_id=current_user.id, ip_address=_ip(request)
+    )
+
+
+@router.get("/reminder-sender", response_model=ReminderSenderOut)
+async def get_reminder_sender(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_system_admin),
+):
+    """SYSTEM_ADMIN only. Whose connected account sends the automatic
+    repayment reminders, and which admins' accounts could."""
+    return await service.get_reminder_sender(db)
+
+
+@router.put("/reminder-sender", response_model=ReminderSenderOut)
+async def update_reminder_sender(
+    body: ReminderSenderUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_system_admin),
+):
+    """SYSTEM_ADMIN only. `user_id: null` stops automatic reminders."""
+    return await service.update_reminder_sender(
         db, body, actor_id=current_user.id, ip_address=_ip(request)
     )
