@@ -28,8 +28,16 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT" || exit 2
 PY="$REPO_ROOT/.venv/bin/python"
-[[ -x "$PY" ]] || { echo "No $PY: create the project venv first." >&2; exit 2; }
+if [[ ! -x "$PY" ]]; then  # run from a secondary worktree: use the main worktree's venv
+  MAIN_WORKTREE="$(git worktree list --porcelain | awk 'NR==1{print $2}')"
+  PY="$MAIN_WORKTREE/.venv/bin/python"
+fi
+[[ -x "$PY" ]] || { echo "No project venv found ($PY): create it first." >&2; exit 2; }
 command -v gh >/dev/null || { echo "The gh CLI is required." >&2; exit 2; }
+
+# Talk to the compose stack of the MAIN folder even when run from a secondary worktree.
+COMPOSE_DIR="$(git worktree list --porcelain | awk 'NR==1{print $2}')"
+compose() { docker compose --project-directory "$COMPOSE_DIR" "$@"; }
 
 WORK="$(mktemp -d)"
 DB="premerge_$$"
@@ -39,7 +47,7 @@ note_fail() { FAILS+=("$1"); echo "  FAIL: $1"; }
 cleanup() {
   git worktree remove --force "$WORK" >/dev/null 2>&1 || rm -rf "$WORK"
   git worktree prune >/dev/null 2>&1
-  docker compose exec -T postgres psql -U fundlok -d postgres -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1
+  compose exec -T postgres psql -U fundlok -d postgres -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -53,8 +61,18 @@ else
   TITLE="$(gh pr view "$PR" --json title,state,isDraft -q '"\(.title) [\(.state)\(if .isDraft then ", draft" else "" end)]"' 2>/dev/null)" \
     || { echo "Cannot read PR #$PR (gh login? wrong number?)." >&2; exit 2; }
   echo "   $TITLE"
-  git fetch -q origin main "pull/$PR/head" || { echo "git fetch failed." >&2; exit 2; }
+  # Two SEPARATE fetches: FETCH_HEAD points at the FIRST ref fetched, so fetching main and the PR together made
+  # PR_HEAD equal main, and every PR "merged cleanly" into itself (fixed 2026-11-04).
+  git fetch -q origin main || { echo "git fetch of main failed." >&2; exit 2; }
+  git fetch -q origin "pull/$PR/head" || { echo "git fetch of the PR failed." >&2; exit 2; }
   PR_HEAD="$(git rev-parse FETCH_HEAD)"
+  # Guard: the commit we are about to check must be the PR's own head, exactly as GitHub reports it.
+  EXPECTED="$(gh pr view "$PR" --json headRefOid -q .headRefOid)"
+  if [[ "$PR_HEAD" != "$EXPECTED" ]]; then
+    echo "Resolved commit $PR_HEAD but GitHub says the PR head is $EXPECTED. Refusing to report anything." >&2
+    exit 2
+  fi
+  echo "   checking the PR head $(git rev-parse --short "$PR_HEAD")"
 fi
 BEHIND="$(git rev-list --count "$PR_HEAD..origin/main")"
 echo "   main is now $(git rev-parse --short origin/main); this PR is $BEHIND commit(s) behind it"
@@ -86,8 +104,8 @@ if [[ ${#FAILS[@]} -eq 0 ]]; then
   fi
 
   echo "== 3. Empty database: upgrade head, then check for drift"
-  if ! docker compose exec -T postgres psql -U fundlok -d postgres -c "CREATE DATABASE $DB" >/dev/null 2>&1; then
-    echo "  skipped: cannot create a database (is Docker running and 'docker compose up -d postgres' done?)"
+  if ! compose exec -T postgres psql -U fundlok -d postgres -c "CREATE DATABASE $DB" >/dev/null 2>&1; then
+    echo "  skipped: cannot create a database (is Docker running and `docker compose up -d postgres` done in the main folder?)"
     FAILS+=("could not run the database step")
   elif [[ "$N_HEADS" == "1" ]]; then
     if (cd "$WORK" && "$PY" -m alembic upgrade head >/dev/null 2>&1); then
@@ -107,8 +125,18 @@ if [[ ${#FAILS[@]} -eq 0 ]]; then
   if [[ $RUN_TESTS -eq 1 && ${#FAILS[@]} -eq 0 ]]; then
     echo "== 4. Full test suite (about 11 minutes)"
     export DATABASE_URL="postgresql+asyncpg://fundlok:fundlok@localhost:5433/$DB"
-    if (cd "$WORK" && "$PY" -m pytest -q -p no:cacheprovider 2>&1 | tail -3); then :; fi
-    echo "  (read the summary line above: 'failed' or 'error' means NO-GO)"
+    TEST_LOG="$(mktemp)"
+    # PREMERGE_PYTEST_ARGS is for testing this script itself (for example: -k some_test).
+    # shellcheck disable=SC2086
+    (cd "$WORK" && "$PY" -m pytest -q -p no:cacheprovider ${PREMERGE_PYTEST_ARGS:-} > "$TEST_LOG" 2>&1)
+    TEST_RC=$?
+    tail -3 "$TEST_LOG"
+    rm -f "$TEST_LOG"
+    if [[ $TEST_RC -ne 0 ]]; then
+      note_fail "the test suite did not pass (pytest exit code $TEST_RC)"
+    else
+      echo "  ok: the test suite passes on the merged result"
+    fi
   fi
 fi
 
