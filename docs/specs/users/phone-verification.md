@@ -110,7 +110,7 @@ EMAIL_VERIFIED --send-code--> CODE_SENT --verify ok--> PHONE_VERIFIED --PATCH ro
 CODE_SENT --expired | 5 wrong--> EMAIL_VERIFIED (send again)
 ```
 
-Frontend routes: `/verify-email` → `/verify-phone` → `/select-role`, enforced in `proxy.ts` in that order.
+Frontend routes: `/verify-email` → `/verify-phone` → `/consent` → `/select-role`, enforced in `proxy.ts` in that order (12 Nov 2026: the phone comes right after the email, before the Terms & data consent). The backend needs no order of its own: the phone endpoints only require a verified email, and `PATCH /users/me/role` requires both the phone and the consent.
 
 ---
 
