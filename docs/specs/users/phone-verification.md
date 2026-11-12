@@ -19,7 +19,7 @@ Touches shared files, which need Edward's agreement: `app/users/models.py` (new 
 
 Accounts are created with an email (verified by link, or by Google/Microsoft) and nothing else proven about the person. A verified mobile number gives operations a working contact channel and raises the cost of throwaway accounts. Both sign-up paths already meet at one point, "email verified, no role yet", so the check sits there.
 
-**Goal:** a new account proves a Vietnamese mobile number with a 6-digit one-time code, sent as a Zalo ZBS OTP template message, before it may choose a role.
+**Goal:** every SME and investor account proves a Vietnamese mobile number with a 6-digit one-time code, sent as a Zalo ZBS OTP template message: a new account before it may choose a role, an existing one the next time it signs in (12 Nov 2026: accounts from before the gate are asked too).
 
 Parked: the company has no Zalo Official Account yet, so the shipping version is Firebase phone sign-in (`feature/users/phone-verification`). This branch adds the same `users.phone_verified_at` column, so it must be rebased onto that one before it can merge.
 
@@ -29,7 +29,7 @@ Parked: the company has no Zalo Official Account yet, so the shipping version is
 
 - Phone as a sign-in factor or 2FA method.
 - Re-verifying when a number is changed later from the profile page (the change clears the verified flag; it does not prompt for a code yet).
-- Gating accounts that already have a role (every account created before this ships, and admins).
+- Gating FundLok staff (`ADMIN`, `SYSTEM_ADMIN`).
 - International numbers.
 
 ---
@@ -94,7 +94,7 @@ All three require a session (`get_current_user`).
 { "phone_verified": false, "phone_verification_required": true }
 ```
 
-`phone_verification_required` = `PHONE_VERIFICATION_REQUIRED and role is null and phone_verified_at is null`. The frontend routes on it alone.
+`phone_verification_required` = `PHONE_VERIFICATION_REQUIRED and role not in (ADMIN, SYSTEM_ADMIN) and phone_verified_at is null`. The frontend routes on it alone.
 
 ### `PATCH /users/me/role`
 
@@ -116,7 +116,7 @@ Frontend routes: `/verify-email` → `/verify-phone` → `/consent` → `/select
 
 ## 6. Business Rules
 
-1. Gate applies only to accounts with no role. Accounts with a role are never gated.
+1. Gate applies to every account except FundLok staff (`ADMIN`, `SYSTEM_ADMIN`): new accounts before choosing a role, and SMEs and investors with no verified phone, including every account created before the gate shipped. Those are sent to `/verify-phone` on their next request and return to their dashboard once verified; nothing else about them changes.
 2. Vietnamese mobiles only: `(+84|84|0)[35789]` + 8 digits. Stored canonical as `+84…`; sent to Zalo as `84…`.
 3. Sending needs a verified email (`403` otherwise) and a Turnstile token when captcha is required.
 4. Limits, counted from `phone_verification_codes` under advisory locks: one send per 60 s per account; 5 per rolling 24 h per account; 5 per rolling 24 h per number across all accounts. Refusals are `429` with `Retry-After`.
@@ -168,7 +168,7 @@ Tests: `tests/phone_verification/test_phone_verification.py` and `test_zalo.py`;
 - `test_zalo_failure_returns_502_and_is_not_counted`, `test_a_number_without_zalo_is_told_so`, `test_missing_zalo_configuration_returns_503`, `test_log_channel_only_with_debug`
 - `test_correct_code_verifies_the_phone`, `test_wrong_code_is_refused_and_counted`, `test_code_dies_after_five_wrong_attempts`, `test_expired_code_is_refused`, `test_only_the_latest_code_counts`, `test_code_cannot_be_used_twice`, `test_malformed_code_is_rejected`
 - `test_verifying_releases_the_number_from_an_unverified_holder`
-- `test_role_selection_waits_for_phone_verification`, `test_google_sign_up_is_gated_the_same_way`, `test_users_with_a_role_are_never_gated`, `test_gate_is_off_when_not_required`
+- `test_role_selection_waits_for_phone_verification`, `test_google_sign_up_is_gated_the_same_way`, `test_existing_smes_and_investors_are_gated_until_verified`, `test_staff_are_never_gated`, `test_an_existing_account_with_a_role_verifies_its_phone`, `test_gate_is_off_when_not_required`
 - `test_changing_the_profile_number_clears_verification`
 - Zalo: `test_zalo_sends_the_code_through_the_otp_template`, `test_template_parameter_name_is_configurable`
 - Zalo token: `test_tokens_are_stored_encrypted`, `test_a_live_token_is_reused`, `test_an_expiring_token_is_refreshed_with_the_rotated_refresh_token`, `test_a_rejected_token_is_refreshed_once_and_retried`, `test_a_new_seed_in_the_environment_starts_a_new_chain`, `test_the_token_survives_a_failed_send`

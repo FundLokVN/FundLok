@@ -7,7 +7,7 @@ limits (each send is a paid ZBS message to a number the caller picks), with
 Zalo replaced by a recorder at zalo.send_otp. The Zalo client itself, its
 token handling and its refusals are pinned in test_zalo.py.
 """
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
@@ -420,10 +420,35 @@ async def test_google_sign_up_is_gated_the_same_way(client, db_session, outbox, 
     assert (await client.patch("/users/me/role", json={"role": "SME"}, headers=user["headers"])).status_code == 200
 
 
-async def test_users_with_a_role_are_never_gated(monkeypatch):
+async def test_existing_smes_and_investors_are_gated_until_verified(monkeypatch):
     monkeypatch.setattr(settings, "PHONE_VERIFICATION_REQUIRED", True)
-    existing = User(email="old@example.com", role="INVESTOR", email_verified=True, status="ACTIVE")
-    assert user_me_payload(existing)["phone_verification_required"] is False
+    for role in ("SME", "INVESTOR"):
+        existing = User(email=f"old-{role}@example.com", role=role, email_verified=True, status="ACTIVE")
+        assert user_me_payload(existing)["phone_verification_required"] is True, role
+        existing.phone_verified_at = datetime.now(timezone.utc)
+        assert user_me_payload(existing)["phone_verification_required"] is False, role
+
+
+async def test_staff_are_never_gated(monkeypatch):
+    monkeypatch.setattr(settings, "PHONE_VERIFICATION_REQUIRED", True)
+    for role in ("ADMIN", "SYSTEM_ADMIN"):
+        staff = User(email=f"{role.lower()}@example.com", role=role, email_verified=True, status="ACTIVE")
+        assert user_me_payload(staff)["phone_verification_required"] is False, role
+
+
+async def test_an_existing_account_with_a_role_verifies_its_phone(client, make_user, db_session, outbox):
+    # Chose its role before the gate existed.
+    investor = await _new_user(make_user, db_session, role="INVESTOR")
+
+    me = (await client.get("/users/me", headers=investor["headers"])).json()
+    assert me["role"] == "INVESTOR" and me["phone_verification_required"] is True
+
+    assert (await _send(client, investor)).status_code == 200
+    verified = await _verify(client, investor, _code_from(outbox))
+    assert verified.status_code == 200, verified.text
+    me = (await client.get("/users/me", headers=investor["headers"])).json()
+    assert me["phone_verified"] is True and me["phone_verification_required"] is False
+    assert me["role"] == "INVESTOR"  # the role is untouched
 
 
 async def test_gate_is_off_when_not_required(monkeypatch):

@@ -39,10 +39,17 @@ def build_avatar_url(user: User) -> str | None:
         return None
 
 
+# FundLok staff, not platform users: never asked for a phone, as for the consent.
+_PHONE_EXEMPT_ROLES = {Role.ADMIN.value, Role.SYSTEM_ADMIN.value}
+
+
 def phone_verification_pending(user: User) -> bool:
+    """Whether the account must prove a phone number before it goes on. Every
+    SME and investor, and every new account before it has a role: accounts that
+    signed up before phone verification are asked too (spec rule 1)."""
     return (
         settings.PHONE_VERIFICATION_REQUIRED
-        and user.role is None
+        and user.role not in _PHONE_EXEMPT_ROLES
         and user.phone_verified_at is None
     )
 
@@ -57,10 +64,10 @@ def user_me_payload(user: User) -> dict:
         "status": user.status,
         "email_verified": user.email_verified,
         "phone_verified": user.phone_verified_at is not None,
-        # The onboarding gate (docs/specs/users/phone-verification.md): a new
-        # account proves a phone number before choosing a role. Computed here
-        # so the frontend proxy has one flag to route on and never re-derives
-        # the rule. Accounts that already have a role are never gated.
+        # The phone gate (docs/specs/users/phone-verification.md): every SME
+        # and investor account proves a phone number, a new one before it
+        # chooses a role. Computed here so the frontend proxy has one flag to
+        # route on and never re-derives the rule. Staff are never gated.
         "phone_verification_required": phone_verification_pending(user),
         "bio": user.bio,
         "email_signature": user.email_signature,
