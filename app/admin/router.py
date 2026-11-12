@@ -5,7 +5,9 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin import fees as admin_fees
 from app.admin import funding as admin_funding
+from app.admin.fee_schemas import AdminFeeInvoiceOut, AdminFeeMarkPaidRequest, FeeInvoiceFilter
 from app.admin import repayments as admin_repayments
 from app.admin.fee_notice.service import run_fee_invoice_emails
 from app.admin import service
@@ -439,6 +441,42 @@ async def advance_funding_round(
     )
     background_tasks.add_task(run_fee_invoice_emails)
     return round_
+
+
+@router.get(
+    "/funding/fee-invoices",
+    response_model=list[AdminFeeInvoiceOut],
+    dependencies=[Depends(audit_admin_read("FEE_INVOICE"))],
+)
+async def list_fee_invoices(
+    status: FeeInvoiceFilter = Query(default="UNPAID"),
+    limit: int = Query(default=200, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """SME service-fee invoices (3% of a round's confirmed total, plus VAT), each with its investment package:
+    the round, the business and the investments the fee is charged on. Unpaid first, soonest due."""
+    return await admin_fees.list_fee_invoices(db, status_filter=status, limit=limit)
+
+
+@router.post("/funding/fee-invoices/{invoice_id}/mark-paid", response_model=AdminFeeInvoiceOut)
+async def mark_fee_invoice_paid(
+    invoice_id: UUID,
+    body: AdminFeeMarkPaidRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The SME's transfer shows on FundLok's statement: record it and mark the invoice paid, which lifts the
+    block on the business's next round. Needs the bank transaction ID (one per invoice) and a reason; audited.
+    Pressing it again for a paid invoice changes nothing."""
+    return await admin_fees.mark_paid(
+        db,
+        invoice_id,
+        body,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
 
 
 @router.get(

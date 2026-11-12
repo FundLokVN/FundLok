@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from app.admin.fee_schemas import AdminRoundFeeOut
 from app.direct_transfer.schemas import FundingWindowOut, PaymentAccountOut
 from app.market.schemas import ProjectedScheduleOut, ProjectionBasisOut
 
@@ -745,6 +746,9 @@ class AdminFundingRoundOut(FundingWindowOut):
     sme_email: str
     sme_full_name: str | None = None
     needs_action: int
+    # The round's service fee (3% + VAT), once it closed and the invoice was
+    # issued. Null before (app/admin/fees.py).
+    fee_invoice: AdminRoundFeeOut | None = None
 
 
 class AdminTransferReceiptOut(BaseModel):

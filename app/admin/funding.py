@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin import fees as admin_fees
 from app.admin.schemas import (
     ActorOut,
     AdminFundingActivityOut,
@@ -128,9 +129,11 @@ async def list_rounds(db: AsyncSession, *, open_only: bool) -> list[AdminFunding
     if released:
         await db.commit()
 
+    fees = await admin_fees.round_fees(db, [window.id for window, _, _ in rows])
     out = []
     for window, project_name, sme in rows:
         progress = await get_window_progress(db, listing_id=window.listing_id, now=now)
+        fee = fees.get(window.id)
         needs_action = (
             await db.execute(
                 select(func.count()).select_from(Tranche).where(Tranche.window_id == window.id, _needs_action())
@@ -145,6 +148,7 @@ async def list_rounds(db: AsyncSession, *, open_only: bool) -> list[AdminFunding
                     "sme_email": sme.email,
                     "sme_full_name": sme.full_name,
                     "needs_action": int(needs_action),
+                    "fee_invoice": admin_fees.round_fee(fee, now) if fee is not None else None,
                 }
             )
         )
