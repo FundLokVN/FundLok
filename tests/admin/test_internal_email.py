@@ -24,6 +24,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
 
+from app.admin.access_log import VIEW_ACTION
 from app.admin.internal_email import crypto, google, service, transport
 from app.admin.internal_email.models import EmailSettings, InternalEmail
 from app.admin.internal_email.schemas import SendEmailRequest
@@ -1666,6 +1667,15 @@ async def test_the_reminder_sender_is_chosen_from_connected_admins_and_audited(
     assert (await client.get(SETTINGS, headers=bob["headers"])).json()["is_reminder_sender"] is False
     saved = await client.put(SETTINGS, json=_profile(from_name="Alice"), headers=alice["headers"])
     assert saved.json()["is_reminder_sender"] is True
+
+    # Reading the list of admins' addresses is itself on record (SEC-02).
+    views = (
+        await db_session.execute(select(AuditLog).where(AuditLog.action == VIEW_ACTION))
+    ).scalars().all()
+    assert any(
+        v.actor_id == UUID(sysadmin["id"]) and v.after_state["path"] == REMINDER_SENDER
+        for v in views
+    )
 
     audit = (
         await db_session.execute(

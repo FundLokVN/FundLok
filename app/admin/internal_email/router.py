@@ -224,7 +224,12 @@ async def update_policy(
     )
 
 
-@router.get("/reminder-sender", response_model=ReminderSenderOut)
+@router.get(
+    "/reminder-sender",
+    response_model=ReminderSenderOut,
+    # Lists other admins' names and addresses (SEC-02).
+    dependencies=[Depends(audit_admin_read("USER"))],
+)
 async def get_reminder_sender(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_system_admin),
