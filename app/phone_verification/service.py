@@ -1,4 +1,4 @@
-"""Prove a phone number with a one-time code sent through Stringee.
+"""Prove a phone number with a one-time code sent by Zalo ZBS.
 
 Spec: docs/specs/users/phone-verification.md
 
@@ -22,9 +22,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.phone_verification import stringee
+from app.phone_verification import zalo
 from app.phone_verification.models import PhoneVerificationCode
-from app.phone_verification.phone import equivalent_forms, stringee_number
+from app.phone_verification.phone import equivalent_forms, zalo_number
 from app.users.models import User
 from app.utils.audit import append_audit
 from app.utils.locks import advisory_xact_lock
@@ -45,6 +45,7 @@ ALREADY_REGISTERED = "Phone number already registered"
 CODE_EXPIRED = "This code has expired. Request a new one."
 CODE_INCORRECT = "Incorrect code"
 TOO_MANY_ATTEMPTS = "Too many incorrect attempts. Request a new code."
+NO_ZALO = "This number has no Zalo account that can receive the code"
 
 
 def _hash_code(row_id: UUID, code: str) -> str:
@@ -69,24 +70,28 @@ async def _verified_holder(db: AsyncSession, phone: str, user_id: UUID) -> User 
     return result.scalars().first()
 
 
+# Zalo's answers meaning this number cannot get a code by Zalo at all: not a
+# number Zalo accepts (-108), no Zalo account (-118), one that refuses these
+# messages (-139, -141) or is not eligible for them (-140); -114 and -119 are
+# the older ZNS codes for an inactive or unreachable account. Told to the
+# user, who can only fix it with another number. Every other refusal is ours
+# or Zalo's: a 502.
+NO_ZALO_ERRORS = frozenset({-108, -114, -118, -119, -139, -140, -141})
+
+
 def _channel() -> str:
-    channel = settings.STRINGEE_OTP_CHANNEL
+    channel = settings.PHONE_OTP_CHANNEL
     if channel == "log" and not settings.DEBUG:
         # A code in the server log is a code anyone with log access can use.
-        raise stringee.StringeeNotConfigured("STRINGEE_OTP_CHANNEL=log is honoured only with DEBUG=True")
+        raise zalo.ZaloNotConfigured("PHONE_OTP_CHANNEL=log is honoured only with DEBUG=True")
     return channel
 
 
-async def _deliver(channel: str, phone: str, code: str) -> None:
-    to = stringee_number(phone)
-    if channel == "sms":
-        minutes = int(CODE_TTL.total_seconds() // 60)
-        text = settings.STRINGEE_SMS_TEMPLATE.replace("{code}", code).replace("{minutes}", str(minutes))
-        await stringee.send_sms(to, text)
-    elif channel == "voice":
-        await stringee.call_with_code(to, code)
+async def _deliver(channel: str, phone: str, code: str, *, tracking_id: str) -> None:
+    if channel == "zalo":
+        await zalo.send_otp(zalo_number(phone), code, tracking_id=tracking_id)
     else:
-        logger.warning("Phone verification code for %s: %s (STRINGEE_OTP_CHANNEL=log)", phone, code)
+        logger.warning("Phone verification code for %s: %s (PHONE_OTP_CHANNEL=log)", phone, code)
 
 
 def _too_many(detail: str, retry_after: timedelta) -> HTTPException:
@@ -98,7 +103,7 @@ def _too_many(detail: str, retry_after: timedelta) -> HTTPException:
 
 
 async def send_code(db: AsyncSession, user: User, phone: str) -> PhoneVerificationCode:
-    """Text (or call) a fresh code to `phone`, a canonical +84 number.
+    """Send a fresh code to `phone`, a canonical +84 number, by Zalo.
 
     The new row retires any earlier code: only the latest can be redeemed.
     """
@@ -131,6 +136,7 @@ async def send_code(db: AsyncSession, user: User, phone: str) -> PhoneVerificati
         await db.execute(sends_since(PhoneVerificationCode.phone == phone))
     ).one()
 
+    # A slot frees up a day after the oldest send in the window.
     daily_limit = "Too many codes requested today. Try again later."
     refusal = None
     if user_last is not None and now - user_last < RESEND_COOLDOWN:
@@ -157,20 +163,23 @@ async def send_code(db: AsyncSession, user: User, phone: str) -> PhoneVerificati
         )
         row.code_hash = _hash_code(row.id, code)
         db.add(row)
-        # Before the send: a database error should not cost an SMS.
+        # Before the send: a database error should not cost a ZBS message.
         await db.flush()
-        await _deliver(channel, phone, code)
-    except stringee.StringeeNotConfigured as exc:
+        # The row id doubles as Zalo's tracking_id, for reconciling its reports.
+        await _deliver(channel, phone, code, tracking_id=row.id.hex)
+    except zalo.ZaloNotConfigured as exc:
         await db.rollback()
         logger.error("Phone verification unavailable: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Phone verification is not available right now",
         ) from exc
-    except stringee.StringeeError as exc:
+    except zalo.ZaloError as exc:
         # Rolled back, so an undelivered code neither counts against the
         # limits nor starts a cooldown the user would wait out for nothing.
         await db.rollback()
+        if exc.code in NO_ZALO_ERRORS:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=NO_ZALO) from exc
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not send the verification code. Please try again.",

@@ -1,25 +1,29 @@
 """Contract 4, "Hợp đồng dịch vụ dành cho Nhà đầu tư / Investor Service
-Agreement", as the investor downloads it, signs it with their digital
-signature and uploads it back before their first commitment.
+Agreement", as the investor reads it and confirms it with a one-time code
+sent to their phone by Zalo, with their first commitment.
 
-Copied verbatim from Contract set v0.3 (5 Nov 2026), a DRAFT pending IBL
-review. If the Vietnamese and English differ, the Vietnamese prevails.
+Copied from Contract set v0.3 (5 Nov 2026), a DRAFT pending IBL review, except
+how Party B signs: v0.3 says "with a remote digital signature"; investors are
+individuals who rarely hold one, so from v0.3.1 Party B confirms with a
+one-time code (SIGNING, ANNEX_PART_OF, SIGNATURES and SIGNED_BY_CODE below).
+That wording is FundLok's own and also awaits IBL's review. If the Vietnamese and English differ, the Vietnamese prevails.
 VERSION is printed on every page, so a signed copy says which text it was;
 bump it whenever a word here changes, and every investor signs the new text
 before their next commitment.
 """
 
-VERSION = "investor-agreement-v0.3"
+VERSION = "investor-agreement-v0.3.1"
 
 TITLE = ("4. Hợp đồng dịch vụ dành cho Nhà đầu tư", "Investor Service Agreement")
 
 PREVAILS = ("Bản tiếng Việt được ưu tiên áp dụng.", "The Vietnamese text prevails.")
 
 SIGNING = (
-    "Ký kết: lần cam kết đầu tiên, bằng chữ ký số từ xa, trong cùng luồng ký với Hợp đồng cho vay. Các lần "
-    "cam kết sau chỉ ký Xác nhận đầu tư (Phụ lục).",
-    "Signed: at the first commitment, with a remote digital signature, in the same signing flow as the Loan "
-    "Contract. Later commitments sign only an Investment Confirmation (Annex).",
+    "Ký kết: lần cam kết đầu tiên, Bên B xác nhận bằng mã xác thực một lần (OTP) gửi qua Zalo đến số điện thoại "
+    "của Bên B, trong cùng luồng với Hợp đồng cho vay. Các lần cam kết sau chỉ xác nhận Xác nhận đầu tư (Phụ lục).",
+    "Signed: at the first commitment, Party B confirming with a one-time code (OTP) sent by Zalo to Party B's "
+    "phone number, in the same flow as the Loan Contract. Later commitments confirm only an Investment "
+    "Confirmation (Annex).",
 )
 
 PARTY_A = (
@@ -262,9 +266,9 @@ ANNEX_ROWS = (
 
 # The filled-in Annex of one commitment (pdf.render_annex). Not contract text beyond the Article 7 clause it quotes.
 ANNEX_PART_OF = (
-    "Phụ lục này là một phần của Hợp đồng dịch vụ dành cho Nhà đầu tư, phiên bản {version}, Bên B đã ký số ngày "
+    "Phụ lục này là một phần của Hợp đồng dịch vụ dành cho Nhà đầu tư, phiên bản {version}, Bên B đã xác nhận bằng mã OTP ngày "
     "{signed_on}.",
-    "This Annex forms part of the Investor Service Agreement, version {version}, digitally signed by Party B on "
+    "This Annex forms part of the Investor Service Agreement, version {version}, confirmed by Party B with a one-time code on "
     "{signed_on}.",
 )
 ANNEX_PARTY_A = "**Bên A – FundLok:** Công ty Cổ phần FundLok, mã số doanh nghiệp 1501167629."
@@ -291,7 +295,15 @@ ANNEX_NOTE = (
 
 SIGNATURES = (
     ("ĐẠI DIỆN BÊN A / FOR PARTY A", "Công ty Cổ phần FundLok"),
-    ("BÊN B / PARTY B", "Ký số / Digital signature"),
+    ("BÊN B / PARTY B", "Xác nhận bằng mã OTP qua Zalo / Confirmed by one-time code via Zalo"),
+)
+
+# Not contract text: printed under Party B's block on the copy kept once the investor has confirmed with the code.
+SIGNED_BY_CODE = (
+    "Bên B đã xác nhận Hợp đồng này lúc {at} (giờ Việt Nam) bằng mã xác thực một lần gửi qua Zalo đến số điện "
+    "thoại {phone}.",
+    "Party B confirmed this Agreement at {at} (Vietnam time) with a one-time code sent by Zalo to phone number "
+    "{phone}.",
 )
 
 # What fills a field the platform does not know yet.

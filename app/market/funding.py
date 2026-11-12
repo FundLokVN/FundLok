@@ -10,8 +10,8 @@ hand:
   and an admin can run it again from the project panel.
 - `reserve_and_accept` is the investor's one "I agree" step: hold the amount and sign the acceptance of the
   investing terms, with the commitment's Investment Confirmation (Annex of Contract 4). At their first commitment
-  they then sign the Investor Service Agreement, filled in with this commitment's Annex, and upload it
-  (app/market/investor_agreement); the payment details wait for it. They then pay the SME directly
+  they then confirm the Investor Service Agreement, filled in with this commitment's Annex, with a one-time code
+  sent to their phone (app/market/investor_agreement); the payment details wait for it. They then pay the SME directly
   (`payment_instructions`); FundLok never holds the money.
 """
 from __future__ import annotations

@@ -75,6 +75,15 @@ os.environ["CAPTCHA_REQUIRED"] = "False"
 # Off for the same reason as the Turnstile secret: a local .env must not make
 # unrelated tests start getting 429s. tests/core/test_rate_limit.py enables it.
 os.environ["RATE_LIMIT_ENABLED"] = "False"
+# Off, like CAPTCHA_REQUIRED: make_user selects a role straight after
+# registering, which the phone gate would refuse. tests/phone_verification/
+# turns it back on. The Zalo credentials are blanked so a local .env can never
+# put a real message on the wire.
+os.environ["PHONE_VERIFICATION_REQUIRED"] = "False"
+os.environ["ZALO_APP_ID"] = ""
+os.environ["ZALO_APP_SECRET"] = ""
+os.environ["ZALO_OA_REFRESH_TOKEN"] = ""
+os.environ["ZALO_ZBS_DEVELOPMENT_MODE"] = "False"
 # Belt-and-suspenders: never let tests touch real R2 / Didit even if a local
 # .env has them configured.
 os.environ["R2_ENDPOINT_URL"] = ""
@@ -301,6 +310,12 @@ def _mock_external_io(monkeypatch):
     # here, so a new one can no longer reach the network just by being
     # forgotten.
     monkeypatch.setattr("app.utils.email.send_email", lambda *a, **kw: None)
+
+    # Zalo template-message sends and token refreshes alike go through zalo._post.
+    async def _no_zalo(*a, **kw):
+        raise AssertionError("a test tried to call Zalo")
+
+    monkeypatch.setattr("app.phone_verification.zalo._post", _no_zalo)
 
     # Admin > Email talks to Google (OAuth token endpoint, Gmail API) over
     # its own HTTP client, not send_email. Opening it fails loudly in every
@@ -727,8 +742,8 @@ def make_eligible_investor(db_session):
     signed Investor Service Agreement (Contract 4; reserving refuses without
     one). Idempotent per investor. Pass bank_account=False to stop short of
     the account (the order endpoint refuses an investor without one), and
-    signed_agreement=False to stop short of the agreement (its own upload is
-    covered in tests/market/test_investor_service_agreement.py)."""
+    signed_agreement=False to stop short of the agreement (confirming it with
+    a one-time code is covered in tests/market/test_investor_service_agreement.py)."""
 
     async def _make(investor: dict, bank_account: bool = True, signed_agreement: bool = True):
         from app.direct_transfer.models import PaymentAccount

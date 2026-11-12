@@ -1,34 +1,40 @@
-"""Contract 4, the Investor Service Agreement, signed with the investor's first commitment: agreeing holds the
-amount and gives it a code (no money moves); the investor downloads the agreement filled in with their details and
-that commitment's Annex, signs it with their digital signature and uploads it; only then are the payment details
-given. Every later commitment keeps its own filled-in Investment Confirmation (the Annex) when the investor agrees.
+"""Contract 4, the Investor Service Agreement, confirmed with the investor's first commitment: agreeing holds the
+amount and gives it a code (no money moves); the investor reads the agreement filled in with their details and that
+commitment's Annex, asks for a one-time code on their phone by Zalo and confirms with it; only then are the payment
+details given. Every later commitment keeps its own filled-in Investment Confirmation (the Annex) when the investor
+agrees. Before committing, an eligible investor can read the Loan Contract the SME signed for the listing.
 Spec: docs/specs/market/investor-service-agreement.md
 """
 import datetime as dt
 import io
 import json
-import re
+import secrets
 import uuid
 
 import pytest
 from pypdf import PdfReader
-from sqlalchemy import select
+from sqlalchemy import select, update
 
+from app.core.config import settings
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.models import EvidenceFile, PaymentAccount, Tranche
 from app.direct_transfer.signing import MockSigner
 from app.direct_transfer.storage import InMemoryStorage
 from app.gverify.models import STATUS_APPROVED, GVerifyKybVerification, GVerifyVerification
-from app.lending.models import AuditLog, Project
+from app.lending.models import AuditLog, Contract, LoanApplicationDocument, Project
 from app.market.funding import INVESTOR_TERMS_VERSION
 from app.market.investor_agreement import service as investor_agreement
 from app.market.investor_agreement import text as agreement_text
-from app.market.investor_agreement.models import InvestorServiceAgreement, SignedInvestmentConfirmation
-from conftest import SIGNED_AGREEMENT_PDF
+from app.market.investor_agreement.models import (
+    AgreementSigningCode,
+    InvestorServiceAgreement,
+    SignedInvestmentConfirmation,
+)
+from app.phone_verification import zalo
+from app.users.models import User
 from tests.market.test_funding_flow import _open_project
 
 VERSION = investor_agreement.VERSION
-UNSIGNED_PDF = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n"
 
 
 async def _reserve(client, investor, window_id, amount=10_000_000, *, key=None):
@@ -37,46 +43,66 @@ async def _reserve(client, investor, window_id, amount=10_000_000, *, key=None):
     return await client.post(f"/funding/windows/{window_id}/reservations", json=body, headers=headers)
 
 
-def _with_fake_signature(pdf: bytes, *markers: str) -> bytes:
-    """`pdf` as a signing tool leaves it, for the tests: a signature dictionary added after the original, then
-    markers that steer the fake NEAC (conftest.fake_neac), and the original startxref so it still reads."""
-    added = b"\n9 0 obj\n<< /Type /Sig /ByteRange [0 120 4216 380] /Contents <3082> >>\nendobj\n"
-    added += b"".join(f"%{m}\n".encode() for m in markers)
-    startxref = re.findall(rb"startxref\s+(\d+)", pdf)
-    if not startxref:  # not a PDF (a refused download): the upload is refused before reading it
-        return pdf + added
-    return pdf + added + b"startxref\n" + startxref[-1] + b"\n%%EOF\n"
+@pytest.fixture
+def outbox(monkeypatch):
+    """Every code handed to Zalo, in order."""
+    sent: list[dict] = []
+
+    async def _record(to, code, *, tracking_id):
+        sent.append({"to": to, "code": code, "tracking_id": tracking_id})
+
+    monkeypatch.setattr(zalo, "send_otp", _record)
+    monkeypatch.setattr(settings, "PHONE_OTP_CHANNEL", "zalo")
+    return sent
 
 
-async def _signed_copy(client, investor, tranche_id, *markers, signer_id="auto", name=None):
-    """The agreement downloaded for this commitment, "signed": by default by the investor (their ID as the fake
-    NEAC's certificate carries it)."""
-    pdf = (
-        await client.get(
-            "/funding/me/investor-agreement/document", params={"tranche_id": str(tranche_id)},
-            headers=investor["headers"],
-        )
-    ).content
-    if signer_id == "auto":
-        status = (await client.get("/funding/me/investor-agreement", headers=investor["headers"])).json()
-        signer_id = (status.get("party_b") or {}).get("id_number")
-    marks = [*markers]
-    if signer_id:
-        marks.append(f"FAKE-NEAC-SIGNER:{signer_id}")
-    if name:
-        marks.append(f"FAKE-NEAC-NAME:{name}")
-    return _with_fake_signature(pdf, *marks)
+async def _send_code(client, investor, tranche_id, *, version=VERSION):
+    return await client.post(
+        "/funding/me/investor-agreement/code",
+        json={"version": version, "tranche_id": str(tranche_id)},
+        headers=investor["headers"],
+    )
 
 
-async def _upload(client, investor, tranche_id, content=None, *, version=VERSION,
-                  filename="hop-dong-da-ky.pdf", content_type="application/pdf"):
-    if content is None:
-        content = await _signed_copy(client, investor, tranche_id)
+async def _sign(client, investor, tranche_id, code, *, version=VERSION):
     return await client.post(
         "/funding/me/investor-agreement",
-        data={"version": version, "tranche_id": str(tranche_id)},
-        files={"file": (filename, content, content_type)},
+        json={"version": version, "tranche_id": str(tranche_id), "code": code},
         headers=investor["headers"],
+    )
+
+
+async def _confirm(client, investor, tranche_id, outbox, *, version=VERSION):
+    """Ask for the code and confirm with it: the whole signing step."""
+    sent = await _send_code(client, investor, tranche_id, version=version)
+    assert sent.status_code == 200, sent.text
+    return await _sign(client, investor, tranche_id, outbox[-1]["code"], version=version)
+
+
+def _wrong(code: str) -> str:
+    return f"{(int(code) + 1) % 1_000_000:06d}"
+
+
+async def _age_codes(db_session, by: dt.timedelta) -> None:
+    """Move every code sent so far back in time, as if `by` had passed."""
+    await db_session.execute(
+        update(AgreementSigningCode).values(
+            created_at=AgreementSigningCode.created_at - by, expires_at=AgreementSigningCode.expires_at - by
+        )
+    )
+    await db_session.commit()
+
+
+async def _codes(db_session, investor) -> list[AgreementSigningCode]:
+    db_session.expire_all()
+    return list(
+        (
+            await db_session.execute(
+                select(AgreementSigningCode)
+                .where(AgreementSigningCode.investor_id == uuid.UUID(investor["id"]))
+                .order_by(AgreementSigningCode.created_at)
+            )
+        ).scalars()
     )
 
 
@@ -84,10 +110,21 @@ async def _payment(client, investor, tranche_id):
     return await client.get(f"/funding/tranches/{tranche_id}/payment", headers=investor["headers"])
 
 
-async def _verified_investor(db_session, make_user, make_eligible_investor, *, name="NGUYEN VAN A",
-                             id_number="079203001234"):
-    """An eligible investor, without the agreement yet, whose approved eKYC carries a name and an ID number."""
+async def _new_investor(db_session, make_user, make_eligible_investor, *, phone="auto"):
+    """An eligible investor who has not confirmed the agreement yet, with a Vietnamese mobile on the account."""
     investor = await make_eligible_investor(await make_user(role="INVESTOR"), signed_agreement=False)
+    if phone == "auto":
+        phone = f"09{secrets.randbelow(10**8):08d}"
+    user = await db_session.get(User, uuid.UUID(investor["id"]))
+    user.phone = phone
+    await db_session.commit()
+    return investor | {"phone": phone}
+
+
+async def _verified_investor(db_session, make_user, make_eligible_investor, *, name="NGUYEN VAN A",
+                             id_number="079203001234", phone="auto"):
+    """The same, whose approved eKYC carries a name and an ID number."""
+    investor = await _new_investor(db_session, make_user, make_eligible_investor, phone=phone)
     kyc = (
         await db_session.execute(
             select(GVerifyVerification).where(GVerifyVerification.user_id == uuid.UUID(investor["id"]))
@@ -96,11 +133,6 @@ async def _verified_investor(db_session, make_user, make_eligible_investor, *, n
     kyc.full_name, kyc.person_number = name, id_number
     await db_session.commit()
     return investor
-
-
-async def _new_investor(make_user, make_eligible_investor):
-    """An eligible investor who has not signed the agreement yet."""
-    return await make_eligible_investor(await make_user(role="INVESTOR"), signed_agreement=False)
 
 
 async def _signatures(db_session, investor):
@@ -152,7 +184,7 @@ async def test_a_first_commitment_gets_its_code_but_no_payment_details_until_sig
     client, db_session, make_admin, make_user, make_eligible_investor, signed_documents
 ):
     window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _new_investor(make_user, make_eligible_investor)
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
     signed_documents.clear()  # opening the window signed the SME's standing offer
 
     resp = await _reserve(client, investor, window_id, 20_000_000)
@@ -193,7 +225,7 @@ async def test_the_agreement_pdf_is_filled_in_with_the_investor_and_the_commitme
     assert resp.headers["content-disposition"].startswith("inline;")
     assert resp.headers["cache-control"] == "no-store"
     assert tranche["reference_code"] in resp.headers["content-disposition"]
-    assert b"/ByteRange" not in resp.content  # FundLok's own download is never signed
+    assert "Party B confirmed this Agreement" not in _pdf_text(resp.content)  # not confirmed yet: no such line
     body = _pdf_text(resp.content)
     # Party B, from the eKYC and the approved bank account; the address GVerify does not give is a blank.
     for expected in ("NGUYEN VAN A", "079203001234", account.account_number, "TEST INVESTOR", "Vietcombank"):
@@ -210,8 +242,10 @@ async def test_the_agreement_pdf_is_filled_in_with_the_investor_and_the_commitme
         ict_date(dt.datetime.fromisoformat(tranche["hold_expires_at"])).strftime("%d/%m/%Y"),
     ):
         assert expected in body, expected
-    # Party A, the last article, the version on every page: the whole contract.
+    # Party A, the last article, the version on every page: the whole contract. It is confirmed by code.
     assert "1501167629" in body and "Điều 11." in body and body.count(VERSION) >= 2
+    assert "one-time code (OTP) sent by Zalo" in " ".join(body.split())
+    assert "digital signature" not in body
 
     download = await client.get(
         "/funding/me/investor-agreement/document", params={"tranche_id": tranche["id"], "download": "true"},
@@ -223,209 +257,302 @@ async def test_the_agreement_pdf_is_filled_in_with_the_investor_and_the_commitme
     assert "Mã cam kết / Commitment" not in blank and "................ VND (≥ 10.000.000)" in blank
 
 
-async def test_uploading_the_signed_agreement_keeps_the_first_annex_and_opens_payment(
-    client, db_session, make_admin, make_user, make_eligible_investor, storage
+async def test_confirming_with_the_code_keeps_the_agreement_and_the_first_annex_and_opens_payment(
+    client, db_session, make_admin, make_user, make_eligible_investor, storage, outbox
 ):
     window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _verified_investor(db_session, make_user, make_eligible_investor)
+    investor = await _verified_investor(db_session, make_user, make_eligible_investor, phone="0703564489")
     tranche = (await _reserve(client, investor, window_id, 20_000_000)).json()
-    signed_pdf = await _signed_copy(client, investor, tranche["id"], name="NGUYEN VAN A")
     before = dt.datetime.now(dt.timezone.utc)
 
-    resp = await _upload(client, investor, tranche["id"], signed_pdf)
+    resp = await _confirm(client, investor, tranche["id"], outbox)
 
     assert resp.status_code == 201, resp.text
     status = resp.json()
     assert status["required"] is False and status["version"] == VERSION
-    assert status["file_name"] == "hop-dong-da-ky.pdf" and status["tranche_id"] == tranche["id"]
+    assert status["tranche_id"] == tranche["id"] and tranche["reference_code"] in status["file_name"]
     [signature] = await _signatures(db_session, investor)
     assert signature.version == VERSION and signature.signed_at >= before
-    assert str(signature.tranche_id) == tranche["id"]  # signed with the first commitment
-    assert signature.file_size_bytes == len(signed_pdf)
+    assert str(signature.tranche_id) == tranche["id"]  # confirmed with the first commitment
     assert signature.party_b["name"] == "NGUYEN VAN A" and signature.party_b["id_number"] == "079203001234"
+    # The record: the agreement as read, plus the line saying when and how Party B confirmed, kept as evidence.
     evidence = (
         await db_session.execute(select(EvidenceFile).where(EvidenceFile.storage_key == signature.signed_file_key))
     ).scalar_one()
     assert evidence.purpose == "SIGNED_DOCUMENT" and evidence.sha256 == signature.document_sha256
-    assert storage.objects[signature.signed_file_key][0] == signed_pdf
-    # NEAC's verdict is kept with it, and shown.
-    assert signature.signature_check["verified_by"] == "NEAC" and signature.signature_check["valid"] is True
-    assert signature.signature_check["signer"]["cccd"] == "CCCD:079203001234"
-    assert signature.signature_check["name_matches"] is True
-    assert status["signature_check"]["signer_id"] == "CCCD:079203001234"
-    assert status["signature_check"]["issuer_name"] == "FPT Certification Authority SHA256"
+    kept = storage.objects[signature.signed_file_key][0]
+    assert signature.file_size_bytes == len(kept)
+    body = " ".join(_pdf_text(kept).split())
+    assert f"Mã cam kết / Commitment: {tranche['reference_code']}" in body and "NGUYEN VAN A" in body
+    assert "Party B confirmed this Agreement at" in body and "phone number 0703***489" in body
+    assert "0703564489" not in body  # the number is masked on the document
+    # How it was confirmed is kept with it, and shown.
+    check, signature_id = signature.signature_check, signature.id
+    [code] = await _codes(db_session, investor)
+    assert code.consumed_at is not None
+    assert check["verified_by"] == "ZALO_OTP" and check["code_id"] == str(code.id)
+    assert check["phone"] == "+84703564489" and check["channel"] == "zalo"
+    assert status["signature_check"]["verified_by"] == "ZALO_OTP"
+    assert status["signature_check"]["phone"] == "0703***489"
     audit = (
         await db_session.execute(select(AuditLog).where(AuditLog.action == "INVESTOR_AGREEMENT_SIGNED"))
     ).scalar_one()
     assert audit.after_state["reference_code"] == tranche["reference_code"]
+    assert audit.after_state["signed_by"] == "ZALO_OTP" and audit.after_state["phone"] == "0703***489"
     # The first commitment's Annex is kept with it, and its payment details open.
-    signature_id = signature.id
     [confirmation] = await _confirmations(db_session)
     assert str(confirmation.tranche_id) == tranche["id"] and confirmation.agreement_id == signature_id
     assert confirmation.amount_vnd == 20_000_000
     assert (await _payment(client, investor, tranche["id"])).status_code == 200
     shown = await client.get(f"/funding/tranches/{tranche['id']}/investment-confirmation", headers=investor["headers"])
     assert shown.status_code == 200 and shown.json()["reference_code"] == tranche["reference_code"]
-    # The investor can open exactly what they uploaded.
+    # The investor can open exactly what was kept.
     signed = await client.get("/funding/me/investor-agreement/signed", headers=investor["headers"])
-    assert signed.status_code == 200 and signed.content == signed_pdf
+    assert signed.status_code == 200 and signed.content == kept
 
 
-async def test_the_unsigned_agreement_sent_straight_back_is_refused(
-    client, db_session, make_admin, make_user, make_eligible_investor, fake_neac
+async def test_the_code_goes_by_zalo_to_the_accounts_phone(
+    client, db_session, make_admin, make_user, make_eligible_investor, outbox
 ):
     window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _new_investor(make_user, make_eligible_investor)
+    investor = await _new_investor(db_session, make_user, make_eligible_investor, phone="0912 345 678")
     tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
-    unsigned_download = (
-        await client.get(
-            "/funding/me/investor-agreement/document", params={"tranche_id": tranche_id}, headers=investor["headers"]
-        )
-    ).content
+    status = (await client.get("/funding/me/investor-agreement", headers=investor["headers"])).json()
+    assert status["phone"] == "0912***678"  # where the code will go, before asking
 
-    for content in (UNSIGNED_PDF, unsigned_download):
-        resp = await _upload(client, investor, tranche_id, content)
-        assert resp.status_code == 422, resp.text
-        assert resp.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_UNSIGNED"
+    resp = await _send_code(client, investor, tranche_id)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"phone": "0912***678", "channel": "zalo", "expires_in": 300, "resend_in": 60}
+    [sent] = outbox
+    [row] = await _codes(db_session, investor)
+    assert sent["to"] == "84912345678" and sent["tracking_id"] == row.id.hex
+    assert len(sent["code"]) == 6 and sent["code"].isdigit()
+    assert row.phone == "+84912345678" and str(row.tranche_id) == tranche_id and row.version == VERSION
+    assert sent["code"] not in row.code_hash  # never the code itself
+    assert await _signatures(db_session, investor) == []  # asking for a code confirms nothing
+
+
+async def test_an_account_without_a_vietnamese_mobile_is_asked_for_one(
+    client, db_session, make_admin, make_user, make_eligible_investor, outbox
+):
+    window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
+    for phone in (None, "+6591234567"):
+        investor = await _new_investor(db_session, make_user, make_eligible_investor, phone=phone)
+        tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
+
+        status = (await client.get("/funding/me/investor-agreement", headers=investor["headers"])).json()
+        resp = await _send_code(client, investor, tranche_id)
+
+        assert status["phone"] is None
+        assert resp.status_code == 409 and resp.headers["X-Error-Code"] == "PHONE_REQUIRED", phone
+    assert outbox == []
+
+
+async def test_a_wrong_code_is_counted_and_the_fifth_kills_the_code(
+    client, db_session, make_admin, make_user, make_eligible_investor, outbox
+):
+    window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
+    tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
+    assert (await _send_code(client, investor, tranche_id)).status_code == 200
+    code = outbox[-1]["code"]
+
+    for attempt in range(1, 6):
+        resp = await _sign(client, investor, tranche_id, _wrong(code))
+        expected = "CODE_TOO_MANY_ATTEMPTS" if attempt == 5 else "CODE_INCORRECT"
+        assert resp.status_code == 400 and resp.headers["X-Error-Code"] == expected, attempt
+    [row] = await _codes(db_session, investor)
+    assert row.attempts == 5 and row.consumed_at is None
+
+    dead = await _sign(client, investor, tranche_id, code)  # the right code, too late
+    assert dead.status_code == 400 and dead.headers["X-Error-Code"] == "CODE_EXPIRED"
+    assert (await _sign(client, investor, tranche_id, "12345")).status_code == 422  # not six digits
     assert await _signatures(db_session, investor) == []
     assert (await _payment(client, investor, tranche_id)).status_code == 409
-    assert fake_neac.calls == []  # refused before asking NEAC
 
 
-async def test_neac_must_accept_the_signature(
-    client, db_session, make_admin, make_user, make_eligible_investor, fake_neac
+async def test_only_a_live_code_confirms(
+    client, db_session, make_admin, make_user, make_eligible_investor, outbox
 ):
     window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _new_investor(make_user, make_eligible_investor)
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
     tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
 
-    for case, says in (
-        ("INVALID", "Chữ ký: Không hợp lệ"),
-        ("MODIFIED", "Tài liệu đã ký: Bị thay đổi"),
-        ("REVOKED", "OCSP: Chứng thư số đã bị thu hồi."),
-        ("UNSIGNED", "Văn bản không có chữ ký số"),
-    ):
-        resp = await _upload(client, investor, tranche_id, await _signed_copy(client, investor, tranche_id, f"FAKE-NEAC:{case}"))
-        assert resp.status_code == 422, (case, resp.text)
-        assert resp.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_SIGNATURE_INVALID", case
-        assert says in resp.json()["detail"], (case, resp.json()["detail"])  # NEAC's own words
-    assert len(fake_neac.calls) == 4
-    assert await _signatures(db_session, investor) == []
-    assert (await _payment(client, investor, tranche_id)).status_code == 409
+    none_yet = await _sign(client, investor, tranche_id, "123456")
+    assert none_yet.status_code == 400 and none_yet.headers["X-Error-Code"] == "CODE_EXPIRED"
 
+    assert (await _send_code(client, investor, tranche_id)).status_code == 200
+    first = outbox[-1]["code"]
+    await _age_codes(db_session, dt.timedelta(minutes=2))
+    assert (await _send_code(client, investor, tranche_id)).status_code == 200
+    second = outbox[-1]["code"]
+    if first != second:  # only the latest code counts (and a miss on it is a wrong guess)
+        superseded = await _sign(client, investor, tranche_id, first)
+        assert superseded.status_code == 400 and superseded.headers["X-Error-Code"] == "CODE_INCORRECT"
 
-async def test_the_valid_signature_must_be_the_investors(
-    client, db_session, make_admin, make_user, make_eligible_investor
-):
-    window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _verified_investor(db_session, make_user, make_eligible_investor)
-    tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
-
-    someone_else = await _signed_copy(client, investor, tranche_id, signer_id="001099009999", name="TRAN VAN C")
-    resp = await _upload(client, investor, tranche_id, someone_else)
-
-    assert resp.status_code == 422 and resp.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_SIGNER_MISMATCH"
-    assert "TRAN VAN C" in resp.json()["detail"] and "079203001234" in resp.json()["detail"]
+    await _age_codes(db_session, dt.timedelta(minutes=6))  # past its five minutes
+    expired = await _sign(client, investor, tranche_id, second)
+    assert expired.status_code == 400 and expired.headers["X-Error-Code"] == "CODE_EXPIRED"
     assert await _signatures(db_session, investor) == []
 
 
-async def test_only_this_commitments_agreement_is_taken(
-    client, db_session, make_admin, make_user, make_eligible_investor, fake_neac
+async def test_a_code_confirms_only_the_commitment_it_was_sent_for(
+    client, db_session, make_admin, make_user, make_eligible_investor, outbox
 ):
     first = (await _open_project(client, db_session, make_admin, make_user))["window"].id
     second = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _new_investor(make_user, make_eligible_investor)
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
     tranche_id = (await _reserve(client, investor, first)).json()["id"]
     other_tranche = (await _reserve(client, investor, second)).json()["id"]
+    assert (await _send_code(client, investor, tranche_id)).status_code == 200
+    code = outbox[-1]["code"]
 
-    # A signed PDF that is not our agreement, and our agreement for another commitment.
-    for content in (SIGNED_AGREEMENT_PDF, await _signed_copy(client, investor, other_tranche)):
-        resp = await _upload(client, investor, tranche_id, content)
-        assert resp.status_code == 422 and resp.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_WRONG_DOCUMENT"
-    assert fake_neac.calls == []  # refused before asking NEAC
+    resp = await _sign(client, investor, other_tranche, code)
+
+    assert resp.status_code == 400 and resp.headers["X-Error-Code"] == "CODE_EXPIRED"
     assert await _signatures(db_session, investor) == []
+    assert (await _sign(client, investor, tranche_id, code)).status_code == 201  # still good for its own
 
 
-async def test_nothing_is_accepted_unchecked_when_neac_is_down(
-    client, db_session, make_admin, make_user, make_eligible_investor
+async def test_codes_are_limited_to_one_a_minute_and_five_a_day(
+    client, db_session, make_admin, make_user, make_eligible_investor, outbox
 ):
     window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _new_investor(make_user, make_eligible_investor)
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
+    tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
+    assert (await _send_code(client, investor, tranche_id)).status_code == 200
+
+    too_soon = await _send_code(client, investor, tranche_id)
+    assert too_soon.status_code == 429 and too_soon.headers["X-Error-Code"] == "CODE_COOLDOWN"
+    assert 1 <= int(too_soon.headers["Retry-After"]) <= 60
+
+    for _ in range(4):
+        await _age_codes(db_session, dt.timedelta(minutes=2))
+        assert (await _send_code(client, investor, tranche_id)).status_code == 200
+    await _age_codes(db_session, dt.timedelta(minutes=2))
+    sixth = await _send_code(client, investor, tranche_id)
+    assert sixth.status_code == 429 and sixth.headers["X-Error-Code"] == "CODE_DAILY_LIMIT"
+    assert len(outbox) == 5
+
+    await _age_codes(db_session, dt.timedelta(days=1))  # a day on, the count starts over
+    assert (await _send_code(client, investor, tranche_id)).status_code == 200
+
+
+async def test_a_code_zalo_does_not_deliver_is_not_counted(
+    client, db_session, make_admin, make_user, make_eligible_investor, monkeypatch
+):
+    window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
+    tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
+    monkeypatch.setattr(settings, "PHONE_OTP_CHANNEL", "zalo")
+
+    for error, status_code, code in (
+        (zalo.ZaloError("no zalo account", code=-118), 400, "PHONE_NO_ZALO"),
+        (zalo.ZaloError("template not approved", code=-131), 502, "CODE_NOT_SENT"),
+        (zalo.ZaloNotConfigured("ZALO_APP_ID not configured"), 503, "CODE_UNAVAILABLE"),
+    ):
+        async def _refused(to, otp, *, tracking_id, error=error):
+            raise error
+
+        monkeypatch.setattr(zalo, "send_otp", _refused)
+        resp = await _send_code(client, investor, tranche_id)
+        assert resp.status_code == status_code and resp.headers["X-Error-Code"] == code, code
+    assert await _codes(db_session, investor) == []  # nothing counted, no cooldown started
+
+    sent: list[str] = []
+
+    async def _ok(to, otp, *, tracking_id):
+        sent.append(otp)
+
+    monkeypatch.setattr(zalo, "send_otp", _ok)
+    assert (await _send_code(client, investor, tranche_id)).status_code == 200  # at once, no wait
+    assert len(sent) == 1
+
+
+async def test_the_log_channel_stands_in_for_zalo_only_in_debug(
+    client, db_session, make_admin, make_user, make_eligible_investor, monkeypatch
+):
+    window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
+    tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
+    monkeypatch.setattr(settings, "PHONE_OTP_CHANNEL", "log")
+
+    monkeypatch.setattr(settings, "DEBUG", False)
+    refused = await _send_code(client, investor, tranche_id)
+    assert refused.status_code == 503 and refused.headers["X-Error-Code"] == "CODE_UNAVAILABLE"
+
+    monkeypatch.setattr(settings, "DEBUG", True)
+    resp = await _send_code(client, investor, tranche_id)
+    assert resp.status_code == 200 and resp.json()["channel"] == "log"
+
+
+async def test_an_old_version_is_not_confirmed(
+    client, db_session, make_admin, make_user, make_eligible_investor, outbox
+):
+    window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
     tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
 
-    resp = await _upload(client, investor, tranche_id, await _signed_copy(client, investor, tranche_id, "FAKE-NEAC:DOWN"))
+    for resp in (
+        await _send_code(client, investor, tranche_id, version="investor-agreement-v0.1"),
+        await _sign(client, investor, tranche_id, "123456", version="investor-agreement-v0.1"),
+    ):
+        assert resp.status_code == 409 and resp.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_OUTDATED"
+    assert outbox == [] and await _signatures(db_session, investor) == []
 
-    assert resp.status_code == 503 and resp.headers["X-Error-Code"] == "NEAC_UNAVAILABLE"
-    assert await _signatures(db_session, investor) == []
-    assert (await _payment(client, investor, tranche_id)).status_code == 409
-    # Back up: the same upload goes through.
-    assert (await _upload(client, investor, tranche_id)).status_code == 201
 
-
-async def test_only_a_pdf_of_the_current_version_is_taken(
-    client, db_session, make_admin, make_user, make_eligible_investor
+async def test_the_agreement_is_confirmed_with_the_investors_own_live_commitment(
+    client, db_session, make_admin, make_user, make_eligible_investor, outbox
 ):
     window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _new_investor(make_user, make_eligible_investor)
-    tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
-
-    image = await _upload(client, investor, tranche_id, b"\x89PNG\r\n\x1a\n /ByteRange [0 1 2 3]", filename="anh.png",
-                          content_type="image/png")
-    assert image.status_code == 415 and image.headers["X-Error-Code"] == "UNSUPPORTED_TYPE"
-    old = await _upload(client, investor, tranche_id, version="investor-agreement-v0.1")
-    assert old.status_code == 409 and old.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_OUTDATED"
-    too_big = await _upload(client, investor, tranche_id, SIGNED_AGREEMENT_PDF + b"0" * (10 * 1024 * 1024))
-    assert too_big.status_code == 413 and too_big.headers["X-Error-Code"] == "FILE_TOO_LARGE"
-    assert await _signatures(db_session, investor) == []
-
-
-async def test_the_agreement_is_signed_with_the_investors_own_live_commitment(
-    client, db_session, make_admin, make_user, make_eligible_investor
-):
-    window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _new_investor(make_user, make_eligible_investor)
-    other = await _new_investor(make_user, make_eligible_investor)
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
+    other = await _new_investor(db_session, make_user, make_eligible_investor)
     others_tranche = (await _reserve(client, other, window_id)).json()["id"]
 
-    assert (await _upload(client, investor, others_tranche)).status_code == 404
-    assert (await _upload(client, investor, uuid.uuid4())).status_code == 404
+    for tranche_id in (others_tranche, uuid.uuid4()):
+        assert (await _send_code(client, investor, tranche_id)).status_code == 404
+        assert (await _sign(client, investor, tranche_id, "123456")).status_code == 404
 
     mine = (await _reserve(client, investor, window_id)).json()["id"]
+    assert (await _send_code(client, investor, mine)).status_code == 200
     row = await db_session.get(Tranche, uuid.UUID(mine))
     row.hold_expires_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)
     await db_session.commit()
-    lapsed = await _upload(client, investor, mine)
-    assert lapsed.status_code == 409 and lapsed.headers["X-Error-Code"] == "HOLD_EXPIRED"
+    await _age_codes(db_session, dt.timedelta(minutes=2))
+    for lapsed in (await _send_code(client, investor, mine), await _sign(client, investor, mine, outbox[-1]["code"])):
+        assert lapsed.status_code == 409 and lapsed.headers["X-Error-Code"] == "HOLD_EXPIRED"
     assert await _signatures(db_session, investor) == []
 
 
-async def test_the_agreement_is_signed_once_per_version(
-    client, db_session, make_admin, make_user, make_eligible_investor
+async def test_the_agreement_is_confirmed_once_per_version(
+    client, db_session, make_admin, make_user, make_eligible_investor, outbox
 ):
     window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _new_investor(make_user, make_eligible_investor)
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
     tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
-    assert (await _upload(client, investor, tranche_id, filename="lan-1.pdf")).status_code == 201
+    assert (await _confirm(client, investor, tranche_id, outbox)).status_code == 201
+    await _age_codes(db_session, dt.timedelta(minutes=2))
 
-    again = await _upload(client, investor, tranche_id, filename="lan-2.pdf")
+    for again in (await _send_code(client, investor, tranche_id),
+                  await _sign(client, investor, tranche_id, outbox[-1]["code"])):
+        assert again.status_code == 409 and again.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_ALREADY_SIGNED"
+    assert len(await _signatures(db_session, investor)) == 1 and len(outbox) == 1
 
-    assert again.status_code == 409 and again.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_ALREADY_SIGNED"
-    assert [s.file_name for s in await _signatures(db_session, investor)] == ["lan-1.pdf"]
 
-
-async def test_an_investor_without_kyc_or_bank_account_cannot_upload(client, make_user):
+async def test_an_investor_without_kyc_or_bank_account_cannot_confirm(client, make_user, outbox):
     investor = await make_user(role="INVESTOR")
 
-    resp = await _upload(client, investor, uuid.uuid4())
-
-    assert resp.status_code == 403, resp.text
+    assert (await _send_code(client, investor, uuid.uuid4())).status_code == 403
+    assert (await _sign(client, investor, uuid.uuid4(), "123456")).status_code == 403
+    assert outbox == []
 
 
 # --------------------------------------------------------------------------- #
 # later commitments
 # --------------------------------------------------------------------------- #
 async def test_a_later_commitment_keeps_its_annex_at_once_and_pays_straight_away(
-    client, db_session, make_admin, make_user, make_eligible_investor, signed_documents, storage
+    client, db_session, make_admin, make_user, make_eligible_investor, signed_documents, storage, outbox
 ):
     first = (await _open_project(client, db_session, make_admin, make_user))["window"].id
     second = await _open_project(client, db_session, make_admin, make_user, requested=60_000_000, rate=14.0, term=3)
@@ -434,7 +561,7 @@ async def test_a_later_commitment_keeps_its_annex_at_once_and_pays_straight_away
     sme_name = project.legal_name
     investor = await _verified_investor(db_session, make_user, make_eligible_investor)
     first_tranche = (await _reserve(client, investor, first)).json()["id"]
-    assert (await _upload(client, investor, first_tranche)).status_code == 201
+    assert (await _confirm(client, investor, first_tranche, outbox)).status_code == 201
     [signature] = await _signatures(db_session, investor)
     signature_id, signed_at, signature_sha = signature.id, signature.signed_at, signature.document_sha256
     signed_documents.clear()
@@ -443,7 +570,8 @@ async def test_a_later_commitment_keeps_its_annex_at_once_and_pays_straight_away
 
     assert resp.status_code == 201, resp.text
     tranche = resp.json()
-    assert (await _payment(client, investor, tranche["id"])).status_code == 200  # no agreement to sign again
+    assert (await _payment(client, investor, tranche["id"])).status_code == 200  # no agreement to confirm again
+    assert len(outbox) == 1  # and no second code
     assert [s.id for s in await _signatures(db_session, investor)] == [signature_id]
     row = next(c for c in await _confirmations(db_session) if str(c.tranche_id) == tranche["id"])
     assert row.agreement_id == signature_id
@@ -499,13 +627,14 @@ async def test_replaying_a_commitment_keeps_one_investment_confirmation(
 
 
 async def test_a_new_version_is_signed_with_the_next_commitment(
-    client, db_session, make_admin, make_user, make_eligible_investor, monkeypatch
+    client, db_session, make_admin, make_user, make_eligible_investor, monkeypatch, outbox
 ):
     first = (await _open_project(client, db_session, make_admin, make_user))["window"].id
     second = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _new_investor(make_user, make_eligible_investor)
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
     first_tranche = (await _reserve(client, investor, first)).json()["id"]
-    assert (await _upload(client, investor, first_tranche)).status_code == 201
+    assert (await _confirm(client, investor, first_tranche, outbox)).status_code == 201
+    await _age_codes(db_session, dt.timedelta(minutes=2))
     # A new text: its version changes in the printed PDF and in what the server asks for.
     monkeypatch.setattr(investor_agreement, "VERSION", "investor-agreement-v0.4")
     monkeypatch.setattr(agreement_text, "VERSION", "investor-agreement-v0.4")
@@ -515,10 +644,10 @@ async def test_a_new_version_is_signed_with_the_next_commitment(
     assert status["signed_version"] == VERSION and status["signed_at"] is None
     tranche_id = (await _reserve(client, investor, second)).json()["id"]
     assert (await _payment(client, investor, tranche_id)).status_code == 409
-    old_copy = await _upload(client, investor, tranche_id, version=VERSION)
-    assert old_copy.status_code == 409 and old_copy.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_OUTDATED"
+    old_text = await _send_code(client, investor, tranche_id, version=VERSION)
+    assert old_text.status_code == 409 and old_text.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_OUTDATED"
 
-    assert (await _upload(client, investor, tranche_id, version="investor-agreement-v0.4")).status_code == 201
+    assert (await _confirm(client, investor, tranche_id, outbox, version="investor-agreement-v0.4")).status_code == 201
     assert (await _payment(client, investor, tranche_id)).status_code == 200
     versions = [s.version for s in await _signatures(db_session, investor)]
     assert versions == [VERSION, "investor-agreement-v0.4"]  # the old signature is kept as it was
@@ -528,7 +657,7 @@ async def test_a_new_version_is_signed_with_the_next_commitment(
 # what the page reads
 # --------------------------------------------------------------------------- #
 async def test_the_status_asks_for_the_agreement_until_signed_then_shows_what_was_signed(
-    client, db_session, make_admin, make_user, make_eligible_investor
+    client, db_session, make_admin, make_user, make_eligible_investor, outbox
 ):
     window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
     investor = await _verified_investor(db_session, make_user, make_eligible_investor, name="TRAN THI B")
@@ -540,7 +669,7 @@ async def test_the_status_asks_for_the_agreement_until_signed_then_shows_what_wa
     assert (await client.get("/funding/me/investor-agreement/signed", headers=investor["headers"])).status_code == 404
 
     tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
-    assert (await _upload(client, investor, tranche_id)).status_code == 201
+    assert (await _confirm(client, investor, tranche_id, outbox)).status_code == 201
     # A later change to the profile does not rewrite what was signed.
     kyc = (
         await db_session.execute(
@@ -560,7 +689,7 @@ async def test_the_status_asks_for_the_agreement_until_signed_then_shows_what_wa
 async def test_an_organisation_investor_is_filled_from_its_business_verification(
     client, db_session, make_user, make_eligible_investor
 ):
-    investor = await _new_investor(make_user, make_eligible_investor)
+    investor = await _new_investor(db_session, make_user, make_eligible_investor)
     user_id = uuid.UUID(investor["id"])
     account = (await db_session.execute(select(PaymentAccount).where(PaymentAccount.user_id == user_id))).scalar_one()
     account.holder_type, account.account_name = "ENTITY", "CONG TY DAU TU X"
@@ -582,28 +711,6 @@ async def test_an_organisation_investor_is_filled_from_its_business_verification
     assert party["id_number"] == "0312345678"
     assert party["address"] == "12 Lê Lợi, Quận 1, TP.HCM"
     assert "0312345678" in body and "12 Lê Lợi" in body and "CONG TY DAU TU X" in body
-
-
-async def test_an_organisation_signs_with_its_enterprise_certificate(
-    client, db_session, make_admin, make_user, make_eligible_investor
-):
-    window_id = (await _open_project(client, db_session, make_admin, make_user))["window"].id
-    investor = await _new_investor(make_user, make_eligible_investor)
-    user_id = uuid.UUID(investor["id"])
-    account = (await db_session.execute(select(PaymentAccount).where(PaymentAccount.user_id == user_id))).scalar_one()
-    account.holder_type = "ENTITY"
-    db_session.add(
-        GVerifyKybVerification(
-            user_id=user_id, status=STATUS_APPROVED, document_type="BUSINESS_REGISTRATION",
-            business_name="CÔNG TY TNHH ĐẦU TƯ X", tax_code="0312345678",
-        )
-    )
-    await db_session.commit()
-    tranche_id = (await _reserve(client, investor, window_id)).json()["id"]
-
-    resp = await _upload(client, investor, tranche_id, await _signed_copy(client, investor, tranche_id, signer_id="0312345678"))
-
-    assert resp.status_code == 201, resp.text  # the certificate's MST is the company's KYB enterprise code
 
 
 async def test_the_investment_confirmation_preview_is_filled_in_from_the_window(
@@ -653,4 +760,72 @@ async def test_only_the_investor_who_committed_sees_its_documents(
     for path in ("/funding/me/investor-agreement", "/funding/me/investor-agreement/document",
                  "/funding/me/investor-agreement/signed"):
         assert (await client.get(path, headers=setup["sme"]["headers"])).status_code == 403, path
-    assert (await _upload(client, setup["sme"], tranche_id, SIGNED_AGREEMENT_PDF)).status_code == 403
+    assert (await _send_code(client, setup["sme"], tranche_id)).status_code == 403
+    assert (await _sign(client, setup["sme"], tranche_id, "123456")).status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# the Loan Contract the SME signed, read before committing
+# --------------------------------------------------------------------------- #
+async def test_an_eligible_investor_reads_the_loan_contract_the_sme_signed(
+    client, db_session, make_admin, make_user, make_eligible_investor, monkeypatch
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window = setup["window"]
+    contract = await db_session.get(Contract, window.contract_id)
+    application_id = contract.application_id
+    signed = (
+        await db_session.execute(
+            select(LoanApplicationDocument).where(
+                LoanApplicationDocument.loan_application_id == application_id,
+                LoanApplicationDocument.document_type == "sme_loan_contract",
+            )
+        )
+    ).scalar_one()
+    held = {signed.file_key: b"%PDF-1.7 the loan contract, signed by the SME and the Guarantor"}
+    monkeypatch.setattr("app.loans.signing.get_bytes", lambda key, **kw: held[key])
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"), signed_agreement=False)
+    path = f"/funding/windows/{window.id}/loan-contract"
+
+    resp = await client.get(path, headers=investor["headers"])
+
+    assert resp.status_code == 200, resp.text
+    assert resp.content == held[signed.file_key]  # exactly as the SME uploaded it
+    assert resp.headers["content-type"] == "application/pdf" and resp.headers["cache-control"] == "no-store"
+    assert resp.headers["content-disposition"].startswith("inline;")
+    download = await client.get(path, params={"download": "true"}, headers=investor["headers"])
+    assert download.headers["content-disposition"].startswith("attachment;")
+    views = (
+        await db_session.execute(select(AuditLog).where(AuditLog.action == "LOAN_CONTRACT_VIEWED_BY_INVESTOR"))
+    ).scalars().all()
+    assert len(views) == 2 and {str(v.actor_id) for v in views} == {investor["id"]}
+    assert all(v.entity_id == application_id for v in views)
+
+    # It names the Guarantor: only an eligible investor gets it, never an unverified account or an SME.
+    unverified = await make_user(role="INVESTOR")
+    assert (await client.get(path, headers=unverified["headers"])).status_code == 403
+    assert (await client.get(path, headers=setup["sme"]["headers"])).status_code == 403
+    assert (await client.get(f"/funding/windows/{uuid.uuid4()}/loan-contract", headers=investor["headers"])).status_code == 404
+
+
+async def test_a_listing_without_a_signed_loan_contract_has_none_to_show(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window = setup["window"]
+    contract = await db_session.get(Contract, window.contract_id)
+    signed = (
+        await db_session.execute(
+            select(LoanApplicationDocument).where(
+                LoanApplicationDocument.loan_application_id == contract.application_id,
+                LoanApplicationDocument.document_type == "sme_loan_contract",
+            )
+        )
+    ).scalar_one()
+    await db_session.delete(signed)  # a listing published before the Loan Contract was signed
+    await db_session.commit()
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+
+    resp = await client.get(f"/funding/windows/{window.id}/loan-contract", headers=investor["headers"])
+
+    assert resp.status_code == 404

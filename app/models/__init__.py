@@ -36,6 +36,7 @@ from app.repayment_schedule.models import (  # noqa: F401
 )
 from app.underwriting.models import BankRateConfig, ScoreRunInput  # noqa: F401
 from app.notifications.models import Notification  # noqa: F401
+from app.phone_verification.models import PhoneVerificationCode, ZaloOaToken  # noqa: F401
 from app.rates.models import InvestorRateInquiry, RateInquiry  # noqa: F401
 from app.uploads.models import CicSummary, EInvoiceSummary, TaxFilingSummary  # noqa: F401
 from app.admin.internal_email.models import EmailSettings, InternalEmail  # noqa: F401
@@ -57,6 +58,7 @@ from app.direct_transfer.models import (  # noqa: F401
 )
 # FKs to users and tranches.
 from app.market.investor_agreement.models import (  # noqa: F401
+    AgreementSigningCode,
     InvestorServiceAgreement,
     SignedInvestmentConfirmation,
 )

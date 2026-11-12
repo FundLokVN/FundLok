@@ -1,10 +1,10 @@
 """Render Contract 4 (Investor Service Agreement) as a PDF, filled in with the
-investor's own details, for the investor to review, sign with their digital
-signature and upload back before their first commitment.
+investor's own details, for the investor to read and confirm with a one-time
+code with their first commitment. The copy kept as the record also says when
+they confirmed and the number the code went to.
 
-Same renderer as the SME Service Agreement (app/loans/agreement/pdf.py): PDF
-because Vietnamese digital signatures (USB token / remote signing) sign PDFs,
-Be Vietnam Pro embedded so the Vietnamese renders the same everywhere, and
+Same renderer as the SME Service Agreement (app/loans/agreement/pdf.py), Be
+Vietnam Pro embedded so the Vietnamese renders the same everywhere, and
 anything the platform does not know printed as a dotted blank.
 """
 from dataclasses import dataclass
@@ -32,6 +32,10 @@ class AgreementData:
     # its Annex rows (annex_rows_for). Otherwise the Annex prints as the blank template.
     commitment_ref: str | None = None
     annex: list[tuple[str, str]] | None = None
+    # On the copy kept as the record: when Party B confirmed with the one-time code, and the (masked) number it
+    # was sent to. None on the copy shown before confirming.
+    confirmed_at: datetime | None = None
+    confirmed_phone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -243,6 +247,16 @@ def render(data: AgreementData) -> bytes:
         pdf.set_x(pdf.l_margin + i * half)
         pdf.set_font(FAMILY, style="I", size=8.5)
         pdf.multi_cell(half - 4, 4.5, who, align="C", new_x="LEFT", new_y="NEXT")
+
+    if data.confirmed_at is not None:
+        gap(6)
+        pdf.set_x(pdf.l_margin)
+        at = data.confirmed_at.strftime("%H:%M:%S %d/%m/%Y")
+        stamp = tuple(s.format(at=at, phone=data.confirmed_phone or text.BLANK) for s in text.SIGNED_BY_CODE)
+        pdf.set_font(FAMILY, style="B", size=9.5)
+        pdf.multi_cell(0, 5, stamp[0], new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font(FAMILY, style="I", size=8.5)
+        pdf.multi_cell(0, 4.5, stamp[1], new_x="LMARGIN", new_y="NEXT")
 
     return bytes(pdf.output())
 

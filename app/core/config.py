@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -206,6 +208,38 @@ class Settings(BaseSettings):
     # KYC and KYB. Every automatic attempt is billable provider calls (OCR plus
     # face match, or OCR plus the tax registry), and a rejection invites a retry.
     GVERIFY_MAX_ATTEMPTS_PER_DAY: int = 5
+
+    # --- Phone verification (Zalo ZBS) ---
+    # docs/specs/users/phone-verification.md. A new account (password or
+    # social sign-in) must prove a Vietnamese mobile number by one-time code
+    # before it may choose a role. Required by default, like CAPTCHA_REQUIRED:
+    # with Zalo unconfigured the send endpoint answers 503 rather than letting
+    # accounts through unverified. The tests opt out.
+    PHONE_VERIFICATION_REQUIRED: bool = True
+    # How the code reaches the phone:
+    #   zalo — a Zalo ZBS template message (needs the ZALO_* settings below)
+    #   log  — writes the code to the server log; only honoured with DEBUG=True
+    PHONE_OTP_CHANNEL: Literal["zalo", "log"] = "zalo"
+
+    # Zalo Official Account app (developers.zalo.me > app > Official Account).
+    # The secret goes in the `secret_key` header of token refreshes only.
+    ZALO_APP_ID: str | None = None
+    ZALO_APP_SECRET: str | None = None
+    # The refresh token from authorising the app on the OA. Read once to start
+    # the chain: Zalo replaces the refresh token on every use, so the current
+    # one lives encrypted in zalo_oa_tokens. Putting a different value here
+    # (after re-authorising the OA) starts a new chain.
+    ZALO_OA_REFRESH_TOKEN: str | None = None
+    # Encrypts the stored OA tokens (app/phone_verification/zalo.py). Its own
+    # key, like TOTP_ENCRYPTION_KEY: unset means Zalo is refused, never that
+    # tokens are stored in plaintext.
+    ZALO_TOKEN_ENCRYPTION_KEY: str | None = None
+    # The approved ZBS template of type OTP, and the name of its code parameter.
+    ZALO_ZBS_OTP_TEMPLATE_ID: str | None = None
+    ZALO_ZBS_OTP_PARAM: str = "otp"
+    # Sends with "mode": "development": Zalo delivers only to admins of the
+    # app or the OA. For trying the template out; never on in production.
+    ZALO_ZBS_DEVELOPMENT_MODE: bool = False
 
     # ARQ worker (T2 -- HANDOFF-03). The daily repayment batch and ML scoring
     # run through ARQ, never BackgroundTasks (CLAUDE.md). Points at the

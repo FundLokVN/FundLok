@@ -74,10 +74,12 @@ class PartyBOut(BaseModel):
 
 
 class SignatureCheckOut(BaseModel):
-    """NEAC's verdict on the signed copy when it was accepted."""
+    """How the agreement on file was confirmed: with a one-time code sent by Zalo ("ZALO_OTP": only `phone` is
+    set), or, for agreements of v0.3, NEAC's verdict on an uploaded digitally signed copy ("NEAC")."""
 
-    verified_by: str  # "NEAC"
+    verified_by: str  # "ZALO_OTP" | "NEAC"
     checked_at: dt.datetime
+    phone: str | None = None  # ZALO_OTP: the number the code went to, masked, e.g. "0703***489"
     signer_name: str | None = None  # the certificate's CN, e.g. "CÔNG TY CỔ PHẦN FUNDLOK"
     signer_id: str | None = None  # as on the certificate, e.g. "MST:1501167629" or "CCCD:079..."
     issuer_name: str | None = None  # the CA, e.g. "FPT Certification Authority SHA256"
@@ -86,22 +88,25 @@ class SignatureCheckOut(BaseModel):
 
 
 class InvestorAgreementOut(BaseModel):
-    """Whether the investor must still sign and upload the Investor Service Agreement before committing."""
+    """Whether the investor must still confirm the Investor Service Agreement with their next commitment."""
 
     # The version the platform asks for now, printed on the PDF to sign.
     version: str
-    # True until the investor has uploaded a digitally signed copy of `version`. While true, a commitment is still
-    # made (code and all) but its payment details are refused: the agreement is signed with it first.
+    # True until the investor has confirmed `version` with a one-time code. While true, a commitment is still made
+    # (code and all) but its payment details are refused: the agreement is confirmed with it first.
     required: bool
-    # When the current version's signed copy was uploaded; null while required.
+    # The number the confirmation code is sent to by Zalo, masked ("0703***489"): the account's phone. Null when
+    # the account has no Vietnamese mobile number (the investor adds one to their profile first).
+    phone: str | None = None
+    # When the current version was confirmed; null while required.
     signed_at: dt.datetime | None = None
     # The investor's latest signed version, of any version (an older one while a new version is required).
     signed_version: str | None = None
-    # The signed copy's file name as uploaded.
+    # The confirmed copy's file name.
     file_name: str | None = None
     # The commitment it was signed with (whose Annex it carries filled in).
     tranche_id: UUID | None = None
-    # NEAC's verdict on the signed copy (null for records made outside the upload).
+    # How it was confirmed (null for records made outside the flow).
     signature_check: SignatureCheckOut | None = None
     # As signed when signed; else as the PDF fills it in now, from the verified profile.
     party_b: PartyBOut
@@ -442,3 +447,21 @@ class BusinessAnalyticsOut(BaseModel):
     score_factors: list[ScoreFactorOut]
     # The average monthly revenue (last 12 months filed) the revenue share is measured against; null without one.
     revenue_basis_vnd: int | None
+
+
+class AgreementCodeRequest(BaseModel):
+    """Ask for the one-time code that confirms the agreement with a commitment."""
+
+    version: str = Field(min_length=1, max_length=40)  # as GET /funding/me/investor-agreement gave it
+    tranche_id: UUID
+
+
+class AgreementCodeOut(BaseModel):
+    phone: str  # masked, e.g. "0703***489"
+    channel: str  # zalo | log
+    expires_in: int  # seconds the code is good for
+    resend_in: int  # seconds until another code may be requested
+
+
+class AgreementSignRequest(AgreementCodeRequest):
+    code: str = Field(pattern=r"^[0-9]{6}$")

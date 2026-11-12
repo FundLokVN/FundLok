@@ -4,9 +4,10 @@ Login was throttled per account only (app/auth/service.py), so one address
 could walk a list of emails, and nothing else had a limit at all. This
 middleware counts requests per client IP in fixed one-minute windows:
 
-- `RATE_LIMIT_SENSITIVE_PER_MINUTE` for the public, unauthenticated POSTs in
-  SENSITIVE_PATHS: sign-in, sign-up, password reset, contact and the public
-  rate calculator. These are what a script hammers.
+- `RATE_LIMIT_SENSITIVE_PER_MINUTE` for the POSTs in SENSITIVE_PATHS: the
+  public sign-in, sign-up, password reset, contact and rate calculator, plus
+  the phone-code send, which needs a session but costs a ZBS message per call. These
+  are what a script hammers.
 - `RATE_LIMIT_PER_MINUTE` for everything else, generous enough that a real
   user never meets it.
 
@@ -62,6 +63,7 @@ SENSITIVE_PATHS = frozenset(
         "/contact",
         "/api/v1/rates/calculate",
         "/api/v1/rates/investor/leads",
+        "/users/me/phone/send-code",
     }
 )
 
