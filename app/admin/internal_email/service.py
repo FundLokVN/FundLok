@@ -685,6 +685,42 @@ async def resolve_reminder_sender(db: AsyncSession) -> ReminderSender | None:
     return ReminderSender(user=user, account=account, refresh_token=token)
 
 
+async def send_as_reminder_sender(
+    db: AsyncSession,
+    sender: ReminderSender,
+    *,
+    recipients: list[str],
+    template: str,
+    subject: str,
+    content: dict,
+    html: str,
+    text: str,
+) -> InternalEmail:
+    """Send a system email (a repayment reminder, a fee invoice) from the
+    chosen account. Logged in internal_emails under its owner and counted
+    towards their hourly limit like any of their sends. Raises the same
+    HTTPExceptions as an admin's send (409 reconnect, 429, 502); a caller in
+    the background catches them."""
+    return await _send_logged(
+        db,
+        account=sender.account,
+        refresh_token=sender.refresh_token,
+        actor=sender.user,
+        recipients=recipients,
+        template=template,
+        subject=subject,
+        content=content,
+        html=html,
+        text=text,
+        ip_address=None,
+    )
+
+
+def render_system_email(content: EmailContent) -> tuple[str, str]:
+    """(html, text) for a system email in one of the composer's templates."""
+    return _render(content)
+
+
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #

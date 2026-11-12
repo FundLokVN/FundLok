@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin import funding as admin_funding
 from app.admin import repayments as admin_repayments
+from app.admin.fee_notice.service import run_fee_invoice_emails
 from app.admin import service
 from app.admin.access_log import audit_admin_read
 from app.admin.schemas import (
@@ -424,14 +425,20 @@ async def list_funding_rounds(
 async def advance_funding_round(
     window_id: UUID,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """Do what is due on a round now: start its close when it is due, and once nothing is pending, form the loan
-    and create the daily repayment days. Stands in for the scheduled job, which is not deployed. Audited."""
-    return await admin_funding.advance_round(
+    and create the daily repayment days. Stands in for the scheduled job, which is not deployed. Audited.
+
+    Closing the round issues the SME's platform activation-fee invoice; it is emailed to the SME after this
+    responds (app/admin/fee_notice), along with any earlier one whose email failed."""
+    round_ = await admin_funding.advance_round(
         db, window_id, actor=current_user, ip_address=request.client.host if request.client else None
     )
+    background_tasks.add_task(run_fee_invoice_emails)
+    return round_
 
 
 @router.get(
