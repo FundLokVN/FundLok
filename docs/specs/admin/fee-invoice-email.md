@@ -69,8 +69,9 @@ SENDING left by a crash mid-send is never retried (the email may have gone).
    closes (the scheduled worker is not deployed), so the email goes out right
    after the round closes, which is right after the last investor's transfer
    is confirmed and counted. Each run sweeps every invoice not yet emailed, so
-   a failed one is retried by the next Advance. `fee_invoice_email_job` is the
-   ARQ job to register next to `invoice_job` once a worker is deployed.
+   a failed one is retried by the next Advance. Cloud Scheduler also calls it
+   daily at 15:05 ICT (`POST /internal/jobs/fee-invoice-emails`,
+   `docs/specs/scheduled_jobs/cloud-scheduler-jobs.md`).
 2. **Which invoices.** `SME_ACTIVATION`, status `ISSUED`, issued within
    `sme_invoice_due_days` (7). A paid, overdue, voided or older invoice is
    never emailed, so the first run does not send old invoices.
@@ -113,8 +114,6 @@ SENDING left by a crash mid-send is never retried (the email may have gone).
 
 ## 9. Open Questions
 
-- Edward: register `fee_invoice_email_job` on the direct-transfer worker when
-  it is deployed (it closes rounds on its own then, without an Advance).
 - Are `FUNDLOK_FEE_*` set on the prod-api service? Without them the email has
   no account to pay into.
 - Should the SME also get an in-app notification and an invoice screen?

@@ -24,26 +24,22 @@ payment period is emailed, so no old or settled invoice is sent when this
 first runs.
 """
 
-import asyncio
 import datetime as dt
 import html
 import logging
 from uuid import UUID
 
-from fastapi import HTTPException
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin import system_email
 from app.admin.fee_notice.models import (
-    CHANNEL_GMAIL,
-    CHANNEL_PLATFORM,
     STATUS_FAILED,
     STATUS_SENDING,
     STATUS_SENT,
     FeeInvoiceNotice,
 )
-from app.admin.internal_email import service as email_service
 from app.admin.internal_email.schemas import EmailContent
 from app.core.config import settings
 from app.core.database import SessionLocal
@@ -53,19 +49,12 @@ from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.models import FeeInvoice, FundingWindow
 from app.lending.models import Project
 from app.users.models import User
-from app.utils.email import send_email
 
 logger = logging.getLogger(__name__)
 
 KIND = "SME_ACTIVATION"
 # Tries per invoice before it is left FAILED for a person to look at.
 MAX_ATTEMPTS = 5
-
-
-class _NotSent(Exception):
-    def __init__(self, code: str):
-        super().__init__(code)
-        self.code = code
 
 
 def _vnd(amount: int) -> str:
@@ -201,40 +190,6 @@ async def _finish(db: AsyncSession, invoice_id, **values) -> None:
     await db.commit()
 
 
-async def _deliver(
-    db: AsyncSession, *, to: str, content: EmailContent, invoice_id: UUID
-) -> tuple[str, str]:
-    """Send it; (channel, from address). The reminder sender first, the
-    platform relay if that cannot."""
-    html_body, text = email_service.render_system_email(content)
-    sender = await email_service.resolve_reminder_sender(db)
-    if sender is not None:
-        try:
-            await email_service.send_as_reminder_sender(
-                db,
-                sender,
-                recipients=[to],
-                template=content.template,
-                subject=content.subject,
-                content={"fee_invoice_id": str(invoice_id), "heading": content.heading},
-                html=html_body,
-                text=text,
-            )
-            return CHANNEL_GMAIL, sender.account.gmail_address
-        except HTTPException as exc:
-            # The send may have left a transaction open (the hourly-limit lock).
-            await db.rollback()
-            code = (exc.headers or {}).get("X-Error-Code", str(exc.status_code))
-            logger.warning(
-                "Fee invoice %s: the reminder sender could not send (%s); using the platform email",
-                invoice_id,
-                code,
-            )
-    if not await asyncio.to_thread(send_email, to, content.subject, html_body, text):
-        raise _NotSent("INVALID_ADDRESS")
-    return CHANNEL_PLATFORM, settings.EMAILS_FROM_EMAIL
-
-
 async def send_pending_fee_invoice_emails(
     db: AsyncSession,
     *,
@@ -267,12 +222,16 @@ async def send_pending_fee_invoice_emails(
                 project_name=project.legal_name if project is not None else "",
                 params=p,
             )
-            channel, from_address = await _deliver(
-                db, to=sme.email, content=content, invoice_id=invoice_id
+            channel, from_address = await system_email.deliver(
+                db,
+                to=sme.email,
+                content=content,
+                record={"fee_invoice_id": str(invoice_id), "heading": content.heading},
+                label=f"Fee invoice {invoice_id}",
             )
         except Exception as exc:  # noqa: BLE001 - recorded on the row, retried next run
             await db.rollback()
-            code = exc.code if isinstance(exc, _NotSent) else type(exc).__name__
+            code = exc.code if isinstance(exc, system_email.NotSent) else type(exc).__name__
             logger.warning("Fee invoice %s: email not sent (%s)", invoice_id, code)
             await _finish(db, invoice_id, status=STATUS_FAILED, last_error=code[:100])
             continue

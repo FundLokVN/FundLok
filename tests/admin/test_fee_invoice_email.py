@@ -14,6 +14,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from app.admin import system_email
 from app.admin.fee_notice import service
 from app.admin.fee_notice.models import FeeInvoiceNotice
 from app.direct_transfer.models import FeeInvoice
@@ -38,8 +39,8 @@ def outbox(monkeypatch):
     async def no_sender(db):
         return None
 
-    monkeypatch.setattr(service, "send_email", fake_send_email)
-    monkeypatch.setattr(service.email_service, "resolve_reminder_sender", no_sender)
+    monkeypatch.setattr(system_email, "send_email", fake_send_email)
+    monkeypatch.setattr(system_email.email_service, "resolve_reminder_sender", no_sender)
     return sent
 
 
@@ -119,8 +120,8 @@ async def test_the_reminder_sender_goes_first(db_session, outbox, monkeypatch):
     async def send(db, chosen, **kwargs):
         calls.append(kwargs)
 
-    monkeypatch.setattr(service.email_service, "resolve_reminder_sender", sender)
-    monkeypatch.setattr(service.email_service, "send_as_reminder_sender", send)
+    monkeypatch.setattr(system_email.email_service, "resolve_reminder_sender", sender)
+    monkeypatch.setattr(system_email.email_service, "send_as_reminder_sender", send)
 
     assert await service.send_pending_fee_invoice_emails(db_session, now=SOON, params=world.params) == 1
     assert outbox == []
@@ -141,8 +142,8 @@ async def test_the_platform_email_takes_over_when_gmail_cannot_send(db_session, 
     async def refused(db, chosen, **kwargs):
         raise HTTPException(status_code=502, detail="down", headers={"X-Error-Code": "GMAIL_UNAVAILABLE"})
 
-    monkeypatch.setattr(service.email_service, "resolve_reminder_sender", sender)
-    monkeypatch.setattr(service.email_service, "send_as_reminder_sender", refused)
+    monkeypatch.setattr(system_email.email_service, "resolve_reminder_sender", sender)
+    monkeypatch.setattr(system_email.email_service, "send_as_reminder_sender", refused)
 
     assert await service.send_pending_fee_invoice_emails(db_session, now=SOON, params=world.params) == 1
     assert [e["to"] for e in outbox] == [world.sme.email]
@@ -155,12 +156,12 @@ async def test_a_failed_send_is_retried_by_the_next_run(db_session, outbox, monk
     def smtp_down(*args, **kwargs):
         raise smtplib.SMTPServerDisconnected("gone")
 
-    monkeypatch.setattr(service, "send_email", smtp_down)
+    monkeypatch.setattr(system_email, "send_email", smtp_down)
     assert await service.send_pending_fee_invoice_emails(db_session, now=SOON, params=world.params) == 0
     notice = await _notice(db_session, invoice)
     assert (notice.status, notice.attempts, notice.last_error) == ("FAILED", 1, "SMTPServerDisconnected")
 
-    monkeypatch.setattr(service, "send_email", lambda to, subject, html, text=None: outbox.append(to) or True)
+    monkeypatch.setattr(system_email, "send_email", lambda to, subject, html, text=None: outbox.append(to) or True)
     assert await service.send_pending_fee_invoice_emails(db_session, now=SOON, params=world.params) == 1
     notice = await _notice(db_session, invoice)
     assert (notice.status, notice.attempts, notice.last_error) == ("SENT", 2, None)
