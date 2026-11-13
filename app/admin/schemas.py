@@ -931,6 +931,41 @@ class AdminRepaymentReceiptOut(BaseModel):
     original_filename: str | None = None
     content_type: str | None = None
     open_report: bool = False
+    # The ticket's late days (app/admin/repayments.py `overdue_summary`): days the business has not marked paid
+    # after their due date. ``tranche_overdue_days`` counts due dates; the amount is what it owes for them (net).
+    tranche_overdue_days: int = 0
+    tranche_overdue_net_vnd: int = 0
+    tranche_oldest_overdue_date: date | None = None
+    tranche_working_days_late: int = 0
+
+
+class AdminOverdueRepaymentOut(BaseModel):
+    """One investor ticket the business is late repaying: days still DUE (not marked paid, no receipt) after
+    their due date. ``overdue_days`` counts due dates; ``working_days_late`` counts the working days since the
+    oldest one (that day included, today not: a day due Monday and unpaid on Tuesday is 1 working day late);
+    ``overdue_net_vnd`` is what the business owes the investor for them."""
+
+    tranche_id: UUID
+    window_id: UUID
+    project_name: str
+    reference_code: str
+    business: ActorOut
+    investor: ActorOut
+    overdue_days: int
+    oldest_due_date: date
+    working_days_late: int
+    overdue_net_vnd: int
+
+
+class AdminOverdueRepaymentsOut(BaseModel):
+    """Every late repayment on the platform as of ``as_of`` (today, ICT), most working days late first."""
+
+    as_of: date
+    tickets: int
+    businesses: int
+    overdue_days: int
+    overdue_net_vnd: int
+    items: list[AdminOverdueRepaymentOut]
 
 
 class AdminRepaymentPreviewOut(ProjectedScheduleOut):

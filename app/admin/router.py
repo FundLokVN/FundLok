@@ -22,6 +22,7 @@ from app.admin.schemas import (
     AdminReceiptDecisionRequest,
     AdminReceiptFieldsRequest,
     AdminReceiptUrlResponse,
+    AdminOverdueRepaymentsOut,
     AdminRepaymentPreviewOut,
     AdminRepaymentReceiptOut,
     AdminTransferDecisionRequest,
@@ -640,6 +641,22 @@ async def list_repayment_receipts(
     first. Read-only: the investor confirms a repayment, not staff. Reads are logged (both parties' names and
     accounts)."""
     return await admin_repayments.list_receipts(db, status=status, page=page, page_size=page_size)
+
+
+# Before "/funding/repayments/{receipt_id}", which would otherwise take "overdue" for a receipt id.
+@router.get(
+    "/funding/repayments/overdue",
+    response_model=AdminOverdueRepaymentsOut,
+    dependencies=[Depends(audit_admin_read("TRANSFER"))],
+)
+async def list_overdue_repayments(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Investor tickets a business is late repaying: days not marked paid (no receipt) after their due date, with
+    how many days, how many working days late and the amount owed. Most working days late first. Display only: no
+    arrears state. Reads are logged (both parties' names)."""
+    return await admin_repayments.list_overdue(db)
 
 
 @router.get(
