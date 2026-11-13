@@ -1,4 +1,5 @@
-"""Zalo ZBS Template Message (formerly ZNS) client for one-time codes.
+"""Zalo ZBS Template Message (formerly ZNS) client: one-time codes, and the SME's daily repayment reminder
+(app/scheduled_jobs/zalo_reminders.py).
 
 Spec: docs/specs/users/phone-verification.md
 
@@ -211,11 +212,22 @@ async def access_token(*, stale: str | None = None) -> str:
 
 async def send_otp(to: str, code: str, *, tracking_id: str) -> None:
     """Send `code` to `to` (84xxxxxxxxx) through the OTP template."""
-    _require("ZALO_APP_ID", "ZALO_APP_SECRET", "ZALO_ZBS_OTP_TEMPLATE_ID", "ZALO_TOKEN_ENCRYPTION_KEY")
+    _require("ZALO_ZBS_OTP_TEMPLATE_ID")
+    await send_template(
+        to,
+        settings.ZALO_ZBS_OTP_TEMPLATE_ID,
+        {settings.ZALO_ZBS_OTP_PARAM: code},
+        tracking_id=tracking_id,
+    )
+
+
+async def send_template(to: str, template_id: str, template_data: dict[str, str], *, tracking_id: str) -> None:
+    """Send an approved ZBS template to `to` (84xxxxxxxxx). Every value is a string, as Zalo takes them."""
+    _require("ZALO_APP_ID", "ZALO_APP_SECRET", "ZALO_TOKEN_ENCRYPTION_KEY")
     body = {
         "phone": to,
-        "template_id": settings.ZALO_ZBS_OTP_TEMPLATE_ID,
-        "template_data": {settings.ZALO_ZBS_OTP_PARAM: code},
+        "template_id": template_id,
+        "template_data": template_data,
         "tracking_id": tracking_id,
     }
     if settings.ZALO_ZBS_DEVELOPMENT_MODE:

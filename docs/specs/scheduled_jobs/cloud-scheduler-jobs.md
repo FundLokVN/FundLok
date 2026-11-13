@@ -1,13 +1,13 @@
-# Spec: Scheduled jobs through Google Cloud Scheduler (and the daily repayment reminder)
+# Spec: Scheduled jobs through Google Cloud Scheduler (and the daily repayment reminder, by email and Zalo)
 
 | Field | Value |
 |---|---|
 | **Status** | IMPLEMENTED |
 | **Owner** | Phat |
-| **Implementer(s)** | Phat (`app/scheduled_jobs/`, `app/admin/system_email.py`) |
+| **Implementer(s)** | Phat (`app/scheduled_jobs/`, `app/admin/system_email.py`, `app/phone_verification/zalo.py`) |
 | **Module** | `app/scheduled_jobs/` |
-| **Version** | 1.0 |
-| **Date** | 2026-11-12 |
+| **Version** | 1.1 (Zalo reminder) |
+| **Date** | 2026-11-13 |
 | **Related ADR** | ADR-009 |
 | **Depends on** | `docs/specs/admin/internal-email.md` v2.1 (reminder sender), `docs/specs/admin/fee-invoice-email.md`, Edward's `app/direct_transfer/repayment.todays_payments` |
 
@@ -32,6 +32,9 @@ fee invoice emails.
   repayment-day presume/settle, `invoice_job`, CIC). They can be exposed the
   same way, but they change money state and are his to decide.
 - Reminders to investors; lateness, arrears or late fees (out of MVP scope).
+- A Zalo message for the fee-invoice job, or for earlier unpaid days (the
+  template says "due today"; staff see late days in red on Admin >
+  Transactions > Repayments, `docs/specs/admin/overdue-repayments-admin.md`).
 - A VietQR image in the email.
 
 ## 3. Data Model
@@ -49,14 +52,30 @@ attempts INT DEFAULT 1, last_error TEXT NULL           -- a code, never a messag
 created_at, updated_at TIMESTAMPTZ; sent_at TIMESTAMPTZ NULL
 ```
 
+### Table: `repayment_zalo_reminders` (migration `5b8e2c1d9f40`)
+
+```
+tranche_id     UUID  → tranches(id) ON DELETE CASCADE ┐ PK
+reminder_date  DATE  (the ICT working day)             ┘
+sme_user_id    UUID  → users(id) ON DELETE CASCADE
+status         TEXT  SENDING | SENT | FAILED
+sent_to        TEXT  the 84xxxxxxxxx number
+amount_vnd BIGINT, days_left INT                       -- what the message said
+attempts INT DEFAULT 1, last_error TEXT NULL           -- ZALO_<code> or a short name
+created_at, updated_at TIMESTAMPTZ; sent_at TIMESTAMPTZ NULL
+```
+
 ### Configuration (environment on prod-api)
 
 | Variable | Value |
 |---|---|
 | `SCHEDULER_SERVICE_ACCOUNT` | `cloud-scheduler@fundlok.iam.gserviceaccount.com` |
 | `SCHEDULER_AUDIENCE` | the prod-api URL the jobs use as OIDC audience |
+| `ZALO_ZBS_REMINDER_TEMPLATE_ID` | `666161` (the approved `fundlok_reminder` template). Unset: no Zalo reminder |
 
-Either unset: every job answers 503.
+Either scheduler variable unset: every job answers 503. The Zalo reminder also
+needs the OTP's `ZALO_APP_ID`, `ZALO_APP_SECRET`, `ZALO_OA_REFRESH_TOKEN`,
+`ZALO_TOKEN_ENCRYPTION_KEY` (already set on prod-api).
 
 ## 4. API Contract
 
@@ -69,14 +88,17 @@ Not in the OpenAPI schema; the web app never calls them.
 
 ```
 Authorization: Bearer <Google-signed OIDC ID token>
-JobResult { job: str, sent: int, failed: int, skipped: str | null }   -- skipped: NOT_A_WORKING_DAY
+JobResult { job: str, sent: int, failed: int, skipped: str | null,   -- skipped: NOT_A_WORKING_DAY
+            zalo: { sent: int, failed: int, skipped: str | null } | null }
+-- zalo: repayment-reminders only; skipped NOT_CONFIGURED | NOT_A_WORKING_DAY
 ```
 401 no/invalid token (an app session is not one), 403 a token for another
 account or unverified email, 503 not configured or maintenance mode.
 
 ## 5. State Machine
 
-`repayment_reminders`, per SME per day, as `fee_invoice_notices`:
+`repayment_reminders` (per SME per day) and `repayment_zalo_reminders` (per
+ticket per day), as `fee_invoice_notices`:
 `(none) → SENDING → SENT | FAILED`; `FAILED → SENDING` on a later run that day
 while `attempts < 3`; `SENDING` left by a crash is never retried.
 
@@ -106,6 +128,21 @@ while `attempts < 3`; `SENDING` left by a crash is never retried.
    Gmail account (System settings) through the Gmail API, else the platform
    SMTP relay. Gmail sends count towards that admin's 200 recipients an hour;
    past it, the relay takes over.
+7. **Zalo repayment reminder** (`app/scheduled_jobs/zalo_reminders.py`). Same
+   call as the email, after it. The `fundlok_reminder` ZBS template names one
+   investment code, so the SME gets **one message per investor ticket** with a
+   day due **today** still `DUE` (no receipt uploaded; uploading makes it
+   `PRESUMED_PAID`, so an SME that paid before 15:00 gets nothing). Earlier
+   unpaid days alone send nothing. Parameters, all strings: `company_name`
+   (project legal name, at most 200 characters), `reference_code` (the
+   ticket's memo), `due_date` (today, dd/mm/yyyy), `amount_due` (today's net
+   for that investor, digits only), `days_left` (the ticket's repayment days
+   after today). Sent only to an SME that is not suspended and has proven its
+   phone (`phone_verified_at`): an unproven number may be someone else's.
+   Through `zalo.send_template`, the OTP's client and token chain;
+   `tracking_id` = `rr` + yymmdd + 24 hex of the ticket id (32 characters).
+   Each message costs (400 đ by phone at approval), so it is claimed before it
+   is sent, like the email.
 
 ## 7. Error Cases
 
@@ -115,6 +152,9 @@ while `attempts < 3`; `SENDING` left by a crash is never retried.
 | Maintenance mode on | 503 (maintenance gate); Cloud Scheduler retries |
 | Gmail cannot send | platform relay sends |
 | Relay fails | row `FAILED`, retried by a later call that day (up to 3) |
+| Zalo refuses or is unreachable | Zalo row `FAILED` (`ZALO_<code>`), retried by a later call that day (up to 3); the email is unaffected |
+| A `ZALO_*` setting missing | one row `FAILED` (`ZALO_NOT_CONFIGURED`), the rest of the run skipped |
+| `ZALO_ZBS_REMINDER_TEMPLATE_ID` unset | no Zalo message; `zalo.skipped = NOT_CONFIGURED` |
 
 ## 8. Acceptance Criteria (`tests/scheduled_jobs/test_cloud_scheduler_jobs.py`)
 
@@ -126,6 +166,17 @@ while `attempts < 3`; `SENDING` left by a crash is never retried.
 - `test_days_marked_paid_are_not_reminded`
 - `test_only_earlier_days_still_get_a_reminder`
 - `test_a_failed_reminder_is_retried_by_the_next_run`
+
+Zalo (`tests/scheduled_jobs/test_zalo_repayment_reminders.py`):
+- `test_the_template_gets_every_parameter_as_text`
+- `test_each_ticket_due_today_and_not_paid_gets_one_message`
+- `test_a_ticket_the_sme_uploaded_a_receipt_for_gets_nothing`
+- `test_only_earlier_unpaid_days_send_nothing`
+- `test_an_unproven_phone_gets_nothing`
+- `test_nothing_without_the_template_or_on_a_day_off`
+- `test_a_message_zalo_refused_is_retried_by_the_next_run`
+- `test_a_missing_zalo_setting_stops_the_run_after_one_try`
+- `test_the_scheduler_call_reports_the_zalo_messages_too`
 
 ## 9. Setting up Cloud Scheduler (once, after the code is deployed)
 

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.fee_notice.service import send_pending_fee_invoice_emails
 from app.core.database import get_db
-from app.scheduled_jobs import reminders
+from app.scheduled_jobs import reminders, zalo_reminders
 from app.scheduled_jobs.auth import require_scheduler
 
 router = APIRouter(
@@ -23,20 +23,32 @@ router = APIRouter(
 )
 
 
+class ChannelResult(BaseModel):
+    sent: int
+    failed: int = 0
+    # Why nothing ran (NOT_CONFIGURED, NOT_A_WORKING_DAY), when nothing did.
+    skipped: str | None = None
+
+
 class JobResult(BaseModel):
     job: str
     sent: int
     failed: int = 0
     # Why nothing ran (NOT_A_WORKING_DAY), when nothing did.
     skipped: str | None = None
+    # repayment-reminders only: the Zalo messages the same run sent.
+    zalo: ChannelResult | None = None
 
 
 @router.post("/repayment-reminders", response_model=JobResult)
 async def run_repayment_reminders(db: AsyncSession = Depends(get_db)):
     """Daily, 15:00 ICT: email each SME what is due today and what earlier
-    days are not yet marked paid. Nothing on a non-working day."""
+    days are not yet marked paid, then send it a Zalo message for each
+    investor ticket due today it has not marked paid (when the template is
+    configured). Nothing on a non-working day. `sent`/`failed` are the emails."""
     result = await reminders.send_repayment_reminders(db)
-    return JobResult(job="repayment-reminders", **result)
+    zalo = await zalo_reminders.send_zalo_reminders(db)
+    return JobResult(job="repayment-reminders", **result, zalo=ChannelResult(**zalo))
 
 
 @router.post("/fee-invoice-emails", response_model=JobResult)

@@ -240,6 +240,10 @@ class Settings(BaseSettings):
     # Sends with "mode": "development": Zalo delivers only to admins of the
     # app or the OA. For trying the template out; never on in production.
     ZALO_ZBS_DEVELOPMENT_MODE: bool = False
+    # The approved ZBS template the 15:00 repayment reminder sends the SME: one
+    # message per investor ticket due today that it has not marked paid
+    # (app/scheduled_jobs/zalo_reminders.py). Unset: no Zalo reminder is sent.
+    ZALO_ZBS_REMINDER_TEMPLATE_ID: str | None = None
 
     # ARQ worker (T2 -- HANDOFF-03). The daily repayment batch and ML scoring
     # run through ARQ, never BackgroundTasks (CLAUDE.md). Points at the
