@@ -86,7 +86,7 @@ GradingInput  (frozen)
 ├── industry                        str          must be in params.supported_industries
 ├── company_size                    Literal["micro","small","medium"]
 ├── loan_size_vnd                   Decimal      20_000_000 … 100_000_000
-├── duration_months                 int          one of 3, 6, 9, 12
+├── duration_months                 int          one of 1–6 (`allowed_durations_months` in `grading_params_v1.yaml`)
 ├── operating_months                int          ≥ 0
 ├── monthly_revenue                 tuple[Decimal, ...]   EXACTLY 24 values, m1 … m24
 ├── cogs_y1                         Decimal
@@ -351,7 +351,7 @@ against the fixture's pricing columns (which is why the fixture does not include
 | One or more AI scores absent | Deterministic factors scored; affected group averaged over present factors only | `decision="AI_PENDING"`, missing factors `None` |
 | A bonus factor is `None` | Contributes 0 to its group | normal result, that factor `None` |
 | **`profit ≤ 0`** (so `scsr_ratio` is negative or undefined) | `raise ValueError` — see §9 Q3. Do **not** score it; a negative ratio scores ~100 on this curve, i.e. a loss-making SME would be rewarded | exception propagates to spec 2's service layer |
-| `duration_months` not in {3,6,9,12} | `raise ValueError` | exception |
+| `duration_months` not in `allowed_durations_months` (1–6) | `raise ValueError` | exception |
 | `loan_size_vnd` outside 20m–100m | `raise ValueError` | exception |
 | `industry` not in `supported_industries` | `raise ValueError` | exception |
 | `bank_rate_pct >= 20` | `raise ValueError` | exception |

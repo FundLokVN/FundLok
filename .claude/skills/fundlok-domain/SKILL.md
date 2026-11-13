@@ -133,7 +133,7 @@ already recovered part) and is borne by the investor.
 never write longer**. The declared term also sets the backstop date.
 > ⚠️ Divergence to resolve, not to paper over: the handbook says the declared
 > term is **6 or 12 months**, while `grading_params_v1.yaml` has
-> `allowed_durations_months: [3, 6, 9, 12]`. Flag this rather than silently
+> `allowed_durations_months: [1, 2, 3, 4, 5, 6]` (Loc, handbook v3.1 Money flow tab, symbol M: Loan Duration 1 to 6 months). Flag this rather than silently
 > aligning either side.
 
 ---
