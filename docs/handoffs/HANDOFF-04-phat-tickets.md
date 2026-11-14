@@ -118,9 +118,8 @@ Static content per bank (Techcombank first): how to create a daily standing orde
 
 ## Epic 3 — Staff (admin)
 
-### 3.1 Payment-account approval
-`POST /payment-accounts` (user): `{ "holder_type": "INDIVIDUAL|ENTITY", "bank_bin": "970407", "bank_name": "string", "account_number": "string", "account_name": "string", "evidence_file_id": "uuid" }` -> `PaymentAccountOut { id, status:"PENDING", … }`.
-Staff: `POST /admin/direct-transfer/payment-accounts/{id}/decision` `{ "decision": "APPROVED|REJECTED", "reason": "string" }`. Service: `decide_payment_account`.
+### 3.1 Payment-account verification (staff, investors and SMEs)
+Built by Phat on `main` (`GET /admin/payment-accounts`, `POST /admin/payment-accounts/{id}/decision`, audit rows). The rule that applies is **HANDOFF-05** (`docs/handoffs/HANDOFF-05-account-verification.md`, D-031): every account is verified against the bank's holder name, for investors and SMEs. Use HANDOFF-05 for the decision body, the error codes and the screens.
 
 ### 3.2 Exceptions queue
 `GET /admin/direct-transfer/exceptions` -> `[ { "kind": "AWAITING_FIELDS|RECEIPT_MISMATCH|LATE_RECEIPT", "tranche_id","transfer_id","amount_vnd","reference_code","failure_codes":[…],"parsed_fields":{…}|null,"file_url","timeline":[ evidence_log rows ] } ]`.

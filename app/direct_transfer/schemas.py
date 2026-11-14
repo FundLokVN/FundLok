@@ -78,6 +78,11 @@ class PaymentAccountOut(_Out):
     rejection_reason: str | None = None
     created_at: dt.datetime
     approved_at: dt.datetime | None = None
+    # Not stored: computed on read (accounts.annotate_name_match). `name_match` False means the account name
+    # differs from the verified name (the investor's KYC name; the SME's KYB business name): show the investor a
+    # warning, and staff the expected name beside it. None means there is no verified name to compare with.
+    name_match: bool | None = None
+    expected_name: str | None = None
 
 
 class PaymentOut(_Out):

@@ -14,8 +14,12 @@ async def _save(client, user, number="19036789012"):
     return resp.json()
 
 
-async def _decide(client, admin, account_id, decision, note=None):
+async def _decide(client, admin, account_id, decision, note=None, holder="Test User", accept=True):
+    """`holder` is the account holder name as the bank shows it (an investor's must equal their KYC name, which
+    make_user sets to "Test User"); `accept` accepts a difference for an SME with no verified company name."""
     body = {"decision": decision} | ({"note": note} if note is not None else {})
+    if decision == "APPROVED":
+        body |= {"verified_holder_name": holder, "accept_difference": accept}
     return await client.post(f"/admin/payment-accounts/{account_id}/decision", json=body, headers=admin["headers"])
 
 
@@ -93,7 +97,7 @@ async def test_a_decision_is_final(client, make_admin, make_user):
     admin = await make_admin()
     investor = await make_user(role="INVESTOR")
     account = await _save(client, investor)
-    assert (await _decide(client, admin, account["id"], "APPROVED")).status_code == 200
+    assert (await _decide(client, admin, account["id"], "APPROVED", note="Checked at the bank")).status_code == 200
 
     again = await _decide(client, admin, account["id"], "REJECTED", note="changed my mind")
     assert again.status_code == 409
@@ -113,5 +117,50 @@ async def test_only_admins_review_bank_accounts(client, make_user):
 
 async def test_unknown_account_is_not_found(client, make_admin):
     admin = await make_admin()
-    resp = await _decide(client, admin, "00000000-0000-0000-0000-000000000000", "APPROVED")
+    resp = await _decide(client, admin, "00000000-0000-0000-0000-000000000000", "APPROVED", note="checked")
     assert resp.status_code == 404
+
+
+# --- verifying the bank's holder name (D-031, Edward and Loc 2026-10-30) ------------------------------
+
+async def test_approving_needs_a_note_too(client, make_admin, make_user):
+    admin = await make_admin()
+    account = await _save(client, await make_user(role="INVESTOR"))
+    resp = await _decide(client, admin, account["id"], "APPROVED")
+    assert resp.status_code == 422 and resp.headers["X-Error-Code"] == "REASON_REQUIRED"
+
+
+async def test_approving_needs_the_holder_name_as_the_bank_shows_it(client, make_admin, make_user):
+    admin = await make_admin()
+    account = await _save(client, await make_user(role="INVESTOR"))
+    resp = await client.post(
+        f"/admin/payment-accounts/{account['id']}/decision",
+        json={"decision": "APPROVED", "note": "looked it up"}, headers=admin["headers"],
+    )
+    assert resp.status_code == 422 and resp.headers["X-Error-Code"] == "HOLDER_NAME_REQUIRED"
+
+
+async def test_an_investor_account_cannot_be_approved_when_the_bank_name_differs_from_kyc(client, make_admin, make_user):
+    admin = await make_admin()
+    account = await _save(client, await make_user(role="INVESTOR", full_name="Nguyen Van A"))
+    resp = await _decide(client, admin, account["id"], "APPROVED", note="checked", holder="TRAN THI B", accept=True)
+    assert resp.status_code == 409 and resp.headers["X-Error-Code"] == "HOLDER_NAME_MISMATCH"  # accept is ignored
+    ok = await _decide(client, admin, account["id"], "APPROVED", note="checked at the bank", holder="NGUYEN VAN A")
+    assert ok.status_code == 200, ok.text  # case and accents do not matter
+
+
+async def test_an_sme_difference_needs_to_be_accepted_explicitly(client, make_admin, make_user):
+    admin = await make_admin()
+    account = await _save(client, await make_user(role="SME"))
+    refused = await _decide(client, admin, account["id"], "APPROVED", note="CTY = CONG TY", holder="CTY TNHH ABC", accept=False)
+    assert refused.status_code == 409 and refused.headers["X-Error-Code"] == "HOLDER_NAME_MISMATCH"
+    ok = await _decide(client, admin, account["id"], "APPROVED", note="CTY = CONG TY, bank letter seen", holder="CTY TNHH ABC", accept=True)
+    assert ok.status_code == 200, ok.text
+
+
+async def test_the_queue_shows_the_name_to_check_against(client, make_admin, make_user):
+    admin = await make_admin()
+    await _save(client, await make_user(role="INVESTOR", full_name="Nguyen Van A"))
+    row = (await client.get("/admin/payment-accounts", headers=admin["headers"])).json()[0]
+    assert row["expected_name"] == "Nguyen Van A"
+    assert row["name_match"] is False  # typed "TEST": a hint only, nothing is approved by it

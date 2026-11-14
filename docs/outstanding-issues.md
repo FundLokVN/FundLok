@@ -341,6 +341,45 @@ A decision is blocking for a piece of work only if reversing it would force rewo
 **Owner.** `Loc` (ask CIC).
 **Provenance.** `Loc2.md`; HANDOFF-04 section 6.
 
+### Q-029 — Which provider for bank account-holder name lookup (automating the staff check)? `PENDING-NONBLOCKING`
+**Context.** Loc wants the manual check automated. Several providers return the holder name for a bank and account number through the NAPAS account-name inquiry (the bank list marks which banks support it: `lookupSupported`). It returns a name only: no balances or transactions, so it is not the bank-data access ruled out in D-018. `app/direct_transfer/name_lookup.py` has the hook (`BankNameLookup`); today it is `NoLookup`.
+**Options.** A. A payment-QR provider with a lookup API (for example VietQR's). B. A bank-data aggregator (SePay, Casso) if one is chosen later. C. Stay manual until volume justifies it.
+**Default.** C. The hook is built, nothing is connected.
+**Blocks.** Nothing.
+**Owner.** `Loc` (vendor, cost, terms), `Edward` (integration).
+**Provenance.** Loc, 2026-10-30, Slack: "there should be a way to automate that process".
+
+### Q-030 — Reviewing a rejected account instead of opening a new one `PENDING-NONBLOCKING`
+**Context.** A decision is final, and the database allows one entry per user, bank and account number, so a rejected account number cannot be saved again, even when the problem was fixable. Loc wants, for the future, "a review system instead of them having to open a whole new account".
+**Options.** A. Re-submission: the duplicate rule ignores REJECTED entries (a migration). B. Staff can reopen a rejected account for another look. C. Both, plus a "needs information" note.
+**Default.** None built. Until then staff should leave an account PENDING and contact the user, rejecting only when it is final.
+**Blocks.** Nothing.
+**Owner.** `Edward` (design), `Phat` (screens).
+**Provenance.** Loc, 2026-10-30, Slack.
+
+### Q-031 — Approve a bank feed for SME accounts (amends D-018)? `PENDING-BLOCKING` for any real connection
+**Context.** D-018 says no bank API and no bank-data partner. Phat proposes SePay: an SME connects its bank account to SePay, SePay POSTs each transaction to us, and we match it by reference and amount, upgrading a tranche to VERIFIED. It is Loc's own option 5 ("a read-only bank feed on the SME's account"), listed as later. Open on Loc's list: the vendor and its terms, price, consent wording, whether a read-only feed raises a "holding" concern (IBL), and OAuth/official-API banks only, never an SME's banking password. SePay's payload includes the account balance after each transaction (`accumulated`), which we would strip, and its OAuth also has webhook write scopes. Also open: **whose SePay account holds the connection**: A, FundLok's single SePay account with every SME's bank connected under it (FundLok holds the SME bank connections: heavier), or B, each SME's own SePay account with FundLok authorized through OAuth to read (the SME can revoke). Recommended: B.
+**Options.** A. Approve SePay for SME accounts after the spike and the answers above. B. Approve a different vendor. C. Stay manual (D-018).
+**Default.** C for anything real. The sandbox spike proceeds (D-033).
+**Blocks.** Any production connection and any real SME account.
+**Owner.** `Loc` (decision), `Edward` (spike), `Phat` (build).
+**Provenance.** Phat's proposal and Edward, 2026-10-31, Slack; D-018; Loc's design option 5.
+
+### Q-032 — Who paid, under a bank feed (AML) `PENDING-NONBLOCKING`
+**Context.** The SePay payload has no payer name or account. `description` sometimes names the sender, for some banks only. The feed proves the money arrived, not who sent it. Loc's standard is KYC name = bank name, to trace disbursements, refunds and disputes.
+**Options.** A. Keep the receipt for the payer-name check, cross-check `description` when present. B. Rely on `description` where banks fill it, receipt as fallback. C. Drop the receipt (a weaker payer check).
+**Default.** A.
+**Blocks.** Nothing before the spike measures how many banks fill `description`.
+**Owner.** `Edward`, `Loc`.
+**Provenance.** SePay payload documentation read 2026-10-31; Loc, 2026-10-30, Slack.
+
+### Q-033 — May the system accept or deny an investor's receipt on its own (receipt OCR)? `PENDING-BLOCKING` for switching it on
+**Context.** Staff read every receipt today (D-018, ADR-009 point 4: "confirmations rest on uploaded documents reviewed by staff"). Phat proposes reading each receipt with OCR on our own server (Tesseract in the API container, nothing sent outside, so Q-025's cross-border concern does not arise) and deciding it: a confident read that matches the payment and the business's verified account (bank, account number, holder name) confirms the ticket; one that does not match rejects the receipt and the investor uploads the right one; anything unsure goes to staff. The loan of an accepted ticket forms only when staff approve it (or the round closes), and staff can reverse either verdict. A forged receipt that matches would be accepted, as one typed in by staff would be. Spec: `docs/specs/direct_transfer/receipt-ocr.md`.
+**Options.** A. Allow it as specified. B. OCR only as a suggestion to staff (`RECEIPT_AUTO_VERDICT_ENABLED` off), staff still decide. C. No OCR.
+**Default.** B once `RECEIPT_OCR_ENABLED` is switched on; both switches are off until answered.
+**Blocks.** Switching `RECEIPT_AUTO_VERDICT_ENABLED` on in production. Not the code (built behind the switches).
+**Owner.** `Edward` (amends ADR-009 point 4 and `transfer-and-evidence.md`), `Loc`; `Minh` for whether local OCR is within Q-025 option A on the current host.
+**Provenance.** Phat, 2026-11-14 (match confirms, mismatch denies, unsure to staff, loan after staff review, receiver checked).
 ---
 
 ## Provisional rules from HANDOFF-04 (`Q-D` series)
@@ -363,6 +402,8 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | Q-D14 | Missed-day report deadline 2 working days; a later report within 5 working days is accepted into reconciliation without changing history, beyond that it is refused | section 6 |
 | Q-D15 | Investor fee invoice due 7 days after issue; unpaid past due blocks new reservations; fee fixed at signing as `amount x rate x term/12` floored per tranche | `Loc.md` fee table |
 | Q-D16 | "Repaid in full" for the one-listing lock means the facility is SETTLED and every instalment row is settled | `Loc.md` rule 1 |
+| Q-D18 | Payment-account verification (D-031): every saved account starts PENDING ("waiting verification"); the typed account name is only a hint; staff record the holder name the bank shows and approve or reject with a reason; an investor's must equal the KYC name, an SME's may differ only if accepted explicitly with the reason; a bank-name lookup may automate it later (Q-029) | Edward and Loc, 2026-10-30 |
+| Q-D19 | Bank-feed day-1 processing: money steps synchronous in one transaction, side effects in ARQ; switch to ARQ when p95 handling time exceeds 3 s over a day, or more than 1% of events are retried because we exceeded SePay's time limit, or a step needs a slow external call. A tranche reaches CONFIRMED when the feed (VERIFIED) and the receipt's payer name (ATTESTED) both pass; with no feed event the existing flow applies. Thresholds are guesses until the spike measures | Edward, 2026-10-31 |
 
 ---
 
@@ -400,6 +441,11 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | D-028 | Tranche state machine: Lok's 8 states and 9 transitions plus `SIGNED -> EXPIRED` and `CONFIRMED -> VOID` before ACTIVE. | confirmed by Edward, 2026-10-28 (E4) |
 | D-029 | Edward accepted the remaining HANDOFF-04 section 2 defaults (I-6 to I-9, I-16, I-17, I-24, I-25), staff manual receipt entry, mock signer, and SME early close only at 50% or more confirmed. They are built behind config and tagged PROVISIONAL(Q-D3..Q-D16) until Lok or Legal confirm. | confirmed by Edward, 2026-10-28 (E5) |
 | D-030 | Recommended positions on burden of proof, dispute-window length and late disputes vs CIC are the working rules (timers only, configurable). | confirmed by Edward, 2026-10-28 (E6); Lok to align (Q-026, Q-027) |
+| D-031 | **Payment accounts are verified against the bank, for investors and SMEs alike.** Standard: FundLok name = KYC (investor) or KYB (SME) name = bank account holder name. Every saved account starts PENDING ("waiting verification"); nobody can invest or open a window until it is verified. The name the user types is only a hint (it is self-declared). Staff look up the holder name at the bank (today by typing the bank and account number into a bank app's transfer screen), record it, and approve or reject, with a written reason either way. An **investor** account is approved only if the bank's name equals the KYC name (otherwise reject: AML traceability, disputes and refunds must lead to the KYC-verified person). An **SME** difference (abbreviation, trade name) can be approved only with an explicit acceptance and the reason. A decision is final. Automation (a bank-name lookup returning the holder name) comes later (Q-029). Supersedes the earlier drafts of D-031 (approve on typed-name match) and Phat's #76 (no review). | confirmed by Edward and Loc, 2026-10-30, Slack. Loc: "the standard is FL name = KYC name = bank name" |
+| D-032 | Accounts approved on save before verification existed (`approved_by` NULL, investors and SMEs): **leave them.** They are test data, not real accounts, so no migration is needed. Resolves Q-028 (option A). Before any real user data exists, delete the test data or re-verify any remaining account with `approved_by IS NULL`. | confirmed by Edward, 2026-10-30, Slack |
+| D-033 | A **sandbox-only spike** of a SePay bank feed for SME accounts is authorized (webhook receiver, event table, matching, SePay's test mode). **Nothing real connects** (no real SME bank account, no production webhook) until Loc approves Q-031, which would amend D-018. The receipt flow stays as the fallback. Spec: `docs/specs/direct_transfer/bank-feed-webhook.md` | confirmed by Edward, 2026-10-31 |
+| D-034 | Bank-feed processing design. **Idempotency has two owners:** the door (the webhook receiver: one event row per SePay `id`, resume a `RECEIVED` event, acknowledge a finished one) and every step (safe to repeat with the key `sepay:<id>`); neither excuses the other. **Day 1:** the money steps run synchronously in one database transaction (a failure rolls back and returns non-2xx so SePay retries); side effects (notifications, email) go to ARQ after commit; a reconciliation job fills gaps. **Later:** switch the money steps to ARQ when volume or latency requires (triggers in the spec); only the door changes. | confirmed by Edward, 2026-10-31 |
+| D-035 | The account-verification task (HANDOFF-05, D-031) is **delegated to Phat end to end, backend and UI.** For this task only he may edit `app/direct_transfer/accounts.py`, `name_lookup.py`, their tests, the admin route/schema/service and the frontend (an exception to the CLAUDE.md module boundaries); not the ledger, tranche state machine, fees, or migrations on other tables. He posts a plan comment on #78 before coding (Edward answers within 24 hours, otherwise proceed); Edward reviews and approves the PR in writing before merge. The exception ends when the task is merged. | confirmed by Edward, 2026-11-03 |
 
 ---
 
@@ -410,3 +456,9 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | 2026-10-16 | Edward / Claude | Created. Seeded from the Decree 94 plan, ADR-008 and Loc's replies of 2026-10-12, 10-13 and 10-16. |
 | 2026-10-22 | Edward / Claude | Reframed Q-001, Q-002 and Q-004 around the rule that FundLok holds no money (D-011). Added Q-013 to Q-016 and D-011 to D-013. Updated Q-003 with the working GPay fee. |
 | 2026-10-28 | Edward / Claude | HANDOFF-04 Phase A (P-0). Added D-014 to D-030 from Loc.md / Loc2.md and Edward decisions E1 to E6. Superseded Q-001, Q-002, Q-004, Q-006, Q-013, Q-014, Q-015, Q-016 (kept, marked). Added Q-017 to Q-027 for residual questions and the Q-D3 to Q-D16 provisional-rule table. D-023 supersedes S6. |
+| 2026-10-29 | Edward / Claude | Added D-031 (first draft), Q-D18 and Q-028. |
+| 2026-10-30 | Edward / Claude | D-031 replaced after Loc's input: payment accounts are verified against the bank's holder name for investors and SMEs. Q-D18 and Q-028 updated; added Q-029 (lookup provider) and Q-030 (review instead of a new account). |
+| 2026-10-30 | Edward / Claude | Q-028 resolved as D-032: existing accounts are test data, leave them. |
+| 2026-10-31 | Edward / Claude | Added D-033 (sandbox spike of a SePay bank feed), D-034 (idempotency ownership and day-1 sync design), Q-031 (Loc: amend D-018?), Q-032 (payer check under a feed) and Q-D19. |
+| 2026-11-03 | Edward / Claude | Added D-035: the account-verification task is delegated to Phat end to end; HANDOFF-05 gets ownership, sync rules, a definition of done and starting instructions. |
+| 2026-11-14 | Phat / Claude | Added Q-033: automatic verdict on receipts read by local OCR (`receipt-ocr.md`). |

@@ -24,7 +24,7 @@ FundLok has no bank API and no bank-data partner (D-018). Every confirmation the
 
 ## 2. Out of Scope
 
-- A real OCR, LLM or bank-data integration. **No receipt may be sent to an external AI/OCR service** (I-14, Q-025). Local OCR can be added behind `ReceiptExtractor` later.
+- A real OCR, LLM or bank-data integration. **No receipt may be sent to an external AI/OCR service** (I-14, Q-025). Local OCR can be added behind `ReceiptExtractor` later. *Proposed (DRAFT, Q-033): local OCR and an automatic verdict in `receipt-ocr.md`, behind switches that are off.*
 - Bank feeds, OAuth, SePay/Casso (ADR-009).
 - The `VERIFIED` (bank-data match) level: reserved in the enum, never set.
 - Dispute decisions (see `disputes.md`); tranche transitions (see `funding-window.md`).
@@ -54,7 +54,18 @@ payment_accounts
 ├── created_at TIMESTAMPTZ
 UNIQUE (user_id, bank_bin, account_number)
 ```
-This is **not** `linked_accounts` (the mock banking table). An SME account is `APPROVED` by staff from a bank statement or bank confirmation (ownership is otherwise unproven).
+This is **not** `linked_accounts` (the mock banking table). Who verifies an account (D-031, PROVISIONAL(Q-D18); Edward and Loc 2026-10-30). The standard is **FundLok name = KYC (investor) or KYB (SME) name = bank account holder name**, for investors and SMEs alike. Money disbursed to an SME, refunds and disputes must lead to the verified party (AML).
+
+- Every saved account starts `PENDING` ("waiting verification"). Nobody can reserve a ticket or open a window with it until it is `APPROVED`.
+- The account name the user typed is **self-declared and proves nothing**. It only produces a hint: `name_match` (does the typed name equal the KYC/KYB name) and `expected_name`, and a `PAYMENT_ACCOUNT_NAME_MISMATCH` log entry when it differs.
+- Staff verify it: they look up the holder name at the bank (today: type the bank and account number into a bank app's transfer screen, which shows the holder without moving money), compare it with the KYC/KYB name, and approve or reject. A written reason is required **either way**. To approve, staff record `verified_holder_name`, the name exactly as the bank shows it.
+  - **INVESTOR**: `verified_holder_name` must equal the KYC name (`409 HOLDER_NAME_MISMATCH` otherwise; reject the account instead). With no KYC name on file: `409 KYC_NAME_MISSING`.
+  - **SME**: the same, but a difference (an abbreviation, a trade name) can be approved with `accept_difference: true` and a reason saying why. The SME's KYB name is the newest APPROVED eKYB attempt's business name; the project's own `legal_name` is self-declared and not used. With no approved KYB there is nothing to compare, so approval also needs `accept_difference`.
+- A decision is final (`409 ALREADY_DECIDED`). A rejected account number cannot be saved again for now (Q-030).
+- Everything is in the append-only evidence log: who decided, when, the reason, the holder name seen, the expected name, whether they matched, and whether a difference was accepted.
+- **Automatic verification (later, Q-029):** `name_lookup.BankNameLookup` returns the holder name from the bank. An account is auto-approved (`approved_by` NULL) only if the name the **bank** returns equals the KYC/KYB name. No provider is connected; the default `NoLookup` leaves every account to staff.
+- Names are compared with the receipt check's normalization (`normalize_name`: case, accents, punctuation and spacing ignored). Anything else, such as "CTY" for "CONG TY", is a difference.
+- `PaymentAccountOut` carries `name_match` (`true`, `false`, or `null` when there is no verified name) and `expected_name`. Both are computed on read, not stored; the staff queue carries them too.
 
 ### New table: `evidence_files`
 

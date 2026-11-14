@@ -14,6 +14,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.admin import fees as admin_fees
 from app.admin.schemas import (
@@ -23,7 +24,9 @@ from app.admin.schemas import (
     AdminInvestorTransferOut,
     AdminReceiptFieldsRequest,
     AdminReceiptUrlResponse,
+    AdminReceiverCheckOut,
     AdminRepaymentPreviewOut,
+    AdminSystemCheckOut,
     AdminTransferDisputeOut,
     AdminTransferExpectedOut,
     AdminTransferReceiptOut,
@@ -40,6 +43,7 @@ from app.direct_transfer.models import (
     Dispute,
     DisputeEvidence,
     EvidenceFile,
+    EvidenceLog,
     FundingWindow,
     PaymentAccount,
     RepaymentDay,
@@ -50,10 +54,11 @@ from app.direct_transfer.receipts import ReceiptFields
 from app.direct_transfer.schemas import FundingWindowOut
 from app.direct_transfer.tranche_state import transition_tranche
 from app.direct_transfer.tranches import resolve_kyc_name
-from app.direct_transfer.windows import get_window_progress, lock_window
+from app.direct_transfer.windows import get_window_progress, lock_window, refresh_window_fullness
 from app.lending.models import AuditLog, Project
 from app.market.emails import receipt_notice
 from app.market.funding import expire_lapsed_holds
+from app.market import receipt_auto
 from app.market.projection import project_ticket
 from app.notifications import realtime
 from app.notifications.models import EVENT_INVESTMENT_TRANSFER_APPROVED
@@ -67,7 +72,7 @@ OPEN_ROUND_STATUSES = ("OPEN", "FULL", "CLOSING")
 
 # How the transfer list is filtered. NEEDS_ACTION is the queue: a receipt waiting to be read, or a ticket under
 # review waiting for a decision. The others group the ticket states.
-TRANSFER_FILTERS = ("ALL", "NEEDS_ACTION", "AWAITING_TRANSFER", "RECEIVED", "ENDED")
+TRANSFER_FILTERS = ("ALL", "NEEDS_ACTION", "AWAITING_TRANSFER", "RECEIVED", "ENDED", "SYSTEM_DECIDED")
 _FILTER_STATUSES = {
     "AWAITING_TRANSFER": ("RESERVED", "SIGNED"),
     "RECEIVED": ("ATTESTED", "UNDER_REVIEW", "CONFIRMED", "ACTIVE"),
@@ -100,9 +105,48 @@ def _open_dispute():
     )
 
 
+def _system_verdict_applied(verdict: str | None = None):
+    """A receipt of this ticket was decided by the system (receipt-ocr.md): `verdict`, or either."""
+    v = aliased(EvidenceLog)
+    conditions = [
+        Transfer.tranche_id == Tranche.id,
+        Transfer.kind == "DISBURSEMENT",
+        v.entity_type == "TRANSFER",
+        v.entity_id == Transfer.id,
+        v.event_type == receipt_auto.EVENT_SYSTEM_VERDICT,
+        v.payload["applied"].astext == "true",
+    ]
+    if verdict is not None:
+        conditions.append(v.payload["verdict"].astext == verdict)
+    return exists().where(*conditions)
+
+
+def _system_accepted_unreviewed():
+    """Confirmed by the system and not yet looked at by staff: its loan waits for that review."""
+    v, r = aliased(EvidenceLog), aliased(EvidenceLog)
+    return and_(
+        Tranche.status == "CONFIRMED",
+        exists().where(
+            Transfer.tranche_id == Tranche.id,
+            Transfer.kind == "DISBURSEMENT",
+            v.entity_type == "TRANSFER",
+            v.entity_id == Transfer.id,
+            v.event_type == receipt_auto.EVENT_SYSTEM_VERDICT,
+            v.payload["applied"].astext == "true",
+            v.payload["verdict"].astext == receipt_auto.ACCEPTED,
+            ~exists().where(
+                r.entity_type == "TRANSFER",
+                r.entity_id == Transfer.id,
+                r.event_type == receipt_auto.EVENT_SYSTEM_VERDICT_REVIEWED,
+            ),
+        ),
+    )
+
+
 def _needs_action():
-    # A ticket left ATTESTED waits on staff too: approval now means received, so staff settle it.
-    return or_(_receipt_waiting(), _open_dispute(), Tranche.status == "ATTESTED")
+    # A ticket left ATTESTED waits on staff too: approval now means received, so staff settle it. So does one the
+    # system confirmed: its loan starts when staff approve it.
+    return or_(_receipt_waiting(), _open_dispute(), Tranche.status == "ATTESTED", _system_accepted_unreviewed())
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +240,58 @@ async def advance_round(
 # --------------------------------------------------------------------------- #
 # transfers
 # --------------------------------------------------------------------------- #
+def _receiver_out(receiver: dict | None) -> AdminReceiverCheckOut | None:
+    if not receiver:
+        return None
+    identified = receiver.get("bank_identified") or {}
+    expected = receiver.get("expected_bank") or {}
+    return AdminReceiverCheckOut(
+        bank_read=receiver.get("bank_read"),
+        bank_identified=identified.get("short_name"),
+        bank_identified_bin=identified.get("bin"),
+        expected_bank=expected.get("short_name"),
+        expected_bank_bin=expected.get("bin"),
+        account_read=receiver.get("account_read"),
+        expected_account=receiver.get("expected_account"),
+        holder_read=receiver.get("holder_read"),
+        expected_holder=receiver.get("expected_holder"),
+    )
+
+
+async def _system_check_out(db: AsyncSession, transfer: Transfer, tranche: Tranche) -> AdminSystemCheckOut | None:
+    """The system's reading and verdict for this receipt, and staff's review of it (receipt-ocr.md)."""
+    state = await receipt_auto.system_check_state(db, transfer.id)
+    if state is None:
+        return None
+    reading = state.reading or {}
+    reviewed = state.reviewed
+    review = (reviewed.payload or {}) if reviewed else {}
+    reviewer = await db.get(User, reviewed.actor_id) if reviewed and reviewed.actor_id else None
+    return AdminSystemCheckOut(
+        verdict=state.verdict,
+        applied=state.applied,
+        suggested=state.suggested,
+        summary=state.summary,
+        failure_codes=state.failure_codes,
+        review_reasons=state.review_reasons,
+        receiver=_receiver_out(state.receiver),
+        decided_at=state.decided_at,
+        engine=reading.get("engine"),
+        confidence=reading.get("confidence"),
+        fields=reading.get("fields"),
+        field_confidence=reading.get("field_confidence") or {},
+        notes=list(reading.get("notes") or []),
+        awaiting_review=state.applied and state.verdict == receipt_auto.ACCEPTED and reviewed is None
+        and tranche.status == "CONFIRMED",
+        reviewable=state.applied and reviewed is None and tranche.status != "VOID",
+        reviewed_at=reviewed.occurred_at if reviewed else None,
+        reviewed_by=ActorOut.model_validate(reviewer) if reviewer else None,
+        review_outcome=review.get("outcome"),
+        review_reason=reviewed.reason if reviewed else None,
+        overrides_system=review.get("overrides_system"),
+    )
+
+
 async def _row(db: AsyncSession, tranche: Tranche) -> AdminInvestorTransferOut:
     window = await db.get(FundingWindow, tranche.window_id)
     project = await db.get(Project, window.project_id)
@@ -232,6 +328,7 @@ async def _row(db: AsyncSession, tranche: Tranche) -> AdminInvestorTransferOut:
     )
     receipt_waiting = bool(transfer and file and transfer.check_status == "AWAITING_FIELDS")
     dispute_open = bool(dispute and dispute.status != "DECIDED")
+    system = await _system_check_out(db, transfer, tranche) if transfer else None
     return AdminInvestorTransferOut(
         id=tranche.id,
         window_id=window.id,
@@ -250,7 +347,8 @@ async def _row(db: AsyncSession, tranche: Tranche) -> AdminInvestorTransferOut:
         receipt_submitted_at=tranche.receipt_submitted_at,
         attested_at=tranche.attested_at,
         confirmed_at=tranche.confirmed_at,
-        needs_action=receipt_waiting or dispute_open or tranche.status == "ATTESTED",
+        needs_action=receipt_waiting or dispute_open or tranche.status == "ATTESTED"
+        or bool(system and system.awaiting_review),
         transfer=(
             AdminTransferReceiptOut(
                 id=transfer.id,
@@ -261,6 +359,7 @@ async def _row(db: AsyncSession, tranche: Tranche) -> AdminInvestorTransferOut:
                 original_filename=file.original_filename if file else None,
                 content_type=file.content_type if file else None,
                 created_at=transfer.created_at,
+                system_check=system,
             )
             if transfer
             else None
@@ -281,6 +380,7 @@ async def _row(db: AsyncSession, tranche: Tranche) -> AdminInvestorTransferOut:
             payee_bank_name=payee.bank_name if payee else None,
             payee_account_number=payee.account_number if payee else None,
             payee_account_name=payee.account_name if payee else None,
+            payee_holder_name=await receipt_auto.verified_holder_name(db, payee.id) if payee else None,
             payer_kyc_name=await resolve_kyc_name(db, tranche.investor_id),
         ),
     )
@@ -296,6 +396,8 @@ async def list_transfers(
         stmt = stmt.where(Tranche.window_id == window_id)
     if status == "NEEDS_ACTION":
         stmt = stmt.where(needs_action)
+    elif status == "SYSTEM_DECIDED":
+        stmt = stmt.where(_system_verdict_applied())
     elif status in _FILTER_STATUSES:
         stmt = stmt.where(Tranche.status.in_(_FILTER_STATUSES[status]))
     total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
@@ -522,6 +624,104 @@ async def _settle_attested(
     await decide_dispute(db, dispute_id=review.id, staff_id=actor.id, outcome="NOT_RECEIVED", reason=reason, now=now)
 
 
+def _conflict(code: str, detail: str) -> HTTPException:
+    return HTTPException(status_code=409, detail=detail, headers={"X-Error-Code": code})
+
+
+async def _claim_bank_txn(db: AsyncSession, transfer: Transfer) -> None:
+    """The bank transaction a receipt the system rejected names now funds this ticket (one transaction, one
+    ticket): refused if another ticket already holds it."""
+    bank_txn_id = (transfer.parsed_fields or {}).get("bank_txn_id")
+    if not bank_txn_id:
+        return
+    if await receipt_auto.bank_txn_used_elsewhere(db, bank_txn_id, transfer.id):
+        raise _conflict("DUPLICATE_BANK_TXN", "This bank transaction already funds another ticket")
+    transfer.bank_txn_id = bank_txn_id
+
+
+async def _review_system_verdict(
+    db: AsyncSession, transfer: Transfer, tranche: Tranche, *, approve: bool, reason: str, actor: User,
+    now: dt.datetime,
+) -> receipt_auto.SystemCheckState:
+    """Staff look again at a receipt the system decided, and approve or deny it (receipt-ocr.md).
+
+    The system ACCEPTED it (ticket CONFIRMED, no loan yet): approve keeps it, and decide_receipt then forms its loan;
+    deny voids the ticket and frees its place (CONFIRMED -> VOID), unless its loan has started (round advanced or
+    closed). The system DENIED it (receipt rejected): approve records it received now, from the ticket's hold
+    (SIGNED -> ATTESTED -> CONFIRMED) or, once the hold has lapsed, as a late receipt settled as received, which
+    needs room left in the round; deny keeps the rejection. Either way the review is recorded once and is final.
+    """
+    # Locked in staff_enter_receipt_fields' order (transfer, ticket, round), so the two never deadlock.
+    await db.refresh(transfer, with_for_update=True)
+    await db.refresh(tranche, with_for_update=True)
+    window = await lock_window(db, tranche.window_id)
+    state = await receipt_auto.system_check_state(db, transfer.id)
+    if state is None or not state.applied:
+        raise _conflict("NOTHING_TO_DECIDE", "Nothing on this transfer waits for a decision")
+    if state.reviewed is not None:
+        raise _conflict("ALREADY_DECIDED", "Staff already reviewed this receipt")
+    newer = (
+        await db.execute(
+            select(Transfer.id).where(
+                Transfer.tranche_id == tranche.id, Transfer.kind == "DISBURSEMENT", Transfer.created_at > transfer.created_at
+            )
+        )
+    ).first()
+    if newer is not None:
+        raise _conflict("SUPERSEDED", "The investor uploaded a newer receipt for this ticket; review that one")
+
+    if state.verdict == receipt_auto.ACCEPTED:
+        if approve:
+            if tranche.status not in ("CONFIRMED", "ACTIVE"):
+                raise _conflict("NOTHING_TO_DECIDE", "This ticket is no longer confirmed")
+        else:
+            if tranche.status == "ACTIVE":
+                raise _conflict(
+                    "LOAN_STARTED", "This investment's loan has started; it can no longer be denied here"
+                )
+            if tranche.status != "CONFIRMED":
+                raise _conflict("NOTHING_TO_DECIDE", "This ticket is no longer confirmed")
+            await transition_tranche(
+                db, tranche, "VOID", now=now, actor_id=actor.id, actor_role="ADMIN", reason=reason,
+                void_reason="NOT_RECEIVED",
+            )
+            await refresh_window_fullness(db, window, now)
+    elif approve:  # the system DENIED it
+        if tranche.status == "SIGNED" and tranche.receipt_submitted_at is None:
+            await _claim_bank_txn(db, transfer)
+            tranche.receipt_submitted_at = transfer.created_at
+            await transition_tranche(
+                db, tranche, "ATTESTED", now=now, actor_id=actor.id, actor_role="ADMIN", reason=reason,
+                confirm_deadline=now,
+            )
+            await transition_tranche(
+                db, tranche, "CONFIRMED", now=now, actor_id=actor.id, actor_role="ADMIN", reason=reason
+            )
+        elif tranche.status == "EXPIRED":
+            if window.status not in OPEN_ROUND_STATUSES:
+                raise _conflict("ROUND_CLOSED", "The round has closed; this ticket can no longer join it")
+            await _claim_bank_txn(db, transfer)
+            tranche.receipt_submitted_at = transfer.created_at
+            await transition_tranche(
+                db, tranche, "UNDER_REVIEW", now=now, actor_id=actor.id, actor_role="ADMIN", reason=reason,
+                review_cause="LATE_RECEIPT",
+            )
+            review = await open_tranche_dispute(db, tranche=tranche, cause="LATE_RECEIPT", now=now, raised_by=actor.id)
+            await decide_dispute(db, dispute_id=review.id, staff_id=actor.id, outcome="RECEIVED", reason=reason, now=now)
+        else:
+            raise _conflict("NOTHING_TO_DECIDE", "This ticket no longer waits for this receipt")
+        transfer.check_status = "MATCHED"
+        transfer.failure_codes = []
+        transfer.confirmation_level = "CONFIRMED"
+    # Denying a receipt the system denied keeps the rejection: nothing moves.
+    await receipt_auto.record_staff_review(
+        db, transfer_id=transfer.id, state=state, outcome="APPROVED" if approve else "DENIED", reason=reason,
+        staff_id=actor.id, now=now,
+    )
+    await db.flush()
+    return state
+
+
 # What an empty note records: the decision still says how it was made.
 _DEFAULT_REASON = {True: "Approved after viewing the receipt", False: "Denied after viewing the receipt"}
 
@@ -533,8 +733,9 @@ async def decide_receipt(
 
     Approving means the money is received: the ticket is CONFIRMED and counts toward the round, with nothing left
     for the business to confirm. A ticket under review (a late receipt) is settled as received or not
-    (decide_dispute); a receipt waiting is approved or denied (_settle_receipt); a ticket left ATTESTED is
-    settled too (_settle_attested). An approval rings the business's bell.
+    (decide_dispute); a receipt waiting is approved or denied (_settle_receipt); a receipt the system read and
+    decided is reviewed, keeping or reversing its verdict (_review_system_verdict, receipt-ocr.md); a ticket left
+    ATTESTED is settled too (_settle_attested). An approval rings the business's bell (unless the system already did).
     """
     approve = outcome == "APPROVED"
     reason = (reason or "").strip() or _DEFAULT_REASON[approve]
@@ -549,6 +750,10 @@ async def decide_receipt(
         )
     ).scalar_one_or_none()
     receipt_waiting = transfer.check_status == "AWAITING_FIELDS" and transfer.evidence_file_id is not None
+    system = await receipt_auto.system_check_state(db, transfer.id)
+    reviewing_system = (
+        review is None and not receipt_waiting and system is not None and system.applied and system.reviewed is None
+    )
     try:
         if review is not None:
             await decide_dispute(
@@ -560,6 +765,8 @@ async def decide_receipt(
                 transfer.check_status = "MATCHED" if approve else "REJECTED"
         elif receipt_waiting and tranche.status == "SIGNED":
             await _settle_receipt(db, transfer, tranche, approve=approve, reason=reason, actor=actor, now=now)
+        elif reviewing_system:
+            await _review_system_verdict(db, transfer, tranche, approve=approve, reason=reason, actor=actor, now=now)
         elif tranche.status == "ATTESTED":
             await _settle_attested(db, transfer, tranche, approve=approve, reason=reason, actor=actor, now=now)
         else:
@@ -588,12 +795,23 @@ async def decide_receipt(
             "check_status": transfer.check_status,
             "tranche_status": status,
             "reason": reason,
+            # Staff reviewing what the system decided: what it decided, and whether staff reversed it.
+            **(
+                {
+                    "system_verdict": system.verdict,
+                    "overrides_system": (system.verdict == receipt_auto.ACCEPTED) != approve,
+                }
+                if reviewing_system
+                else {}
+            ),
         },
         ip_address=ip_address,
     )
+    # The business already heard of a transfer the system accepted.
+    already_told = reviewing_system and system.verdict == receipt_auto.ACCEPTED
     business = (
         await _notify_business_of_approval(db, tranche_id, status)
-        if approve and status in ("ATTESTED", "CONFIRMED", "ACTIVE")
+        if approve and status in ("ATTESTED", "CONFIRMED", "ACTIVE") and not already_told
         else None
     )
     await db.commit()
@@ -736,6 +954,8 @@ ACTIVITY_GROUPS: dict[str, tuple[str, ...]] = {
     "DECISIONS": (
         "TRANSFER_RECEIPT_CHECKED", "TRANSFER_RECEIPT_REJECTED", "TRANSFER_RECEIVED", "TRANSFER_NOT_RECEIVED",
         "REPAYMENT_RECEIPT_APPROVED", "REPAYMENT_RECEIPT_DENIED",
+        # The system's own verdicts on receipts it read (receipt-ocr.md); no actor.
+        *receipt_auto.AUDIT_ACTIONS.values(),
     ),
     "INVESTOR": ("INVESTMENT_RESERVED", "INVESTMENT_RECEIPT_UPLOADED", "REPAYMENT_RECEIPT_CONFIRMED"),
     "BUSINESS": ("REPAYMENT_DAYS_MARKED_PAID", "INVESTMENT_REPORTED_MISSING"),

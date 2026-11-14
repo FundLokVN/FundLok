@@ -292,8 +292,13 @@ class AdminPaymentAccountOut(PaymentAccountOut):
 
 
 class AdminPaymentAccountDecisionRequest(AdminDecisionRequest):
-    """Approve or reject a saved bank account. A rejection needs a note (the
-    user sees it as the reason); an approval may have one."""
+    """Approve or reject a saved bank account. A note is required either way (D-031): the user sees it as the
+    reason for a rejection, and for an approval it records what was checked. To APPROVE, record the account
+    holder name exactly as the bank shows it (``verified_holder_name``): an investor's must equal their KYC name;
+    for an SME a difference needs ``accept_difference`` and a note saying why."""
+
+    verified_holder_name: str | None = Field(default=None, max_length=200)
+    accept_difference: bool = False
 
 
 class AdminConsentRecordOut(BaseModel):
@@ -751,9 +756,61 @@ class AdminFundingRoundOut(FundingWindowOut):
     fee_invoice: AdminRoundFeeOut | None = None
 
 
+class AdminReceiverCheckOut(BaseModel):
+    """The receiver on the receipt against the business's verified account: the bank as printed and as identified
+    in the NAPAS list, the account number, and the holder name against the one the bank showed when the account was
+    verified (``expected_holder`` null: never verified at the bank)."""
+
+    bank_read: str | None = None
+    bank_identified: str | None = None
+    bank_identified_bin: str | None = None
+    expected_bank: str | None = None
+    expected_bank_bin: str | None = None
+    account_read: str | None = None
+    expected_account: str | None = None
+    holder_read: str | None = None
+    expected_holder: str | None = None
+
+
+class AdminSystemCheckOut(BaseModel):
+    """What the system made of the receipt (docs/specs/direct_transfer/receipt-ocr.md).
+
+    ``verdict``: ACCEPTED (read and matched: the ticket was confirmed, its loan waits for staff), DENIED (read and
+    did not match: the receipt was rejected) or NEEDS_REVIEW (left for staff). ``applied`` is false when the verdict
+    is only a suggestion (``suggested`` says what a confident read would decide). ``failure_codes`` are the checks the
+    reading failed (the receiver's: PAYEE_MISMATCH, PAYEE_BANK_MISMATCH, PAYEE_NAME_MISMATCH); ``review_reasons`` say
+    why it was left for staff (the reading's notes, PAYEE_BANK_NOT_SHOWN, PAYEE_BANK_UNRECOGNIZED,
+    PAYEE_NAME_NOT_SHOWN, PAYEE_NAME_UNVERIFIED, LATE_RECEIPT, AUTO_VERDICT_OFF); ``receiver`` is what was compared. ``fields`` and ``field_confidence`` (0-100,
+    null for exact PDF text) are the OCR reading. ``awaiting_review``: accepted, confirmed, and no staff member has
+    looked yet (its loan has not started). ``reviewable``: staff may still approve or deny it. ``reviewed_*``: staff's
+    review, final."""
+
+    verdict: Literal["ACCEPTED", "DENIED", "NEEDS_REVIEW"]
+    applied: bool
+    suggested: Literal["ACCEPTED", "DENIED"] | None = None
+    summary: str | None = None
+    failure_codes: list[str] = []
+    review_reasons: list[str] = []
+    receiver: AdminReceiverCheckOut | None = None
+    decided_at: datetime
+    engine: str | None = None
+    confidence: float | None = None
+    fields: dict[str, Any] | None = None
+    field_confidence: dict[str, float | None] = {}
+    notes: list[str] = []
+    awaiting_review: bool = False
+    reviewable: bool = False
+    reviewed_at: datetime | None = None
+    reviewed_by: ActorOut | None = None
+    review_outcome: Literal["APPROVED", "DENIED"] | None = None
+    review_reason: str | None = None
+    overrides_system: bool | None = None
+
+
 class AdminTransferReceiptOut(BaseModel):
-    """The investor's reported transfer. ``parsed_fields`` is what staff read off the receipt (null until then);
-    ``failure_codes`` are the checks it failed against the QR FundLok issued."""
+    """The investor's reported transfer. ``parsed_fields`` is what staff (or the system, when it decided) read off
+    the receipt (null until then); ``failure_codes`` are the checks it failed against the QR FundLok issued;
+    ``system_check`` is the automatic reading and verdict, null when OCR was off for this receipt."""
 
     id: UUID
     check_status: str
@@ -763,6 +820,7 @@ class AdminTransferReceiptOut(BaseModel):
     original_filename: str | None = None
     content_type: str | None = None
     created_at: datetime | None = None
+    system_check: AdminSystemCheckOut | None = None
 
 
 class AdminTransferDisputeOut(BaseModel):
@@ -780,6 +838,7 @@ class AdminTransferExpectedOut(BaseModel):
     payee_bank_name: str | None = None
     payee_account_number: str | None = None
     payee_account_name: str | None = None
+    payee_holder_name: str | None = None  # as the bank showed it when the account was verified
     payer_kyc_name: str
 
 

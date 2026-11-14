@@ -3,6 +3,7 @@ import pytest
 from sqlalchemy import select
 
 from app.direct_transfer import vietqr
+from app.gverify.models import GVerifyKybVerification
 from app.lending.models import AuditLog
 
 TCB = "970407"  # Techcombank, in the bank list
@@ -88,7 +89,9 @@ async def test_saved_account_is_not_usable_until_an_admin_approves_it(make_user,
 
     admin = await make_admin()
     decided = await client.post(
-        f"/admin/payment-accounts/{body['id']}/decision", json={"decision": "APPROVED"}, headers=admin["headers"]
+        f"/admin/payment-accounts/{body['id']}/decision",
+        json={"decision": "APPROVED", "note": "checked at the bank", "verified_holder_name": "Test User"},
+        headers=admin["headers"],
     )
     assert decided.status_code == 200, decided.text
     db_session.expire_all()
@@ -303,3 +306,39 @@ async def test_parse_vietqr_rejects_unknown_bank(make_user, client):
     resp = await client.post("/payment-accounts/parse-vietqr", json={"payload": payload}, headers=investor["headers"])
     assert resp.status_code == 400
     assert resp.json()["detail"] == "Unsupported bank"
+
+
+# --- verification: every account waits for staff (D-031); the typed name is only a hint ------------------
+
+async def _verified_company(db_session, sme, business_name):
+    db_session.add(GVerifyKybVerification(user_id=sme["id"], status="APPROVED", document_type="COMPANY", business_name=business_name))
+    await db_session.commit()
+
+
+async def test_an_sme_account_waits_for_verification_even_when_the_typed_name_matches(make_user, client, db_session):
+    sme = await make_user(role="SME")
+    await _verified_company(db_session, sme, "CÔNG TY TNHH ABC")
+    body = (await _save(client, sme, holder_type="ENTITY", account_name="CONG TY TNHH ABC")).json()
+    assert body["status"] == "PENDING" and body["approved_at"] is None  # a typed name proves nothing
+    assert body["name_match"] is True and body["expected_name"] == "CÔNG TY TNHH ABC"
+
+
+async def test_the_hint_says_when_the_typed_name_differs(make_user, client, db_session):
+    sme = await make_user(role="SME")
+    await _verified_company(db_session, sme, "CÔNG TY TNHH ABC")
+    body = (await _save(client, sme, holder_type="ENTITY", account_name="NGUYEN VAN MULE")).json()
+    assert body["status"] == "PENDING" and body["name_match"] is False
+
+
+async def test_an_investor_account_also_waits_for_verification(make_user, client):
+    investor = await make_user(role="INVESTOR", full_name="Nguyen Van A")
+    body = (await _save(client, investor, account_name="TRAN THI B")).json()
+    assert body["status"] == "PENDING"
+    assert body["name_match"] is False and body["expected_name"] == "Nguyen Van A"
+
+
+async def test_listing_shows_the_status_and_hint_to_the_owner(make_user, client):
+    investor = await make_user(role="INVESTOR", full_name="Nguyen Van A")
+    await _save(client, investor, account_name="NGUYEN VAN A")
+    listed = (await client.get("/payment-accounts", headers=investor["headers"])).json()
+    assert [(a["status"], a["name_match"]) for a in listed] == [("PENDING", True)]

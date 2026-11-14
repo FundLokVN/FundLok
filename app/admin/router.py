@@ -396,14 +396,17 @@ async def decide_payment_account(
     current_user: User = Depends(require_admin),
 ):
     """Approve or reject a saved bank account. Only an approved account lists an
-    SME's project or lets an investor invest. Rejecting needs a note, which the
-    user sees. The decision is final and lands in the audit log with the admin
-    who made it."""
+    SME's project or lets an investor invest. A note is required either way.
+    Approving also needs the holder name as the bank shows it (must equal the
+    KYC name for an investor). The decision is final and lands in the audit log
+    with the admin who made it."""
     return await service.decide_payment_account_review(
         db,
         account_id,
         decision=body.decision.value,
         note=body.note,
+        verified_holder_name=body.verified_holder_name,
+        accept_difference=body.accept_difference,
         actor=current_user,
         ip_address=request.client.host if request.client else None,
     )
@@ -486,7 +489,7 @@ async def mark_fee_invoice_paid(
     dependencies=[Depends(audit_admin_read("TRANCHE"))],
 )
 async def list_investor_transfers(
-    status: Literal["ALL", "NEEDS_ACTION", "AWAITING_TRANSFER", "RECEIVED", "ENDED"] = "ALL",
+    status: Literal["ALL", "NEEDS_ACTION", "AWAITING_TRANSFER", "RECEIVED", "ENDED", "SYSTEM_DECIDED"] = "ALL",
     window_id: UUID | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
@@ -494,7 +497,8 @@ async def list_investor_transfers(
     current_user: User = Depends(require_admin),
 ):
     """Investor tickets and the transfers reported for them, those waiting on staff first. Reads are logged
-    (investor names and the business's account)."""
+    (investor names and the business's account). SYSTEM_DECIDED: tickets whose receipt the system read and accepted
+    or denied on its own (receipt-ocr.md), for staff to look at again."""
     return await admin_funding.list_transfers(
         db, status=status, window_id=window_id, page=page, page_size=page_size
     )
@@ -593,7 +597,10 @@ async def decide_investor_receipt(
     """Approve or deny a transfer after looking at the investor's receipt; nothing is typed in or compared.
     Approving a receipt records the investment as paid (ATTESTED: the business has two working days to say the
     money never arrived) and rings the business's bell; denying it rejects the receipt, and the investor can
-    upload the right one while the hold lasts. A ticket under review is settled as received or not. Final, and
+    upload the right one while the hold lasts. A ticket under review is settled as received or not. A receipt the
+    system read and decided (receipt-ocr.md) is reviewed: approving one it accepted starts its loan, denying it voids
+    the ticket (409 LOAN_STARTED once the loan has formed); approving one it denied records it received, denying it
+    keeps the rejection (409 SUPERSEDED when a newer receipt exists, DUPLICATE_BANK_TXN, ROUND_CLOSED). Final, and
     audited with the admin who made it."""
     return await admin_funding.decide_receipt(
         db,
