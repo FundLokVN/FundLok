@@ -389,14 +389,19 @@ class SystemCheckState:
     decided_at: dt.datetime
     reading: dict[str, Any] | None
     reviewed: EvidenceLog | None  # staff's review of an applied verdict, if any
+    payer: dict[str, Any] | None = None  # a repayment receipt's payer as read and as expected
 
 
-async def system_check_state(db: AsyncSession, transfer_id: UUID) -> SystemCheckState | None:
+async def system_check_state(
+    db: AsyncSession, transfer_id: UUID, *, entity_type: str = "TRANSFER"
+) -> SystemCheckState | None:
+    """The latest reading and verdict recorded against an investor's transfer, or (entity_type EVIDENCE_FILE, the
+    receipt's id) against a business's repayment receipt (app/market/repayment_receipt_check.py)."""
     rows = (
         await db.execute(
             select(EvidenceLog)
             .where(
-                EvidenceLog.entity_type == "TRANSFER",
+                EvidenceLog.entity_type == entity_type,
                 EvidenceLog.entity_id == transfer_id,
                 EvidenceLog.event_type.in_((EVENT_OCR_READ, EVENT_SYSTEM_VERDICT, EVENT_SYSTEM_VERDICT_REVIEWED)),
             )
@@ -420,6 +425,7 @@ async def system_check_state(db: AsyncSession, transfer_id: UUID) -> SystemCheck
         decided_at=verdict.occurred_at,
         reading=reading.payload if reading else None,
         reviewed=reviewed,
+        payer=payload.get("payer"),
     )
 
 

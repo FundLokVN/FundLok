@@ -772,8 +772,21 @@ class AdminReceiverCheckOut(BaseModel):
     expected_holder: str | None = None
 
 
+class AdminPayerCheckOut(BaseModel):
+    """A repayment receipt's payer against the business's account: the holder name as read and as the bank showed it
+    when the account was verified (``expected_holder`` null: never verified at the bank)."""
+
+    holder_read: str | None = None
+    expected_holder: str | None = None
+    expected_account: str | None = None
+
+
 class AdminSystemCheckOut(BaseModel):
     """What the system made of the receipt (docs/specs/direct_transfer/receipt-ocr.md).
+
+    On a business's repayment receipt (section 10) nothing is ever applied: ACCEPTED means it matches and the
+    investor still confirms, NEEDS_REVIEW is left to the investor, and ``payer`` is the business as payer. A
+    repayment receipt the system refused was never kept, so it has no row here (the Activity tab shows it).
 
     ``verdict``: ACCEPTED (read and matched: the ticket was confirmed, its loan waits for staff), DENIED (read and
     did not match: the receipt was rejected) or NEEDS_REVIEW (left for staff). ``applied`` is false when the verdict
@@ -792,6 +805,7 @@ class AdminSystemCheckOut(BaseModel):
     failure_codes: list[str] = []
     review_reasons: list[str] = []
     receiver: AdminReceiverCheckOut | None = None
+    payer: AdminPayerCheckOut | None = None
     decided_at: datetime
     engine: str | None = None
     confidence: float | None = None
@@ -990,6 +1004,8 @@ class AdminRepaymentReceiptOut(BaseModel):
     original_filename: str | None = None
     content_type: str | None = None
     open_report: bool = False
+    # What the system read off the receipt and how it compares (receipt-ocr.md section 10); null when not read.
+    system_check: AdminSystemCheckOut | None = None
     # The ticket's late days (app/admin/repayments.py `overdue_summary`): days the business has not marked paid
     # after their due date. ``tranche_overdue_days`` counts due dates; the amount is what it owes for them (net).
     tranche_overdue_days: int = 0

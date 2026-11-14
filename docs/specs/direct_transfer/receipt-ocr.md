@@ -5,8 +5,8 @@
 | **Status** | DRAFT. Needs Edward's review: it changes how `transfer-and-evidence.md` confirms a transfer and touches ADR-009's "confirmations rest on uploaded documents reviewed by staff" (Q-033). Built behind two switches, both off |
 | **Owner** | Phat (proposed) |
 | **Implementer(s)** | Phat (backend in `app/uploads/`, `app/market/`, `app/admin/`; admin UI). No change to `app/direct_transfer/` code |
-| **Module** | `app/uploads/parsers/bank_receipt.py`, `app/uploads/receipt_ocr.py`, `app/market/receipt_auto.py`, `app/market/funding_router.py`, `app/admin/funding.py` |
-| **Version** | 0.1 |
+| **Module** | `app/uploads/parsers/bank_receipt.py`, `app/uploads/receipt_ocr.py`, `app/market/receipt_auto.py`, `app/market/funding_router.py`, `app/admin/funding.py`; repayment receipts (section 10): `app/market/repayment_receipt_check.py`, `app/market/repayment_router.py`, `app/market/repayment_receipts.py`, `app/admin/repayments.py` |
+| **Version** | 0.2 |
 | **Date** | 2026-11-14 |
 | **Related ADR** | ADR-009 (point 4: evidence, not bank data; `ReceiptExtractor`) |
 | **Depends on** | `transfer-and-evidence.md` (receipt checks, rules 3-9), `funding-window.md` (tranche states), D-031 (verified holder name) |
@@ -23,7 +23,7 @@ Every investor receipt is read by a person today (`ManualEntryExtractor`). That 
 ## 2. Out of Scope
 
 - **Sending receipts outside the platform.** The engine is Tesseract, a local process in the API container; a bank's PDF is read from its own text layer. No external OCR or AI service is called (Q-025 still open for anything else).
-- Refund receipts (SME to investor) and repayment receipts: still read by staff.
+- Refund receipts (SME to investor): still read by staff. Repayment receipts (SME to investor, daily) are read since v0.2, as advice for the investor and to refuse a clear mismatch (section 10); the system never confirms a repayment.
 - Detecting edited or forged receipts. OCR reads what the image shows; a forged receipt that matches is accepted (as a forged one typed in by staff would be). Mitigations: staff review before the loan forms (rule 6), duplicate bank-transaction and file checks, the business's own dispute.
 - Rasterising scanned PDFs (no text layer): left to staff.
 
@@ -133,7 +133,53 @@ round advanced or closed     -> CONFIRMED tickets form their loans (existing beh
 | 2 | Is local OCR inside Q-025 option A ("local OCR later"), so it may run in production on the current host? | Minh, Loc | — |
 | 3 | Accuracy on real receipts: labels and thresholds were tuned on rendered samples only. Run with `RECEIPT_OCR_ENABLED` on and automatic decisions off, compare suggestions with staff decisions, then switch decisions on | Phat | — |
 | 4 | Should a holder-name mismatch with the right bank and account number deny, or go to staff? Built: deny (staff can reverse) | Phat | Phat, 2026-11-14: check the receiver's banking information |
-| 5 | Refund and repayment receipts | Phat | Later |
+| 5 | Refund and repayment receipts | Phat | Repayment receipts: section 10 (Phat, 2026-11-14). Refunds: later |
+| 6 | May the system refuse a business's repayment receipt (section 10, rule 3)? It only ever keeps days DUE, never confirms one, but it is an automatic decision on evidence (Q-033) | Edward | Built behind `RECEIPT_AUTO_VERDICT_ENABLED`, off |
+
+---
+
+## 10. Repayment receipts (v0.2)
+
+**Goal.** The business repays each investor directly and uploads its bank receipt (`POST /repayment/tranches/{tranche_id}/pay`, `repayment-receipt-confirmation.md`). The same local reading checks that receipt against what the business was asked to pay, so a receipt that is clearly not this repayment never marks a day paid, and the investor sees the system's check while confirming. Decisions (Phat, 2026-11-14): a match does **not** confirm (the investor still does: only their own account shows the money arrived); a clear mismatch **refuses the upload**.
+
+**Checks** (`app/market/repayment_receipt_check.py`), on a confident read only:
+
+| Check | Against | Failure |
+|---|---|---|
+| Amount, exactly | The days' net total (the VietQR's amount) | `AMOUNT_MISMATCH` |
+| Memo carries the reference | The investment's `reference_code` | `REFERENCE_MISSING` |
+| Receiver account number | The investor's account | `PAYEE_MISMATCH` |
+| Receiving bank, holder name | The investor's account, and the holder name the bank showed when it was verified (D-031), as in rule 4 | `PAYEE_BANK_MISMATCH`, `PAYEE_NAME_MISMATCH` |
+| Payer name | The holder name verified for the business's account, read the forgiving way of rule 4 (`CTY CP` = `CÔNG TY CỔ PHẦN`, truncation) | `PAYER_NAME_MISMATCH` |
+| Time | Not before the investment was confirmed, not in the future | `TIME_OUT_OF_RANGE` |
+| Bank transaction | Not on another kept repayment receipt, nor an investment's | `DUPLICATE_BANK_TXN` |
+
+**Rules.**
+
+1. **ACCEPTED** (every check passes, the receiver and payer confirmed): the receipt is kept and the days marked paid exactly as before. Nothing more: the transfers stay `AWAITING_FIELDS` for the investor, no day is matched or settled by the system.
+2. **NEEDS_REVIEW** (an unsure read; a receiver or payer the receipt does not show or that was never verified: `PAYEE_BANK_NOT_SHOWN`, `PAYEE_BANK_UNRECOGNIZED`, `PAYEE_NAME_NOT_SHOWN`, `PAYEE_NAME_UNVERIFIED`, `PAYER_NAME_UNVERIFIED`, `PAYEE_ACCOUNT_MISSING`; a mismatch with `AUTO_VERDICT_OFF`): kept and marked paid as before. **An unsure read never refuses a receipt.**
+3. **DENIED** (a confident read that fails any check, with `RECEIPT_AUTO_VERDICT_ENABLED` on): the upload is refused, 422 `RECEIPT_MISMATCH`, body `{"detail": "...", "details": {"failure_codes": [...]}}`. Nothing is stored (no evidence file, so the same file can be tried again once the switches change), no day is marked, the investor is not told. The business uploads the right receipt.
+4. **OCR runs before the days are locked**, and not on an idempotent replay.
+5. **Recorded** with a NULL actor, role `SYSTEM`: `RECEIPT_OCR_READ` and `SYSTEM_VERDICT` (payload as section 3, plus `payer`) against the receipt (entity `EVIDENCE_FILE`, the receipt's id) when kept, or against the investment (entity `TRANCHE`, with `file_sha256` and the day ids) when refused. A confident read also sets `parsed_fields` and `transferred_at` on the receipt's REPAYMENT transfers (the duplicate check reads `parsed_fields.bank_txn_id`). Audit rows `REPAYMENT_RECEIPT_SYSTEM_ACCEPTED` / `_DENIED` / `_NEEDS_REVIEW` (entity TRANCHE; `net_vnd`, `failure_codes`, `review_reasons`, `refused`, `receipt_id` or `file_sha256`) appear in the Transactions tab's Activity, under Decisions: a refused attempt is only there.
+
+**API.**
+
+- `GET /repayment/receipts`: each receipt gains `system_check` (null when not read): `result` `MATCHES` | `DOES_NOT_MATCH` | `UNSURE`, `failure_codes` (for `DOES_NOT_MATCH`), `checked_at`. A confident mismatch shows as `DOES_NOT_MATCH` even with automatic decisions off.
+- `GET /admin/funding/repayments` and `/{receipt_id}`: each receipt gains `system_check` (`AdminSystemCheckOut`, `applied` always false, plus `payer`: `holder_read`, `expected_holder`, `expected_account`). Staff do not review it; the investor confirms.
+
+**Acceptance criteria** (`tests/market/test_repayment_receipt_ocr.py`):
+
+- [x] `test_with_ocr_off_a_repayment_receipt_is_not_read`
+- [x] `test_a_matching_repayment_receipt_is_shown_as_matching_and_still_waits_for_the_investor`
+- [x] `test_a_repayment_receipt_that_does_not_match_is_refused_and_nothing_is_marked`
+- [x] `test_a_receipt_paid_to_the_wrong_receiver_or_from_another_payer_is_refused`
+- [x] `test_a_bank_transaction_already_used_for_another_repayment_is_refused`
+- [x] `test_with_automatic_decisions_off_a_mismatch_goes_through_and_is_shown`
+- [x] `test_an_unsure_read_never_refuses_a_repayment_receipt`
+- [x] `test_a_receiver_never_verified_at_the_bank_is_left_to_the_investor`
+- [x] `test_a_replayed_repayment_upload_is_not_read_again`
+
+**Not solved here.** A business that uploads nothing is not affected: its days still become `PRESUMED_PAID` by the daily job (`repayment.presume_paid_days`), which is `app/direct_transfer/`'s rule. Edited or forged receipts that read correctly still match (section 2); the investor's confirmation is the guard.
 
 ---
 
@@ -142,3 +188,4 @@ round advanced or closed     -> CONFIRMED tickets form their loans (existing beh
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-11-14 | Phat / Claude | First draft, with the implementation behind switches |
+| 0.2 | 2026-11-14 | Phat / Claude | Section 10: business repayment receipts read and checked; a clear mismatch refuses the upload, a match only advises the investor |

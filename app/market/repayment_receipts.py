@@ -31,10 +31,13 @@ from app.direct_transfer.models import (
 from app.direct_transfer.repayment import match_day
 from app.direct_transfer.tranches import mask_name
 from app.lending.models import Project
+from app.market.receipt_auto import ACCEPTED, DENIED, system_check_state
+from app.market.repayment_receipt_check import ENTITY_RECEIPT
 from app.market.schemas import (
     RepaymentReceiptAccountOut,
     RepaymentReceiptDayOut,
     RepaymentReceiptOut,
+    RepaymentSystemCheckOut,
 )
 from app.notifications import realtime
 from app.notifications.models import EVENT_REPAYMENT_RECEIPT_CONFIRMED, EVENT_REPAYMENT_RECEIPT_SUBMITTED
@@ -139,6 +142,24 @@ async def _row(db: AsyncSession, receipt_id: UUID, investor_id: UUID) -> Repayme
         original_filename=file.original_filename if file else None,
         content_type=file.content_type if file else None,
         open_report=reported,
+        system_check=await system_check_for_investor(db, receipt_id),
+    )
+
+
+_RESULTS = {ACCEPTED: "MATCHES", DENIED: "DOES_NOT_MATCH"}
+
+
+async def system_check_for_investor(db: AsyncSession, receipt_id: UUID) -> RepaymentSystemCheckOut | None:
+    """What the system read off the receipt (receipt-ocr.md section 10), as advice: a confident match or mismatch
+    whether or not automatic decisions are on, anything else unsure. Null when the receipt was not read."""
+    state = await system_check_state(db, receipt_id, entity_type=ENTITY_RECEIPT)
+    if state is None:
+        return None
+    result = _RESULTS.get(state.suggested or "", "UNSURE")
+    return RepaymentSystemCheckOut(
+        result=result,
+        failure_codes=state.failure_codes if result == "DOES_NOT_MATCH" else [],
+        checked_at=state.decided_at,
     )
 
 

@@ -50,6 +50,8 @@ No schema or Alembic migration is required. Existing tables and columns are used
 
 Returns receipts uploaded by SMEs for repayments to the authenticated investor, ordered with receipts awaiting confirmation first (`AWAITING_FIELDS`), then newest `submitted_at` first. Only receipts whose `REPAYMENT` transfers exclusively pay the authenticated investor are returned.
 
+Each receipt also carries `system_check` (`receipt-ocr.md` section 10): what the system read off it, as advice (`MATCHES`, `DOES_NOT_MATCH` with `failure_codes`, or `UNSURE`), null when OCR was off. It never confirms a receipt: the investor does.
+
 **Response 200** (`list[RepaymentReceiptOut]`)
 ```json
 [
@@ -149,6 +151,7 @@ RepaymentDay.status:
 | Investor confirms an already-confirmed receipt | No transfer is in `AWAITING_FIELDS`; no state or audit change | `409 {"detail": "Nothing on this receipt waits for your confirmation"}` (`X-Error-Code: NOTHING_TO_CONFIRM`) |
 | Receipt covers a day reported missing by the investor | Dispute is decided as `PAID` (`actor_role="INVESTOR"`), day becomes `MATCHED` and settled | `200 RepaymentReceiptOut` (`open_report: false`, `status: "CONFIRMED"`) |
 | Admin calls removed `/admin/funding/repayments/{id}/decision` | Route no longer exists | `404` / `405` |
+| OCR on (`receipt-ocr.md` section 10): the business's receipt clearly does not match the repayment | Upload refused before anything is stored or marked; days stay `DUE` | `422` (`X-Error-Code: RECEIPT_MISMATCH`, `details.failure_codes`) |
 
 ---
 
@@ -176,3 +179,4 @@ None.
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 1.0 | 2026-11-04 | Phat | Initial implementation spec |
+| 1.1 | 2026-11-14 | Phat / Claude | `system_check` on each receipt; the upload can be refused with `RECEIPT_MISMATCH` (receipt-ocr.md section 10) |

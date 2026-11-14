@@ -12,6 +12,7 @@ from uuid import UUID
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +29,13 @@ from app.direct_transfer.vietqr import build_vietqr_payload
 from app.lending.models import AuditLog
 from app.market import funding, repayment_receipts
 from app.market.projection import project_ticket
+from app.market.repayment_receipt_check import (
+    RECEIPT_MISMATCH,
+    RepaymentCheck,
+    check_repayment_receipt,
+    record_kept,
+    record_refused,
+)
 from app.market.schemas import (
     InvestmentDueOut,
     MarkDaysPaidCreate,
@@ -37,6 +45,7 @@ from app.market.schemas import (
     ReportMissingCreate,
 )
 from app.notifications import realtime
+from app.uploads.receipt_ocr import ReceiptOcr, receipt_ocr
 from app.users.models import Role, User
 from app.utils.audit import append_audit
 from app.utils.jwt import get_current_user
@@ -183,11 +192,18 @@ async def pay_with_receipt(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_sme),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ocr: ReceiptOcr | None = Depends(receipt_ocr),
 ):
     """The business paid this investor and uploads its bank receipt (PDF, PNG, JPEG or WEBP, at most 10 MB). In one
     step the receipt is kept as evidence (a REPAYMENT transfer for each day, for the investor to confirm) and the
     days are marked paid, so a request that fails part way leaves nothing half done. The investor's bell rings. The same receipt cannot be used twice
-    (409 DUPLICATE_FILE); replaying the same Idempotency-Key stores and marks nothing twice."""
+    (409 DUPLICATE_FILE); replaying the same Idempotency-Key stores and marks nothing twice.
+
+    With RECEIPT_OCR_ENABLED the receipt is read on our own server and compared with this repayment (receipt-ocr.md
+    section 10). A confident read that does not match (amount, memo, the investor's account, bank or name, the
+    business as payer, the time, a bank transaction already used) is refused when RECEIPT_AUTO_VERDICT_ENABLED is on:
+    422 RECEIPT_MISMATCH with ``details.failure_codes``, nothing stored or marked paid. Anything else goes through as
+    before, and the investor sees the system's check while confirming; a match never confirms on its own."""
     if not idempotency_key:
         raise HTTPException(
             status_code=400, detail="Idempotency-Key is required", headers={"X-Error-Code": "IDEMPOTENCY_KEY_REQUIRED"}
@@ -208,17 +224,42 @@ async def pay_with_receipt(
     ).scalars().first()
     replay = receipt_id is not None
     now = _now()
+    check: RepaymentCheck | None = None
+    if not replay:
+        limit = DEFAULT_PARAMS.max_evidence_bytes
+        content = await file.read(limit + 1)
+        if len(content) > limit:
+            raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
+        content_type = funding.sniff_receipt_type(content)
+        if content_type is None:
+            raise HTTPException(
+                status_code=415, detail="Upload a PDF, PNG, JPEG or WEBP", headers={"X-Error-Code": "UNSUPPORTED_TYPE"}
+            )
+        # OCR (receipt-ocr.md section 10) runs before mark_days_paid locks the days, so a slow read holds nothing.
+        # Not on a replay: that receipt was read the first time.
+        if ocr is not None:
+            reading = await ocr.reader.read(content=content, content_type=content_type)
+            window = await db.get(FundingWindow, tranche.window_id)
+            check = await check_repayment_receipt(
+                db, tranche=tranche, window=window, days=days, reading=reading, auto_verdict=ocr.auto_verdict, now=now
+            )
+            if check.refused:
+                # Clearly not this repayment: nothing is stored or marked paid, the days stay due, the attempt is
+                # recorded for staff, and the business is told what did not match.
+                await record_refused(db, check, content=content, tranche=tranche, days=days, now=now)
+                await db.commit()
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": "This receipt does not match the repayment ("
+                        + ", ".join(check.failure_codes)
+                        + "). Upload the receipt of the transfer made with this repayment's QR.",
+                        "details": {"failure_codes": check.failure_codes},
+                    },
+                    headers={"X-Error-Code": RECEIPT_MISMATCH},
+                )
     try:
         if not replay:
-            limit = DEFAULT_PARAMS.max_evidence_bytes
-            content = await file.read(limit + 1)
-            if len(content) > limit:
-                raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
-            content_type = funding.sniff_receipt_type(content)
-            if content_type is None:
-                raise HTTPException(
-                    status_code=415, detail="Upload a PDF, PNG, JPEG or WEBP", headers={"X-Error-Code": "UNSUPPORTED_TYPE"}
-                )
             stored = await store_evidence_file(
                 db,
                 funding.evidence_storage(),
@@ -254,6 +295,9 @@ async def pay_with_receipt(
             },
             ip_address=request.client.host if request.client else None,
         )
+        if check is not None:
+            # What the system read, for the investor to see while confirming; nothing waits on it.
+            await record_kept(db, check, receipt_id=receipt_id, tranche=tranche, days=marked, now=now)
         # The investor checks their account and confirms it arrived.
         notify = await repayment_receipts.notify_investor_of_receipt(
             db, tranche=tranche, receipt_id=receipt_id, net_vnd=sum(day.net_vnd for day in marked)

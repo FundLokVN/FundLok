@@ -23,15 +23,17 @@ from fastapi import HTTPException
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.admin.funding import RECEIPT_URL_TTL_SECONDS
+from app.admin.funding import RECEIPT_URL_TTL_SECONDS, _receiver_out
 from app.admin.schemas import (
     ActorOut,
     AdminOverdueRepaymentOut,
     AdminOverdueRepaymentsOut,
+    AdminPayerCheckOut,
     AdminRepaymentAccountOut,
     AdminReceiptUrlResponse,
     AdminRepaymentDayOut,
     AdminRepaymentReceiptOut,
+    AdminSystemCheckOut,
     Page,
 )
 from app.direct_transfer.calendar_utils import count_business_days, ict_date
@@ -45,6 +47,8 @@ from app.direct_transfer.models import (
     Transfer,
 )
 from app.lending.models import Project
+from app.market import receipt_auto
+from app.market.repayment_receipt_check import ENTITY_RECEIPT
 from app.repayment_schedule.calendar import BusinessDayCalendar
 from app.users.models import User
 from app.utils import r2
@@ -135,6 +139,32 @@ def _account(account: PaymentAccount | None) -> AdminRepaymentAccountOut | None:
     )
 
 
+async def _system_check_out(db: AsyncSession, receipt_id: UUID) -> AdminSystemCheckOut | None:
+    """What the system read off the receipt and how it compares (receipt-ocr.md section 10). Nothing is applied to a
+    repayment receipt it kept, and staff do not review it: the investor confirms."""
+    state = await receipt_auto.system_check_state(db, receipt_id, entity_type=ENTITY_RECEIPT)
+    if state is None:
+        return None
+    reading = state.reading or {}
+    payer = state.payer or None
+    return AdminSystemCheckOut(
+        verdict=state.verdict,
+        applied=False,
+        suggested=state.suggested,
+        summary=state.summary,
+        failure_codes=state.failure_codes,
+        review_reasons=state.review_reasons,
+        receiver=_receiver_out(state.receiver),
+        payer=AdminPayerCheckOut(**payer) if payer else None,
+        decided_at=state.decided_at,
+        engine=reading.get("engine"),
+        confidence=reading.get("confidence"),
+        fields=reading.get("fields"),
+        field_confidence=reading.get("field_confidence") or {},
+        notes=list(reading.get("notes") or []),
+    )
+
+
 async def _row(db: AsyncSession, receipt_id: UUID, *, today: dt.date | None = None) -> AdminRepaymentReceiptOut:
     today = today or ict_date(dt.datetime.now(dt.timezone.utc))
     transfers = await _transfers(db, receipt_id)
@@ -201,6 +231,7 @@ async def _row(db: AsyncSession, receipt_id: UUID, *, today: dt.date | None = No
         original_filename=file.original_filename if file else None,
         content_type=file.content_type if file else None,
         open_report=reported,
+        system_check=await _system_check_out(db, receipt_id),
         tranche_overdue_days=late.days,
         tranche_overdue_net_vnd=late.net_vnd,
         tranche_oldest_overdue_date=late.oldest_due_date,

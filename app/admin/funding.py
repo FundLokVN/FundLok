@@ -58,7 +58,7 @@ from app.direct_transfer.windows import get_window_progress, lock_window, refres
 from app.lending.models import AuditLog, Project
 from app.market.emails import receipt_notice
 from app.market.funding import expire_lapsed_holds
-from app.market import receipt_auto
+from app.market import receipt_auto, repayment_receipt_check
 from app.market.projection import project_ticket
 from app.notifications import realtime
 from app.notifications.models import EVENT_INVESTMENT_TRANSFER_APPROVED
@@ -954,8 +954,9 @@ ACTIVITY_GROUPS: dict[str, tuple[str, ...]] = {
     "DECISIONS": (
         "TRANSFER_RECEIPT_CHECKED", "TRANSFER_RECEIPT_REJECTED", "TRANSFER_RECEIVED", "TRANSFER_NOT_RECEIVED",
         "REPAYMENT_RECEIPT_APPROVED", "REPAYMENT_RECEIPT_DENIED",
-        # The system's own verdicts on receipts it read (receipt-ocr.md); no actor.
+        # The system's own verdicts on receipts it read (receipt-ocr.md), investors' and businesses'; no actor.
         *receipt_auto.AUDIT_ACTIONS.values(),
+        *repayment_receipt_check.AUDIT_ACTIONS.values(),
     ),
     "INVESTOR": ("INVESTMENT_RESERVED", "INVESTMENT_RECEIPT_UPLOADED", "REPAYMENT_RECEIPT_CONFIRMED"),
     "BUSINESS": ("REPAYMENT_DAYS_MARKED_PAID", "INVESTMENT_REPORTED_MISSING"),

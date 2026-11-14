@@ -328,13 +328,27 @@ class RepaymentReceiptDayOut(BaseModel):
     status: Literal["DUE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
 
 
+class RepaymentSystemCheckOut(BaseModel):
+    """What the system read off the business's receipt, against this repayment (receipt-ocr.md section 10). Advice
+    for the investor, never a confirmation: only their own account shows the money arrived. ``result``: MATCHES
+    (the amount, the memo, the investor's account, bank and name, and the business as payer all match),
+    DOES_NOT_MATCH (``failure_codes`` say what: AMOUNT_MISMATCH, REFERENCE_MISSING, PAYEE_MISMATCH,
+    PAYEE_BANK_MISMATCH, PAYEE_NAME_MISMATCH, PAYER_NAME_MISMATCH, TIME_OUT_OF_RANGE, DUPLICATE_BANK_TXN) or UNSURE
+    (it could not be read, or the receiver or payer confirmed, well enough)."""
+
+    result: Literal["MATCHES", "DOES_NOT_MATCH", "UNSURE"]
+    failure_codes: list[str] = []
+    checked_at: dt.datetime
+
+
 class RepaymentReceiptOut(BaseModel):
     """A receipt the business uploaded for a repayment to the investor, and the days it pays. ``status``:
     AWAITING_CONFIRMATION (the investor has not said it arrived), CONFIRMED (they did, or staff approved it before
     investors confirmed: the days are paid and settled) or REJECTED (staff denied it before investors confirmed:
     the days were due again). ``payee`` is the investor's own account the money should reach, ``payer`` the
     business's. ``net_vnd`` is what should have arrived. ``open_report``: the investor reported one of these days
-    as never arriving; confirming closes that report as paid."""
+    as never arriving; confirming closes that report as paid. ``system_check``: what the system read off the receipt,
+    null when it was not read (OCR off)."""
 
     id: UUID
     tranche_id: UUID
@@ -352,6 +366,7 @@ class RepaymentReceiptOut(BaseModel):
     original_filename: str | None = None
     content_type: str | None = None
     open_report: bool = False
+    system_check: RepaymentSystemCheckOut | None = None
 
 
 class TransactionOut(BaseModel):
