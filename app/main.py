@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.admin.router import router as admin_router
 from app.admin.internal_email.router import router as admin_email_router
+from app.scheduled_jobs.router import router as scheduled_jobs_router
 from app.banking.router import router as banking_router
 from app.system.service import is_maintenance_active
 from app.utils.jwt import is_system_admin_session
@@ -26,6 +27,7 @@ from app.lending.router import router as lending_router
 from app.loans.router import router as loans_router
 from app.market.router import router as market_router
 from app.market.funding_router import router as funding_router
+from app.market.repayment_router import router as repayment_router
 from app.oauth.router import router as oauth_router
 from app.payments.router import router as payments_router
 from app.projects.router import router as projects_router
@@ -33,7 +35,9 @@ from app.sme.router import router as sme_router
 from app.underwriting.router import router as underwriting_router
 from app.uploads.router import files_router, router as uploads_router
 from app.users.router import router as users_router
+from app.consent.router import router as consent_router
 from app.users.payment_accounts_router import router as payment_accounts_router
+from app.phone_verification.router import router as phone_verification_router
 from app.verification.router import kyb_router, kyc_router
 from app.gverify.router import kyb_router as gverify_kyb_router, router as gverify_router
 from app.contact.router import router as contact_router
@@ -213,6 +217,8 @@ async def test_db(db: AsyncSession = Depends(get_db)):
 app.include_router(auth_router)
 app.include_router(oauth_router)
 app.include_router(users_router)
+app.include_router(consent_router)
+app.include_router(phone_verification_router)
 app.include_router(payment_accounts_router)
 app.include_router(projects_router)
 app.include_router(sme_router)
@@ -228,6 +234,7 @@ app.include_router(uploads_router)
 app.include_router(contracts_router)
 app.include_router(market_router)
 app.include_router(funding_router)
+app.include_router(repayment_router)
 app.include_router(payments_router)
 app.include_router(banking_router)
 app.include_router(admin_router)
@@ -237,6 +244,7 @@ app.include_router(notifications_router)
 app.include_router(rates_router)
 app.include_router(admin_rates_router)
 app.include_router(admin_email_router)
+app.include_router(scheduled_jobs_router)
 
 if __name__ == "__main__":
     # Get the port from Cloud Run environment (default to 8080 if not set)

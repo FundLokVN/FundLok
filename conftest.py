@@ -75,6 +75,15 @@ os.environ["CAPTCHA_REQUIRED"] = "False"
 # Off for the same reason as the Turnstile secret: a local .env must not make
 # unrelated tests start getting 429s. tests/core/test_rate_limit.py enables it.
 os.environ["RATE_LIMIT_ENABLED"] = "False"
+# Off, like CAPTCHA_REQUIRED: make_user selects a role straight after
+# registering, which the phone gate would refuse. tests/phone_verification/
+# turns it back on. The Zalo credentials are blanked so a local .env can never
+# put a real message on the wire.
+os.environ["PHONE_VERIFICATION_REQUIRED"] = "False"
+os.environ["ZALO_APP_ID"] = ""
+os.environ["ZALO_APP_SECRET"] = ""
+os.environ["ZALO_OA_REFRESH_TOKEN"] = ""
+os.environ["ZALO_ZBS_DEVELOPMENT_MODE"] = "False"
 # Belt-and-suspenders: never let tests touch real R2 / Didit even if a local
 # .env has them configured.
 os.environ["R2_ENDPOINT_URL"] = ""
@@ -302,13 +311,19 @@ def _mock_external_io(monkeypatch):
     # forgotten.
     monkeypatch.setattr("app.utils.email.send_email", lambda *a, **kw: None)
 
-    # Admin > Email talks to Gmail over its own connection, not send_email.
-    # Opening it fails loudly in every test; the internal-email tests replace
-    # it with a fake server.
-    def _no_gmail(*a, **kw):
-        raise AssertionError("a test tried to connect to Gmail")
+    # Zalo template-message sends and token refreshes alike go through zalo._post.
+    async def _no_zalo(*a, **kw):
+        raise AssertionError("a test tried to call Zalo")
 
-    monkeypatch.setattr("app.admin.internal_email.transport._connect", _no_gmail)
+    monkeypatch.setattr("app.phone_verification.zalo._post", _no_zalo)
+
+    # Admin > Email talks to Google (OAuth token endpoint, Gmail API) over
+    # its own HTTP client, not send_email. Opening it fails loudly in every
+    # test; the internal-email tests replace it with a fake Google.
+    def _no_google(*a, **kw):
+        raise AssertionError("a test tried to contact Google")
+
+    monkeypatch.setattr("app.admin.internal_email.google._client", _no_google)
 
     # GVerify verification-document retention writes to R2 — never in tests.
     async def _no_store(*a, **kw):
@@ -350,11 +365,37 @@ async def client():
 DEFAULT_PASSWORD = "Str0ngPassw0rd!1"
 
 
-@pytest.fixture
-def make_user(client):
-    """Register (+optionally self-select a role for) a user; return tokens/headers."""
+async def record_consent(db_session, user_id) -> None:
+    """The user accepted the current Terms & Services and data consent, as a
+    real user does right after sign-up (docs/specs/consent/). Test setup, not
+    the behaviour under test: tests/consent/ covers the real flow."""
+    from app.consent import documents
+    from app.consent.models import UserConsent
 
-    async def _make(role: str | None = None, email: str | None = None, full_name: str = "Test User"):
+    db_session.add(
+        UserConsent(
+            user_id=uuid.UUID(str(user_id)),
+            version=documents.CURRENT_VERSION,
+            consents={doc: True for doc in documents.DOCUMENTS},
+            verified_by=documents.VERIFIED_BY_EMAIL_OTP,
+        )
+    )
+    await db_session.commit()
+
+
+@pytest.fixture
+def make_user(client, db_session):
+    """Register (+optionally self-select a role for) a user; return tokens/headers.
+
+    Every user has accepted the current Terms, as after a real sign-up, unless
+    `consent=False` (for tests of the consent gate itself)."""
+
+    async def _make(
+        role: str | None = None,
+        email: str | None = None,
+        full_name: str = "Test User",
+        consent: bool = True,
+    ):
         email = email or f"user-{uuid.uuid4().hex[:12]}@example.com"
         reg = await client.post(
             "/auth/register",
@@ -367,6 +408,8 @@ def make_user(client):
         login = await client.post("/auth/login", json={"email": email, "password": DEFAULT_PASSWORD})
         assert login.status_code == 200, login.text
         user_id = login.json()["id"]
+        if consent:
+            await record_consent(db_session, user_id)
         access_token = login.cookies.get("access_token")
         refresh_token = login.cookies.get("refresh_token")
         headers = {"Authorization": f"Bearer {access_token}"}
@@ -475,9 +518,63 @@ def make_loan_application(client):
     return _make
 
 
+# What a digitally signed agreement looks like to the upload check
+# (app/loans/agreement/signature.py): a PDF with a signature dictionary, as a
+# signing tool appends it in an incremental update.
+SIGNED_AGREEMENT_PDF = (
+    b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"
+    b"9 0 obj\n<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /ETSI.CAdES.detached "
+    b"/ByteRange [0 120 4216 380] /Contents <3082> >>\nendobj\n%%EOF\n"
+)
+
+
+async def attach_signed_listing_documents(db_session, application_id) -> None:
+    """The SME's signed Service Agreement and Standing Offer on file, as rows.
+
+    A project goes live only once both are signed after approval
+    (app/loans/signing.py). Most suites are about what happens once it is
+    live, not about signing, so they attach both up front and an approval
+    publishes as it did before signing existed. The signing itself is covered
+    in tests/loans/test_listing_signing.py, and the gate in
+    tests/projects/test_project_activation.py, which submit with signed=False.
+    """
+    from sqlalchemy import select as _select
+
+    from app.lending.models import LoanApplicationDocument
+    from app.loans.signing import KINDS
+
+    app_id = uuid.UUID(str(application_id))
+    held = set(
+        (
+            await db_session.execute(
+                _select(LoanApplicationDocument.document_type).where(
+                    LoanApplicationDocument.loan_application_id == app_id
+                )
+            )
+        ).scalars()
+    )
+    for kind in KINDS.values():
+        if kind.document_type in held:
+            continue
+        db_session.add(
+            LoanApplicationDocument(
+                loan_application_id=app_id,
+                document_type=kind.document_type,
+                file_key=f"test/{app_id}/signed-{kind.slug}-{uuid.uuid4().hex}.pdf",
+                original_filename=f"{kind.slug}-da-ky.pdf",
+                content_type="application/pdf",
+                file_size_bytes=1024,
+                status="UPLOADED",
+            )
+        )
+    await db_session.commit()
+
+
 @pytest.fixture
-def submit_loan_application(client):
-    async def _submit(sme: dict, application_id: str):
+def submit_loan_application(client, db_session):
+    async def _submit(sme: dict, application_id: str, *, signed: bool = True):
+        if signed:
+            await attach_signed_listing_documents(db_session, application_id)
         return await client.post(
             f"/loans/applications/{application_id}/submit",
             headers=auth_headers(sme),
@@ -641,11 +738,14 @@ def make_listing(client):
 @pytest.fixture
 def make_eligible_investor(db_session):
     """Bring an investor to where the market accepts their orders: email
-    verified, an APPROVED GVerify KYC attempt and a saved bank account.
-    Idempotent per investor. Pass bank_account=False to stop short of the
-    account (the order endpoint refuses an investor without one)."""
+    verified, an APPROVED GVerify KYC attempt, a saved bank account and a
+    signed Investor Service Agreement (Contract 4; reserving refuses without
+    one). Idempotent per investor. Pass bank_account=False to stop short of
+    the account (the order endpoint refuses an investor without one), and
+    signed_agreement=False to stop short of the agreement (confirming it with
+    a one-time code is covered in tests/market/test_investor_service_agreement.py)."""
 
-    async def _make(investor: dict, bank_account: bool = True):
+    async def _make(investor: dict, bank_account: bool = True, signed_agreement: bool = True):
         from app.direct_transfer.models import PaymentAccount
         from app.gverify.models import STATUS_APPROVED, GVerifyVerification
 
@@ -685,10 +785,95 @@ def make_eligible_investor(db_session):
                         status="APPROVED",
                     )
                 )
+        if signed_agreement:
+            import datetime as _dt
+
+            from app.market.investor_agreement.models import InvestorServiceAgreement
+            from app.market.investor_agreement.service import VERSION
+
+            signed = (
+                await db_session.execute(
+                    select(InvestorServiceAgreement.id).where(
+                        InvestorServiceAgreement.investor_id == user.id, InvestorServiceAgreement.version == VERSION
+                    )
+                )
+            ).first()
+            if signed is None:
+                db_session.add(
+                    InvestorServiceAgreement(
+                        investor_id=user.id,
+                        version=VERSION,
+                        signed_at=_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=1),
+                        party_b={},
+                        signed_file_key=f"test/investor-agreement/{user.id}.pdf",
+                        document_sha256="0" * 64,
+                        file_name="signed.pdf",
+                        file_size_bytes=len(SIGNED_AGREEMENT_PDF),
+                    )
+                )
         await db_session.commit()
         return investor
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def fake_neac(monkeypatch):
+    """NEAC's signature verification, faked: tests never call neac.gov.vn.
+
+    The uploaded test PDF steers the verdict with markers in its bytes (see
+    tests/market/test_investor_service_agreement.py, _signed_copy):
+      %FAKE-NEAC-SIGNER:<id>   the signer's ID on the certificate (CCCD:<id>)
+      %FAKE-NEAC-NAME:<name>   the signer's name (CN), ASCII
+      %FAKE-NEAC:<CASE>        INVALID | MODIFIED | REVOKED | UNSIGNED | DOWN
+    Without a signer marker the certificate carries someone else's ID. The
+    calls made are kept in `.calls`."""
+    import re as _re
+    from types import SimpleNamespace
+
+    from app.market.investor_agreement import neac
+
+    state = SimpleNamespace(calls=[])
+
+    async def _verify(content: bytes, filename: str):
+        state.calls.append(filename)
+        case = _re.search(rb"%FAKE-NEAC:([A-Z]+)", content)
+        case = case.group(1).decode() if case else "VALID"
+        if case == "DOWN":
+            raise neac.NeacUnavailable("fake NEAC is down")
+        if case == "UNSIGNED":
+            return neac.NeacResult(message="Văn bản không có chữ ký số", signatures=[])
+        # One signature per signer marker (the Standing Offer carries two: the
+        # company's and the guarantor's), each named by the NAME marker in the
+        # same position.
+        signer_ids = [m.decode() for m in _re.findall(rb"%FAKE-NEAC-SIGNER:([A-Za-z0-9]+)", content)]
+        names = [m.decode() for m in _re.findall(rb"%FAKE-NEAC-NAME:([^\r\n]+)", content)]
+        signatures = [
+            _signature(case, signer_id, names[i] if i < len(names) else (names[0] if names else "SOMEONE"))
+            for i, signer_id in enumerate(signer_ids or ["000000000000"])
+        ]
+        return neac.NeacResult(message="Success", signatures=signatures)
+
+    def _signature(case: str, signer_id: str, name: str):
+        return neac.NeacSignature(
+            issuer={"cn": "FPT Certification Authority SHA256", "o": "FPT CORPORATION", "c": "VN"},
+            signer={
+                "cn": name,
+                "c": "VN",
+                "cccd": f"CCCD:{signer_id}",
+            },
+            intact="Bị thay đổi" if case == "MODIFIED" else "Không bị thay đổi",
+            certificate_validity="Thời điểm có hiệu lực: 2026-03-18 11:00:40+07:00; Thời điểm hết hiệu lực: 2027-03-26",
+            validity="Không hợp lệ" if case == "INVALID" else "Hợp lệ tại thời điểm ký",
+            timestamp_status="Không",
+            signed_time="Ngày 09 tháng 11 năm 2026, 10:00:00 [UTC+07:00]",
+            reason_invalidity="Chứng thư số của tổ chức phát hành chưa được công nhận." if case == "INVALID" else "",
+            ocsp="Chứng thư số đã bị thu hồi." if case == "REVOKED" else "Chứng thư số chưa bị thu hồi. [http://ocsp3.fis.com.vn]",
+            crl="Chứng thư số chưa bị thu hồi [http://crl3.fis.com.vn]",
+        )
+
+    monkeypatch.setattr(neac, "verify_document", _verify)
+    return state
 
 
 @pytest.fixture

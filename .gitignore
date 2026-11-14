@@ -244,3 +244,7 @@ docs/specs/banking/vpbank-proposal/_superseded/*.zip
 # vbsec security scan reports (list vulnerabilities by file/line): never commit
 vbsec-reports/
 .vbsec-tmp/
+
+# Cloud SQL Auth Proxy: install it with `brew install cloud-sql-proxy`. A binary
+# committed here goes stale (the old one was built with an unsupported Go).
+/cloud-sql-proxy

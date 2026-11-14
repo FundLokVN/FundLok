@@ -171,8 +171,14 @@ def _day_row(day: RepaymentDay, tranche: Tranche, investor: User, account: Payme
 
 async def todays_payments(db: AsyncSession, *, sme_user_id: UUID, on_date: dt.date) -> dict:
     """What the SME owes each investor today (and any unsettled earlier days): one VietQR per investor row."""
+    # With repay_from_approval, investments repay while their round is still open or closing.
     windows = (
-        await db.execute(select(FundingWindow).where(FundingWindow.sme_user_id == sme_user_id, FundingWindow.status == "REPAYING"))
+        await db.execute(
+            select(FundingWindow).where(
+                FundingWindow.sme_user_id == sme_user_id,
+                FundingWindow.status.in_(("OPEN", "FULL", "CLOSING", "REPAYING")),
+            )
+        )
     ).scalars().all()
     rows: list[dict] = []
     for window in windows:
@@ -421,8 +427,10 @@ async def match_day(
     now: dt.datetime,
     params: DirectTransferParams | None = None,
     transfer_id: UUID | None = None,
+    actor_role: str = "ADMIN",
 ) -> RepaymentDay:
-    """Staff confirm that a day was paid (matched to evidence). Also the PAID outcome of a missed-day dispute."""
+    """Staff confirm that a day was paid (matched to evidence). Also the PAID outcome of a missed-day dispute, and
+    the investor confirming they received it (`actor_role="INVESTOR"`, `staff_id` the investor)."""
     if not reason or not reason.strip():
         raise DirectTransferError(422, "A reason is required", "REASON_REQUIRED")
     day = (await db.execute(select(RepaymentDay).where(RepaymentDay.id == day_id).with_for_update())).scalar_one_or_none()
@@ -440,7 +448,7 @@ async def match_day(
     await _settle_day(db, day, now=now)
     await log_event(
         db, entity_type="REPAYMENT_DAY", entity_id=day.id, event_type="REPAYMENT_DAY_REPORTED", now=now,
-        actor_id=staff_id, actor_role="ADMIN", reason=reason, payload={"event": "MATCHED"},
+        actor_id=staff_id, actor_role=actor_role, reason=reason, payload={"event": "MATCHED"},
     )
     tranche = await db.get(Tranche, day.tranche_id)
     window = await db.get(FundingWindow, tranche.window_id)
@@ -475,25 +483,46 @@ async def settle_days(db: AsyncSession, *, now: dt.datetime) -> int:
 
 
 async def maybe_close_facility(db: AsyncSession, window: FundingWindow, *, now: dt.datetime) -> bool:
-    """When every repayment row is settled the facility settles, the window is REPAID and the SME is unlocked
-    (PROVISIONAL(Q-D16): "repaid in full" = facility SETTLED and every row settled)."""
-    if window.status != "REPAYING" or window.facility_id is None:
-        return False
-    unsettled = (
+    """Each of the window's facilities settles once all its repayment rows are settled; once every one has and the
+    window is REPAYING, the window is REPAID and the SME is unlocked (PROVISIONAL(Q-D16): "repaid in full" =
+    facility SETTLED and every row settled). One facility per window when the loan forms at close; one per
+    investment with repay_from_approval. True when the window became REPAID."""
+    facility_ids = (
         await db.execute(
-            select(func.count()).select_from(RepaymentDay).where(RepaymentDay.facility_id == window.facility_id, RepaymentDay.settled_at.is_(None))
+            select(RepaymentDay.facility_id)
+            .join(Tranche, Tranche.id == RepaymentDay.tranche_id)
+            .where(Tranche.window_id == window.id)
+            .distinct()
         )
-    ).scalar_one()
-    if unsettled:
+    ).scalars().all()
+    if not facility_ids:
         return False
-    facility = await db.get(Facility, window.facility_id)
-    balance = int(facility.total_obligation_vnd) - int(facility.collected_to_date_vnd)
-    if balance != 0:
-        raise RepaymentInvariantError(f"all rows settled but facility balance is {balance}")
-    apply_transition(db, facility, to_status="SETTLED", trigger="OBLIGATION_SATISFIED", context={"balance_vnd": 0})
+    all_settled = True
+    for facility_id in facility_ids:
+        facility = await db.get(Facility, facility_id)
+        if facility.status == "SETTLED":
+            continue
+        unsettled = (
+            await db.execute(
+                select(func.count()).select_from(RepaymentDay).where(
+                    RepaymentDay.facility_id == facility_id, RepaymentDay.settled_at.is_(None)
+                )
+            )
+        ).scalar_one()
+        if unsettled:
+            all_settled = False
+            continue
+        balance = int(facility.total_obligation_vnd) - int(facility.collected_to_date_vnd)
+        if balance != 0:
+            raise RepaymentInvariantError(f"all rows settled but facility balance is {balance}")
+        apply_transition(db, facility, to_status="SETTLED", trigger="OBLIGATION_SATISFIED", context={"balance_vnd": 0})
+    if not all_settled or window.status != "REPAYING":
+        await db.flush()
+        return False
     window.status = "REPAID"
     await db.flush()
     await log_event(
-        db, entity_type="WINDOW", entity_id=window.id, event_type="WINDOW_REPAID", now=now, payload={"facility_id": str(facility.id)}
+        db, entity_type="WINDOW", entity_id=window.id, event_type="WINDOW_REPAID", now=now,
+        payload={"facility_ids": [str(f) for f in facility_ids]},
     )
     return True

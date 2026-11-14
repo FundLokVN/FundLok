@@ -129,12 +129,11 @@ never model or describe it as a discount). A write-down can only *follow* a
 missed backstop, never precede it; the loss is partial (daily collection has
 already recovered part) and is borne by the investor.
 
-**INV-12 — Terms.** The SME declares a term; **12 months is the maximum and we
-never write longer**. The declared term also sets the backstop date.
-> ⚠️ Divergence to resolve, not to paper over: the handbook says the declared
-> term is **6 or 12 months**, while `grading_params_v1.yaml` has
-> `allowed_durations_months: [3, 6, 9, 12]`. Flag this rather than silently
-> aligning either side.
+**INV-12 — Terms.** The SME declares a term of **1 to 6 months** (confirmed by
+Loc, 2026-11-13, handbook v3.1 Money flow tab, symbol M); we never write longer.
+The declared term also sets the backstop date. `grading_params_v1.yaml` has
+`allowed_durations_months: [1, 2, 3, 4, 5, 6]`, so code and handbook now agree.
+Older material saying 3/6/9/12 or 6/12 months is stale.
 
 ---
 

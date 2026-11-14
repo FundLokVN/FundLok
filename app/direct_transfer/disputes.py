@@ -246,7 +246,10 @@ async def decide_dispute(
     reason: str,
     now: dt.datetime,
     params: DirectTransferParams | None = None,
+    actor_role: str = "ADMIN",
 ) -> Dispute:
+    """`actor_role="INVESTOR"` (with `staff_id` the investor): the investor who reported a day missing confirms it
+    arrived after all, closing their own report as PAID."""
     p = resolve(params)
     if not reason or not reason.strip():
         raise DirectTransferError(422, "A reason is required", "REASON_REQUIRED")
@@ -262,7 +265,9 @@ async def decide_dispute(
     if dispute.subject_type == "TRANCHE":
         await _apply_tranche_outcome(db, dispute, outcome=outcome, staff_id=staff_id, reason=reason, now=now, params=p)
     else:
-        await _apply_day_outcome(db, dispute, outcome=outcome, staff_id=staff_id, reason=reason, now=now, params=p)
+        await _apply_day_outcome(
+            db, dispute, outcome=outcome, staff_id=staff_id, reason=reason, now=now, params=p, actor_role=actor_role
+        )
 
     dispute.status = "DECIDED"
     dispute.outcome = outcome
@@ -274,7 +279,7 @@ async def decide_dispute(
     await db.flush()
     await log_event(
         db, entity_type="DISPUTE", entity_id=dispute.id, event_type="DISPUTE_DECISION", now=now, actor_id=staff_id,
-        actor_role="ADMIN", reason=reason, payload={"outcome": outcome, "cause": dispute.cause},
+        actor_role=actor_role, reason=reason, payload={"outcome": outcome, "cause": dispute.cause},
     )
     return dispute
 
@@ -316,13 +321,16 @@ async def _apply_tranche_outcome(
 
 async def _apply_day_outcome(
     db: AsyncSession, dispute: Dispute, *, outcome: str, staff_id: UUID, reason: str, now: dt.datetime,
-    params: DirectTransferParams,
+    params: DirectTransferParams, actor_role: str = "ADMIN",
 ) -> None:
     if outcome == "NOT_PAID":
         return  # the day stays REPORTED_MISSED (no arrears states in MVP)
     from app.direct_transfer.repayment import match_day  # local import: repayment imports this module
 
-    await match_day(db, day_id=dispute.repayment_day_id, staff_id=staff_id, reason=reason, now=now, params=params)
+    await match_day(
+        db, day_id=dispute.repayment_day_id, staff_id=staff_id, reason=reason, now=now, params=params,
+        actor_role=actor_role,
+    )
     day = await db.get(RepaymentDay, dispute.repayment_day_id)
     await cic.emit_missed_day_correction(db, day, now=now, stage="resolved_paid")
 

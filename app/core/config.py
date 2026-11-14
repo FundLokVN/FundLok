@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -117,11 +119,27 @@ class Settings(BaseSettings):
     # password-equivalent secrets in plaintext.
     TOTP_ENCRYPTION_KEY: str | None = None
 
-    # Encrypts the Gmail app password an admin saves under Admin > Email
-    # (app/admin/internal_email/crypto.py). Its own key, separate from both
-    # SECRET_KEY and TOTP_ENCRYPTION_KEY, so each can rotate alone. Unset means
-    # the password cannot be saved: fail closed, never plaintext.
+    # Encrypts the Google OAuth refresh token an admin's Gmail connection holds
+    # under Admin > Email (app/admin/internal_email/crypto.py). Its own key,
+    # separate from both SECRET_KEY and TOTP_ENCRYPTION_KEY, so each can rotate
+    # alone. Unset means no account can be connected: fail closed, never
+    # plaintext.
     EMAIL_SETTINGS_ENCRYPTION_KEY: str | None = None
+
+    # Admin > Email: each admin connects their Gmail account with Google OAuth
+    # 2.0 (authorization code flow, scope gmail.send) and mail goes out through
+    # the Gmail API. A "Web application" OAuth client. GOOGLE_OAUTH_CLIENT_ID
+    # unset means the sign-in client (GOOGLE_CLIENT_ID) is used, so reusing it
+    # needs only that client's secret here. The redirect URI must be
+    # registered on the client EXACTLY, and defaults to the frontend's /api
+    # proxy: {FRONTEND_URL}/api/admin/email/oauth/callback. No client id or no
+    # secret means the Connect button answers 503 (GMAIL_OAUTH_NOT_CONFIGURED).
+    GOOGLE_OAUTH_CLIENT_ID: str | None = None
+    GOOGLE_OAUTH_CLIENT_SECRET: str | None = None
+    GOOGLE_OAUTH_REDIRECT_URI: str | None = None
+    # Comma-separated domains a connected Gmail account must be on, e.g.
+    # "fundlok.com". Empty means any Google account.
+    GMAIL_CONNECT_ALLOWED_DOMAINS: str = ""
 
     # PartyKit realtime push for the notification bell (app/notifications/
     # realtime.py). All three unset = feature off and polling is the only path.
@@ -191,6 +209,42 @@ class Settings(BaseSettings):
     # face match, or OCR plus the tax registry), and a rejection invites a retry.
     GVERIFY_MAX_ATTEMPTS_PER_DAY: int = 5
 
+    # --- Phone verification (Zalo ZBS) ---
+    # docs/specs/users/phone-verification.md. A new account (password or
+    # social sign-in) must prove a Vietnamese mobile number by one-time code
+    # before it may choose a role. Required by default, like CAPTCHA_REQUIRED:
+    # with Zalo unconfigured the send endpoint answers 503 rather than letting
+    # accounts through unverified. The tests opt out.
+    PHONE_VERIFICATION_REQUIRED: bool = True
+    # How the code reaches the phone:
+    #   zalo — a Zalo ZBS template message (needs the ZALO_* settings below)
+    #   log  — writes the code to the server log; only honoured with DEBUG=True
+    PHONE_OTP_CHANNEL: Literal["zalo", "log"] = "zalo"
+
+    # Zalo Official Account app (developers.zalo.me > app > Official Account).
+    # The secret goes in the `secret_key` header of token refreshes only.
+    ZALO_APP_ID: str | None = None
+    ZALO_APP_SECRET: str | None = None
+    # The refresh token from authorising the app on the OA. Read once to start
+    # the chain: Zalo replaces the refresh token on every use, so the current
+    # one lives encrypted in zalo_oa_tokens. Putting a different value here
+    # (after re-authorising the OA) starts a new chain.
+    ZALO_OA_REFRESH_TOKEN: str | None = None
+    # Encrypts the stored OA tokens (app/phone_verification/zalo.py). Its own
+    # key, like TOTP_ENCRYPTION_KEY: unset means Zalo is refused, never that
+    # tokens are stored in plaintext.
+    ZALO_TOKEN_ENCRYPTION_KEY: str | None = None
+    # The approved ZBS template of type OTP, and the name of its code parameter.
+    ZALO_ZBS_OTP_TEMPLATE_ID: str | None = None
+    ZALO_ZBS_OTP_PARAM: str = "otp"
+    # Sends with "mode": "development": Zalo delivers only to admins of the
+    # app or the OA. For trying the template out; never on in production.
+    ZALO_ZBS_DEVELOPMENT_MODE: bool = False
+    # The approved ZBS template the 15:00 repayment reminder sends the SME: one
+    # message per investor ticket due today that it has not marked paid
+    # (app/scheduled_jobs/zalo_reminders.py). Unset: no Zalo reminder is sent.
+    ZALO_ZBS_REMINDER_TEMPLATE_ID: str | None = None
+
     # ARQ worker (T2 -- HANDOFF-03). The daily repayment batch and ML scoring
     # run through ARQ, never BackgroundTasks (CLAUDE.md). Points at the
     # docker-compose `redis` service locally; a managed Redis URL in prod.
@@ -211,6 +265,27 @@ class Settings(BaseSettings):
         if self.WEBAUTHN_ORIGINS:
             return [o.strip().rstrip("/") for o in self.WEBAUTHN_ORIGINS.split(",") if o.strip()]
         return [self.FRONTEND_URL.strip().rstrip("/")]
+
+    @property
+    def gmail_oauth_client_id(self) -> str | None:
+        """The OAuth client for Admin > Email: its own, else the sign-in one."""
+        client_id = self.GOOGLE_OAUTH_CLIENT_ID or self.GOOGLE_CLIENT_ID
+        return client_id.strip() if client_id else None
+
+    @property
+    def gmail_oauth_redirect_uri(self) -> str:
+        """Where Google sends the admin back after the Gmail consent screen."""
+        if self.GOOGLE_OAUTH_REDIRECT_URI:
+            return self.GOOGLE_OAUTH_REDIRECT_URI.strip()
+        return self.FRONTEND_URL.strip().rstrip("/") + "/api/admin/email/oauth/callback"
+
+    @property
+    def gmail_connect_allowed_domains(self) -> list[str]:
+        return [
+            d.strip().lower().lstrip("@")
+            for d in self.GMAIL_CONNECT_ALLOWED_DOMAINS.split(",")
+            if d.strip()
+        ]
 
     @property
     def cors_origins(self) -> list[str]:

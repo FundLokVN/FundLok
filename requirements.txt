@@ -57,8 +57,10 @@ fastapi-mail==1.6.8
 email-validator==2.3.0
 google-cloud-storage==3.17.1
 boto3==1.43.118          # Cloudflare R2 (S3-compatible) presigned uploads
-pypdf==6.21.2            # CIC credit-report PDFs (app/uploads/parsers/cic.py)
+pypdf==6.21.4            # CIC credit-report PDFs (app/uploads/parsers/cic.py)
+fpdf2==2.8.9             # SME service agreement PDF the SME downloads and signs (app/loans/agreement/pdf.py); >=2.8.8 for CVE-2026-114609/114610
 defusedxml==0.7.1        # safe XML parsing of uploaded XLSX / e-invoice files (app/uploads/parsers/xlsx.py, statements.py)
+python-multipart==0.0.32 # multipart file uploads (FastAPI UploadFile): investors' transfer receipts, app/market/funding_router.py
 PyYAML==6.0.3          # grading engine params loader (app/underwriting/grading/params.py)
 
 # ── Background jobs (ARQ worker, T2) ─────────────────────────────────────────
@@ -91,7 +93,8 @@ cffi==2.1.1
 charset-normalizer==3.5.2
 click==8.5.0
 cryptography==50.0.2
-dnspython==2.9.0
+dnspython==2.9.2
+fonttools==4.68.0
 google-api-core==2.43.0
 google-auth==2.62.0
 google-cloud-core==2.8.0
@@ -108,10 +111,11 @@ Jinja2==3.1.6
 jmespath==1.1.0
 Mako==1.4.3
 MarkupSafe==3.0.4
-opentelemetry-api==1.45.1
+opentelemetry-api==1.45.2
+pillow==13.0.0
 proto-plus==1.29.0
 protobuf==7.36.2
-pyasn1==0.6.4
+pyasn1==0.6.5
 pyasn1_modules==0.4.2
 pycparser==3.12
 pydantic_core==2.50.1

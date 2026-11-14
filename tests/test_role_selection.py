@@ -112,6 +112,18 @@ def _disable_maintenance():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _consent_given():
+    # Choosing a role needs the Terms accepted first, a DB lookup the _FakeDB
+    # here cannot answer. That gate has its own tests in tests/consent/; these
+    # are about the role rules, so the user has consented.
+    async def _given(db, user):
+        return None
+
+    with patch("app.consent.service.require_consent", _given):
+        yield
+
+
 @pytest.fixture
 def make_client():
     created = []

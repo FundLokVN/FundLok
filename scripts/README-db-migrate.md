@@ -55,7 +55,7 @@ You don't need to put the tools on your PATH. The tool searches those locations,
 | Host | Use |
 |---|---|
 | **Neon** | The **direct** connection string, not the pooled one (no `-pooler` in the host). `pg_dump` doesn't work through the pooler. The tool warns you if it sees `-pooler`. |
-| **Cloud SQL (staging)** | Through `cloud-sql-proxy` (`postgresql://user:pass@127.0.0.1:5432/db`), or a socket URL `postgresql://user:pass@/db?host=/cloudsql/PROJECT:REGION:INSTANCE`. |
+| **Cloud SQL (staging)** | Through `cloud-sql-proxy` (install with `brew install cloud-sql-proxy`; then `postgresql://user:pass@127.0.0.1:5432/db`), or a socket URL `postgresql://user:pass@/db?host=/cloudsql/PROJECT:REGION:INSTANCE`. |
 | **Local Docker** | `postgresql://fundlok:fundlok@localhost:5433/fundlok_dev` |
 
 App-style URLs work as-is: `postgresql+asyncpg://…?ssl=require` and `postgresql+psycopg2://…` are converted automatically. See [Which URLs work](#which-urls-work) for the full list.
@@ -122,6 +122,23 @@ A rehearsal: it runs every safe step and stops before anything could change.
 
 Use it to check that a URL works, that your client tools are right, or what's already in the target, before the real run. It's safe to run any time.
 
+### Download only, no target (`db:dump`)
+
+To save a database to a file without copying it anywhere, for a backup or to import it later:
+
+```bash
+bun run db:dump --dump-file ~/neon-backup.dump
+```
+
+It asks only for the source URL, checks the database and the client tools as above, saves everything to the file (readable only by you, never overwritten), and checks that the file reads back with `pg_restore --list`. `--dry-run` works here too. The file holds the whole database, including personal and financial data: keep it private and delete it when done.
+
+To load the file into a database later (here Cloud SQL through `cloud-sql-proxy --port 6543`), run `pg_restore` from the same client version; `-W` asks for the password instead of putting it in the command:
+
+```bash
+pg_restore --clean --if-exists --no-owner --no-privileges --single-transaction \
+  -h 127.0.0.1 -p 6543 -U postgres -d fundlok -W ~/neon-backup.dump
+```
+
 ### Non-interactive (scripts / CI)
 
 Provide the URLs as environment variables (not as flags, which end up in shell history) and skip the confirmation with `--yes`:
@@ -143,6 +160,7 @@ Without a terminal and without both URLs, it exits with an error instead of prom
 | Flag | What it does |
 |---|---|
 | `--dry-run` | Pre-flight checks only; prints the commands, changes nothing |
+| `--dump-only` | Only download the source into `--dump-file`; no target is asked for and nothing is restored. Same as `bun run db:dump`. |
 | `--dump-file PATH` | Dump to a file first, then restore from it. Use this if the network drops mid-copy, or to keep a backup. The file is never overwritten, and on macOS/Linux it is readable only by you (see Safety notes for Windows). |
 | `--pg-bin-dir DIR` | Use the client tools in `DIR` (also `$PG_BIN_DIR`) |
 | `--allow-errors` | Restore without the single transaction: objects that fail are skipped and the rest continues. Row counts are still checked. See Troubleshooting. |
@@ -175,7 +193,7 @@ Extra flags pass through bun: `bun run db:copy --dry-run --verbose`.
 | Windows, **Git Bash**: `required when not running in a terminal`, or the URL you paste is visible | Git Bash's terminal (mintty) isn't a real Windows console, so prompts can't hide input. Run it from **PowerShell** or **Windows Terminal**, or use `winpty bun run db:copy`, or pass the URLs as env vars with `--yes`. |
 | `source and target are the same database` | Check the URLs; the tool won't copy a database onto itself |
 | `not a PostgreSQL URL (scheme 'jdbc')` / `(scheme '')` | Remove the `jdbc:` prefix, or turn a `host=… dbname=…` string into `postgresql://user:pass@host:port/dbname` |
-| `invalid database URL: Port could not be cast …` | Multi-host or malformed port; use a single `host:port` |
+| `invalid database URL: could not read its host, port and database …` | Usually a `#`, `?` or `/` typed as-is in the password, which ends that part of the URL. Percent-encode it (`#` → `%23`) or use a password of letters and digits. Otherwise a multi-host or malformed port; use a single `host:port`. The message never repeats the URL, so no part of the password is shown |
 | `database URL has no database name` | Add `/dbname` after the host |
 | `pg_restore failed … must be owner of extension …` (or another permission error) | Common on managed Postgres. Re-run with `--allow-errors`; the skipped objects are listed, and the row counts still have to match. |
 | `N table(s) differ` | The source was probably still being written to. Turn on maintenance mode and run again. |

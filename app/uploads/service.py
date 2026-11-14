@@ -19,6 +19,7 @@ from app.uploads.parsers.tax_filings import TaxFilingsParseError, parse_tax_fili
 from app.uploads.schemas import (
     DOCUMENT_TYPE_RULES,
     EXTENSION_CONTENT_TYPES,
+    SIGNED_DOCUMENT_TYPES,
     FileCommitRequest,
     FilePresignRequest,
     UploadConfirmRequest,
@@ -45,6 +46,15 @@ def _validate_file(body: UploadPresignRequest) -> str:
     rules = DOCUMENT_TYPE_RULES.get(body.document_type)
     if rules is None:
         raise HTTPException(status_code=400, detail="Invalid document_type")
+    if body.document_type in SIGNED_DOCUMENT_TYPES:
+        # Signed after approval and checked with NEAC on the way in
+        # (POST /loans/applications/{id}/listing-documents/{kind}); a presigned
+        # upload here would land one unchecked.
+        raise HTTPException(
+            status_code=400,
+            detail="Signed listing documents are uploaded after approval, from the application's signing step",
+            headers={"X-Error-Code": "SIGNED_AFTER_APPROVAL"},
+        )
     if "." not in body.filename:
         raise HTTPException(status_code=400, detail="Filename must have an extension")
     ext = body.filename.rsplit(".", 1)[1].lower()

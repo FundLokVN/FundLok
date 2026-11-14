@@ -14,6 +14,7 @@ from sqlalchemy.sql import Select
 from fastapi import BackgroundTasks, HTTPException
 
 from app.admin.schemas import (
+    AdminSignatureCheck,
     AdminPaymentAccountOut,
     ActorOut,
     AdminDecision,
@@ -42,7 +43,11 @@ from app.admin.schemas import (
     ProjectRow,
     UNASSIGNED_ROLE,
     UserRow,
+    AdminConsentRecordOut,
+    AdminUserConsent,
 )
+from app.consent import documents as consent_documents
+from app.consent import service as consent_service
 from app.core.config import settings
 from app.gverify import kyb_service
 from app.gverify import service as gverify_service
@@ -203,7 +208,13 @@ async def list_users(
         stmt = stmt.where(User.status == status)
     if role:
         stmt = stmt.where(User.role == role)
-    return await _paginate(db, stmt, page=page, page_size=page_size, row_model=UserRow, order_col=User.created_at)
+    page_out = await _paginate(db, stmt, page=page, page_size=page_size, row_model=UserRow, order_col=User.created_at)
+    # Whether each user on the page accepted the current Terms: one query for
+    # the page, judged exactly as the sign-up gate judges it.
+    states = await consent_service.states_for(db, page_out.items)
+    for row in page_out.items:
+        row.consent_status, row.consent_accepted_at = states[row.id]
+    return page_out
 
 
 async def get_user_detail(db: AsyncSession, user_id: UUID) -> AdminUserFullDetail:
@@ -334,6 +345,8 @@ async def get_user_detail(db: AsyncSession, user_id: UUID) -> AdminUserFullDetai
         )
     ).scalar() or 0
     payment_accounts = await list_payment_accounts(db, user_id=user_id)
+    consent_state, consent_accepted_at = (await consent_service.states_for(db, [user]))[user.id]
+    consent_records = await consent_service.history(db, user.id)
 
     return AdminUserFullDetail(
         id=user.id,
@@ -364,6 +377,12 @@ async def get_user_detail(db: AsyncSession, user_id: UUID) -> AdminUserFullDetai
         linked_accounts_count=linked_accounts_count,
         payment_accounts=await _admin_payment_accounts(db, payment_accounts),
         projects=projects,
+        consent=AdminUserConsent(
+            status=consent_state,
+            current_version=consent_documents.CURRENT_VERSION,
+            accepted_at=consent_accepted_at,
+            records=[AdminConsentRecordOut.model_validate(r) for r in consent_records],
+        ),
         investments=AdminUserInvestmentSummary(
             orders_count=orders_count,
             orders_amount=orders_amount,
@@ -467,13 +486,29 @@ async def get_project_detail(db: AsyncSession, project_id: UUID) -> AdminProject
     kyb = await _latest_kyb_for_project(db, project_id)
     registration_verified = bool(kyb and kyb.is_approved)
 
+    # The newest NEAC check of each signed listing document (the Service
+    # Agreement and the Standing Offer, checked when the SME uploaded them),
+    # in one query.
+    from app.loans.agreement import neac_check
+    from app.uploads.schemas import SIGNED_DOCUMENT_TYPES
+
+    checks = await neac_check.latest_checks(
+        db, [d.id for r in rows for d in r.documents if d.document_type in SIGNED_DOCUMENT_TYPES]
+    )
+
     def _row(application) -> AdminLoanApplicationRow:
         out = AdminLoanApplicationRow.model_validate(application)
         out = out.model_copy(
             update={
                 "missing_documents": missing_documents(
                     application.documents, registration_verified=registration_verified
-                )
+                ),
+                "documents": [
+                    d.model_copy(update={"signature_check": AdminSignatureCheck.from_verdict(checks[d.id])})
+                    if d.id in checks
+                    else d
+                    for d in out.documents
+                ],
             }
         )
         run = latest_runs.get(application.id)

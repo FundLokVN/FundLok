@@ -2,14 +2,30 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin import fees as admin_fees
+from app.admin import funding as admin_funding
+from app.admin.fee_schemas import AdminFeeInvoiceOut, AdminFeeMarkPaidRequest, FeeInvoiceFilter
+from app.admin import repayments as admin_repayments
+from app.admin.fee_notice.service import run_fee_invoice_emails
 from app.admin import service
 from app.admin.access_log import audit_admin_read
 from app.admin.schemas import (
+    AdminSignatureCheck,
+    AdminFundingActivityOut,
+    AdminFundingRoundOut,
+    AdminInvestorTransferOut,
     AdminPaymentAccountDecisionRequest,
     AdminPaymentAccountOut,
+    AdminReceiptDecisionRequest,
+    AdminReceiptFieldsRequest,
+    AdminReceiptUrlResponse,
+    AdminOverdueRepaymentsOut,
+    AdminRepaymentPreviewOut,
+    AdminRepaymentReceiptOut,
+    AdminTransferDecisionRequest,
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
     AdminInviteRequest,
@@ -312,6 +328,33 @@ async def get_document_url(
     return await service.get_document_url(db, document_id)
 
 
+@router.post("/documents/{document_id}/neac-check", response_model=AdminSignatureCheck)
+async def check_document_with_neac(
+    document_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Check a signed listing document (the Service Agreement or the Standing Offer) with NEAC again, and record
+    the verdict: NEAC's own verification (valid, unchanged, not revoked), whether it is this application's
+    document with today's check code, whether the signer's MST is the company's, and on the Standing Offer the
+    Personal Guarantor's own signature. Admin-only. Takes a few seconds."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    from app.lending.models import LoanApplicationDocument
+    from app.loans.agreement import neac_check
+
+    document = await db.get(LoanApplicationDocument, document_id)
+    if document is None or document.document_type not in neac_check.DOCUMENT_TYPES:
+        raise HTTPException(status_code=404, detail="No signed listing document with this id")
+    if document.status != "UPLOADED":
+        raise HTTPException(status_code=409, detail="The signed document has not finished uploading")
+    verdict = await neac_check.check_signed_document(
+        db, document=document, actor_id=current_user.id, now=_dt.now(_tz.utc)
+    )
+    await db.commit()
+    return AdminSignatureCheck.from_verdict(verdict)
+
+
 @router.get(
     "/users/{user_id}",
     response_model=AdminUserFullDetail,
@@ -366,6 +409,287 @@ async def decide_payment_account(
         accept_difference=body.accept_difference,
         actor=current_user,
         ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.get(
+    "/funding/rounds",
+    response_model=list[AdminFundingRoundOut],
+    dependencies=[Depends(audit_admin_read("FUNDING_WINDOW"))],
+)
+async def list_funding_rounds(
+    status: Literal["OPEN", "ALL"] = "OPEN",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The Transactions tab's rounds: by default the ones taking or settling investment (OPEN, FULL, CLOSING),
+    closing soonest first, with their totals and how many tickets wait on staff."""
+    return await admin_funding.list_rounds(db, open_only=status == "OPEN")
+
+
+@router.post("/funding/rounds/{window_id}/advance", response_model=AdminFundingRoundOut)
+async def advance_funding_round(
+    window_id: UUID,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Do what is due on a round now: start its close when it is due, and once nothing is pending, form the loan
+    and create the daily repayment days. Stands in for the scheduled job, which is not deployed. Audited.
+
+    Closing the round issues the SME's platform activation-fee invoice; it is emailed to the SME after this
+    responds (app/admin/fee_notice), along with any earlier one whose email failed."""
+    round_ = await admin_funding.advance_round(
+        db, window_id, actor=current_user, ip_address=request.client.host if request.client else None
+    )
+    background_tasks.add_task(run_fee_invoice_emails)
+    return round_
+
+
+@router.get(
+    "/funding/fee-invoices",
+    response_model=list[AdminFeeInvoiceOut],
+    dependencies=[Depends(audit_admin_read("FEE_INVOICE"))],
+)
+async def list_fee_invoices(
+    status: FeeInvoiceFilter = Query(default="UNPAID"),
+    limit: int = Query(default=200, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """SME service-fee invoices (3% of a round's confirmed total, plus VAT), each with its investment package:
+    the round, the business and the investments the fee is charged on. Unpaid first, soonest due."""
+    return await admin_fees.list_fee_invoices(db, status_filter=status, limit=limit)
+
+
+@router.post("/funding/fee-invoices/{invoice_id}/mark-paid", response_model=AdminFeeInvoiceOut)
+async def mark_fee_invoice_paid(
+    invoice_id: UUID,
+    body: AdminFeeMarkPaidRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The SME's transfer shows on FundLok's statement: record it and mark the invoice paid, which lifts the
+    block on the business's next round. Needs the bank transaction ID (one per invoice) and a reason; audited.
+    Pressing it again for a paid invoice changes nothing."""
+    return await admin_fees.mark_paid(
+        db,
+        invoice_id,
+        body,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.get(
+    "/funding/transfers",
+    response_model=Page[AdminInvestorTransferOut],
+    dependencies=[Depends(audit_admin_read("TRANCHE"))],
+)
+async def list_investor_transfers(
+    status: Literal["ALL", "NEEDS_ACTION", "AWAITING_TRANSFER", "RECEIVED", "ENDED"] = "ALL",
+    window_id: UUID | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Investor tickets and the transfers reported for them, those waiting on staff first. Reads are logged
+    (investor names and the business's account)."""
+    return await admin_funding.list_transfers(
+        db, status=status, window_id=window_id, page=page, page_size=page_size
+    )
+
+
+@router.get(
+    "/funding/activity",
+    response_model=Page[AdminFundingActivityOut],
+    dependencies=[Depends(audit_admin_read("AUDIT_LOG"))],
+)
+async def list_funding_activity(
+    group: Literal["DECISIONS", "INVESTOR", "BUSINESS", "VIEWS", "ALL"] = "DECISIONS",
+    tranche_id: UUID | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The Transactions tab's audit trail, newest first. DECISIONS (the default): receipts checked, rejected, and
+    reviews settled as received or not, investors' and businesses' alike. INVESTOR: reservations and uploads.
+    BUSINESS: repayments marked paid. VIEWS: who opened which receipt.
+    ``tranche_id`` narrows it to one ticket (the review panel's history)."""
+    return await admin_funding.list_activity(db, group=group, tranche_id=tranche_id, page=page, page_size=page_size)
+
+
+@router.get(
+    "/funding/transfers/{tranche_id}",
+    response_model=AdminInvestorTransferOut,
+    dependencies=[Depends(audit_admin_read("TRANCHE", id_param="tranche_id"))],
+)
+async def get_investor_transfer(
+    tranche_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """One investor ticket for the review panel: the transfer reported for it, what a matching receipt shows,
+    and any open review."""
+    return await admin_funding.get_transfer(db, tranche_id)
+
+
+@router.get(
+    "/funding/transfers/{tranche_id}/repayment",
+    response_model=AdminRepaymentPreviewOut,
+    dependencies=[Depends(audit_admin_read("TRANCHE", id_param="tranche_id"))],
+)
+async def get_investment_repayment(
+    tranche_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The repayment an approval starts, worked out step by step for the review panel: the days if approved today
+    (repayment starts the next working day), or the days it got once repaying."""
+    return await admin_funding.repayment_preview(db, tranche_id)
+
+
+@router.get(
+    "/funding/transfers/{transfer_id}/receipt-url",
+    response_model=AdminReceiptUrlResponse,
+    dependencies=[Depends(audit_admin_read("TRANSFER", id_param="transfer_id"))],
+)
+async def get_transfer_receipt_url(
+    transfer_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A 10-minute link to the receipt the investor uploaded. Each view is audited."""
+    return await admin_funding.get_receipt_url(
+        db, transfer_id, actor=current_user, ip_address=request.client.host if request.client else None
+    )
+
+
+@router.post("/funding/transfers/{transfer_id}/fields", response_model=AdminInvestorTransferOut)
+async def enter_transfer_receipt_fields(
+    transfer_id: UUID,
+    body: AdminReceiptFieldsRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Record what the receipt shows. If it all matches the QR FundLok issued, the ticket is attested and the
+    business has two working days to dispute; otherwise it goes to review. Once per transfer."""
+    return await admin_funding.enter_receipt_fields(
+        db, transfer_id, body, actor=current_user, ip_address=request.client.host if request.client else None
+    )
+
+
+@router.post("/funding/transfers/{transfer_id}/decision", response_model=AdminInvestorTransferOut)
+async def decide_investor_receipt(
+    transfer_id: UUID,
+    body: AdminReceiptDecisionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Approve or deny a transfer after looking at the investor's receipt; nothing is typed in or compared.
+    Approving a receipt records the investment as paid (ATTESTED: the business has two working days to say the
+    money never arrived) and rings the business's bell; denying it rejects the receipt, and the investor can
+    upload the right one while the hold lasts. A ticket under review is settled as received or not. Final, and
+    audited with the admin who made it."""
+    return await admin_funding.decide_receipt(
+        db,
+        transfer_id,
+        outcome=body.outcome,
+        reason=body.reason,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.post("/funding/reviews/{dispute_id}/decision", response_model=AdminInvestorTransferOut)
+async def decide_investor_transfer(
+    dispute_id: UUID,
+    body: AdminTransferDecisionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Settle a ticket under review: RECEIVED (it counts toward the round) or NOT_RECEIVED (void, its place
+    freed). Needs a reason; final, and audited with the admin who made it."""
+    return await admin_funding.decide_transfer(
+        db,
+        dispute_id,
+        outcome=body.outcome,
+        reason=body.reason,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.get(
+    "/funding/repayments",
+    response_model=Page[AdminRepaymentReceiptOut],
+    dependencies=[Depends(audit_admin_read("TRANSFER"))],
+)
+async def list_repayment_receipts(
+    status: Literal["NEEDS_ACTION", "DECIDED", "ALL"] = "NEEDS_ACTION",
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """The receipts businesses uploaded for repaying their investors, those the investor has not confirmed yet
+    first. Read-only: the investor confirms a repayment, not staff. Reads are logged (both parties' names and
+    accounts)."""
+    return await admin_repayments.list_receipts(db, status=status, page=page, page_size=page_size)
+
+
+# Before "/funding/repayments/{receipt_id}", which would otherwise take "overdue" for a receipt id.
+@router.get(
+    "/funding/repayments/overdue",
+    response_model=AdminOverdueRepaymentsOut,
+    dependencies=[Depends(audit_admin_read("TRANSFER"))],
+)
+async def list_overdue_repayments(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Investor tickets a business is late repaying: days not marked paid (no receipt) after their due date, with
+    how many days, how many working days late and the amount owed. Most working days late first. Display only: no
+    arrears state. Reads are logged (both parties' names)."""
+    return await admin_repayments.list_overdue(db)
+
+
+@router.get(
+    "/funding/repayments/{receipt_id}",
+    response_model=AdminRepaymentReceiptOut,
+    dependencies=[Depends(audit_admin_read("EVIDENCE_FILE", id_param="receipt_id"))],
+)
+async def get_repayment_receipt(
+    receipt_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """One repayment receipt for the panel: the days it pays and the accounts the money moved between."""
+    return await admin_repayments.get_receipt(db, receipt_id)
+
+
+@router.get(
+    "/funding/repayments/{receipt_id}/receipt-url",
+    response_model=AdminReceiptUrlResponse,
+    dependencies=[Depends(audit_admin_read("EVIDENCE_FILE", id_param="receipt_id"))],
+)
+async def get_repayment_receipt_url(
+    receipt_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A 10-minute link to the receipt the business uploaded. Each view is audited."""
+    return await admin_repayments.get_receipt_url(
+        db, receipt_id, actor=current_user, ip_address=request.client.host if request.client else None
     )
 
 

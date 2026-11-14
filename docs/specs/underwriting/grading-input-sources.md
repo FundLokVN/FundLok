@@ -57,7 +57,7 @@ Status: ✅ available today · ⚠️ collected but not usable (unparsed, or dro
 | 2 | `industry` | str | form | ✅ | Must be one of the 15 `supported_industries`. Frontend now submits the engine's exact strings (`lib/constants/industries.ts`) |
 | 3 | `company_size` | micro/small/medium | derived | ⚠️ | Derived from `employee_count` via `company_sizes` bands. Form collects it; **`projects` has no column, so it is dropped** |
 | 4 | `loan_size_vnd` | Decimal | form | ✅ | `loan_applications.requested_amount`. Engine bounds 20M–100M |
-| 5 | `duration_months` | int (3/6/9/12) | form | ⚠️ | Form collects it; **`loan_applications` has no column, so it is dropped** |
+| 5 | `duration_months` | int (1–6) | form | ⚠️ | Form collects it; **`loan_applications` has no column, so it is dropped** |
 | 6 | `operating_months` | int | derived | ⚠️ | From `projects.incorporation_date`; derivation not implemented anywhere yet |
 | 7 | `monthly_revenue` | 24 × Decimal | doc | ⚠️ | VAT declarations and/or e-invoice data. Unparsed. See §6.2 — quarterly filers cannot satisfy this from VAT alone |
 | 8 | `cogs_y1` | Decimal | doc | ⚠️ | B02-DN "Giá vốn hàng bán". Unparsed |
@@ -99,7 +99,7 @@ The form already collects three engine-required values that the API accepts and 
 
 ```
 Modified table: loan_applications
-+ duration_months   INTEGER   nullable   -- loan term; engine allowed_durations_months (3/6/9/12)
++ duration_months   INTEGER   nullable   -- loan term; engine allowed_durations_months (1–6)
 
 Modified table: projects
 + employee_count    INTEGER   nullable   -- headcount as entered by the SME
@@ -127,7 +127,7 @@ from §3.3, and one from §6.4.
   "employee_count": 25,             // required, integer 1..200
   "company_size": "small",          // OPTIONAL from the client; server derives — see §6.3
   "loan_application": {
-    "duration_months": 9            // required when loan_application is present; one of 3,6,9,12
+    "duration_months": 4            // required when loan_application is present; one of 1–6
   }
 }
 ```
@@ -137,7 +137,7 @@ from §3.3, and one from §6.4.
 | Status | Code | Condition |
 |---|---|---|
 | 422 | — | `employee_count` outside 1–200 |
-| 422 | — | `duration_months` not in {3, 6, 9, 12} |
+| 422 | — | `duration_months` not in the allowed set (1–6) |
 | 400 | `INDUSTRY_NOT_SUPPORTED` | `industry` not in `supported_industries` ∪ `excluded_industries` |
 
 ### `GET /underwriting/industries` — new, proposed (§6.4)
@@ -234,7 +234,7 @@ may pass through as null.
 |---|---|---|
 | `industry` in neither supported nor excluded list | `ValueError` | Validate before calling `grade()` |
 | `loan_size_vnd` outside 20M–100M | `ValueError` | Validate at the form and again server-side |
-| `duration_months` not in {3,6,9,12} | `ValueError` | As above |
+| `duration_months` not in the allowed set (1–6) | `ValueError` | As above |
 | `bank_rate_pct >= rate_cap_pct` | `ValueError` | Config error; never user-driven |
 | Fewer than 24 months, or any month null | returns `INSUFFICIENT_DATA` | Surface which document is missing — the engine does not say |
 | `cic_score` or `kyc_aml_passed` null | returns `INSUFFICIENT_DATA` | As above |
@@ -258,7 +258,7 @@ is a bug or a validation miss and must never reach the user as a 500.
    contradicts `employee_count` is overwritten by the derived band.
 4. `test_employee_count_above_two_hundred_rejected` — 201 employees → 422.
 5. `test_create_loan_application_persists_duration_months` — round-trips; a value outside
-   {3,6,9,12} → 422.
+   1–6 → 422.
 6. `test_operating_months_derived_from_incorporation_date` — a company incorporated 18 months ago
    yields `operating_months == 18` and fires soft gate 1.
 7. `test_quarterly_vat_only_applicant_is_insufficient_data` — 8 quarterly figures produce

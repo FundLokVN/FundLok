@@ -6,7 +6,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from app.admin.fee_schemas import AdminRoundFeeOut
 from app.direct_transfer.schemas import FundingWindowOut, PaymentAccountOut
+from app.market.schemas import ProjectedScheduleOut, ProjectionBasisOut
 
 from app.gverify.normalize import normalize_identifier
 
@@ -45,17 +47,25 @@ class AdminStats(BaseModel):
     projects_by_status: dict[str, int]
 
 
+# Whether a user accepted the current Terms & Services and data consent
+# (app/consent): ACCEPTED, REQUIRED (not yet, or only an older version), or
+# NOT_APPLICABLE for admins, who are never asked.
+ConsentState = Literal["ACCEPTED", "REQUIRED", "NOT_APPLICABLE"]
+
+
 class UserRow(BaseModel):
     id: UUID
     email: str
     full_name: str | None
-    # Nullable since f2b3c4d5e6f7: a user has no role until they pick one at
-    # /select-role. `str` here made every admin list containing such a user
-    # fail validation, which is exactly the state a fresh signup is in.
     role: str | None
     status: str
     email_verified: bool
     created_at: datetime | None
+    phone: str | None = None
+    phone_verified_at: datetime | None = None
+    # Filled in by list_users after the page is read (one query per page).
+    consent_status: ConsentState = "REQUIRED"
+    consent_accepted_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -291,6 +301,33 @@ class AdminPaymentAccountDecisionRequest(AdminDecisionRequest):
     accept_difference: bool = False
 
 
+class AdminConsentRecordOut(BaseModel):
+    """One acceptance record from user_consents, as stored."""
+
+    id: UUID
+    version: str
+    # {"TERMS": true, "DATA_PROCESSING": true, "DATA_SHARING_TPV": true}
+    consents: dict[str, bool]
+    verified_by: str
+    ip_address: str | None = None
+    user_agent: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AdminUserConsent(BaseModel):
+    """The user's Terms & data consent, for the admin user panel."""
+
+    status: ConsentState
+    # The version the platform asks for now.
+    current_version: str
+    # When the current version was accepted (null unless ACCEPTED).
+    accepted_at: datetime | None = None
+    # Every record, newest first; older versions included.
+    records: list[AdminConsentRecordOut] = []
+
+
 class AdminUserFullDetail(AdminUserDetail):
     """The user preview panel's payload, in the spirit of AdminProjectDetail:
     the whole panel in one response instead of the client stitching a list row
@@ -332,6 +369,9 @@ class AdminUserFullDetail(AdminUserDetail):
 
     # Empty for a user with no project ownerships, not an error.
     projects: list[AdminUserProjectRef] = []
+
+    # Terms & Services and data consent (Contract 1).
+    consent: AdminUserConsent | None = None
     investments: AdminUserInvestmentSummary
 
 
@@ -450,6 +490,92 @@ class AdminKycImageUrlResponse(BaseModel):
     content_type: str
 
 
+class AdminSignatureCheck(BaseModel):
+    """A signed listing document (Service Agreement or Standing Offer) as NEAC and FundLok's own checks found it
+    (app/loans/agreement/neac_check).
+
+    status: VERIFIED (NEAC accepts the company's signature) | INVALID (NEAC does not; `problems` in its words) |
+    NO_SIGNATURE (NEAC found none) | UNAVAILABLE (NEAC could not be reached; check again).
+    right_document: the PDF carries this application's reference and the document's version.
+    signer_matches: the certificate's MST is the company's (`expected_tax_code`, from its KYB or the project).
+    terms_match: the copy carries the check code the document would carry today (the approved terms, assessment
+    and parties' details); None for a copy with no check code (signed before codes were printed).
+    guarantor_*: Standing Offer only (guarantor_required): a separate valid signature by the Personal Guarantor,
+    whose ID is the signing user's eKYC ID number.
+    """
+
+    status: str
+    checked_at: datetime
+    right_document: bool
+    application_ref: str
+    agreement_version: str
+    signer_matches: bool
+    name_matches: bool
+    expected_tax_code: str | None = None
+    expected_name: str | None = None
+    expected_source: str | None = None  # KYB | PROJECT
+    signer_name: str | None = None
+    signer_id: str | None = None  # as on the certificate, e.g. "MST:1501167629"
+    issuer_name: str | None = None
+    signed_time: str | None = None
+    certificate_validity: str | None = None
+    ocsp: str | None = None
+    crl: str | None = None
+    problems: list[str] = []
+    neac_message: str | None = None
+    document_type: str | None = None
+    terms_match: bool | None = None
+    check_code: str | None = None
+    guarantor_required: bool = False
+    guarantor_matches: bool | None = None
+    guarantor_expected_id: str | None = None
+    guarantor_expected_name: str | None = None
+    guarantor_name: str | None = None  # as on the certificate
+    guarantor_id: str | None = None  # as on the certificate, e.g. "CCCD:079123456789"
+    guarantor_name_matches: bool = False
+    guarantor_problems: list[str] = []
+
+    @classmethod
+    def from_verdict(cls, verdict: dict) -> "AdminSignatureCheck":
+        signer, issuer = verdict.get("signer") or {}, verdict.get("issuer") or {}
+        guarantor = verdict.get("guarantor") or None
+        g_signer = (guarantor or {}).get("signer") or {}
+        required = bool(verdict.get("guarantor_required", guarantor is not None))
+        return cls(
+            document_type=verdict.get("document_type"),
+            terms_match=verdict.get("terms_match"),
+            check_code=verdict.get("check_code"),
+            guarantor_required=required,
+            # An upload's verdict is only recorded when its guarantor checked out.
+            guarantor_matches=bool(guarantor.get("matches", True)) if guarantor else (False if required else None),
+            guarantor_expected_id=(guarantor or {}).get("expected_id"),
+            guarantor_expected_name=(guarantor or {}).get("expected_name"),
+            guarantor_name=g_signer.get("cn"),
+            guarantor_id=g_signer.get("cccd") or g_signer.get("mst"),
+            guarantor_name_matches=bool((guarantor or {}).get("name_matches")),
+            guarantor_problems=list((guarantor or {}).get("problems") or []),
+            status=verdict["status"],
+            checked_at=verdict["checked_at"],
+            right_document=bool(verdict.get("right_document")),
+            application_ref=verdict.get("application_ref") or "",
+            agreement_version=verdict.get("agreement_version") or "",
+            signer_matches=bool(verdict.get("signer_matches")),
+            name_matches=bool(verdict.get("name_matches")),
+            expected_tax_code=verdict.get("expected_tax_code"),
+            expected_name=verdict.get("expected_name"),
+            expected_source=verdict.get("expected_source"),
+            signer_name=signer.get("cn"),
+            signer_id=signer.get("mst") or signer.get("cccd"),
+            issuer_name=issuer.get("cn"),
+            signed_time=verdict.get("signed_time"),
+            certificate_validity=verdict.get("certificate_validity"),
+            ocsp=verdict.get("ocsp"),
+            crl=verdict.get("crl"),
+            problems=list(verdict.get("problems") or []),
+            neac_message=verdict.get("neac_message"),
+        )
+
+
 class AdminApplicationDocument(BaseModel):
     """One file the SME uploaded on the loan-application wizard.
 
@@ -469,6 +595,8 @@ class AdminApplicationDocument(BaseModel):
     file_size_bytes: int | None
     status: str
     uploaded_at: datetime | None
+    # The signed Service Agreement only: the newest NEAC check, null until one has run.
+    signature_check: AdminSignatureCheck | None = None
 
     model_config = {"from_attributes": True}
 
@@ -609,3 +737,246 @@ class AuditLogOut(BaseModel):
     created_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+# --------------------------------------------------------------------------- #
+# Transactions tab: funding rounds and investor transfers (app/admin/funding.py)
+# --------------------------------------------------------------------------- #
+class AdminFundingRoundOut(FundingWindowOut):
+    """A funding round as staff see it: its progress plus whose project it is, and how many of its tickets wait
+    on staff (a receipt to read, or a review to decide)."""
+
+    project_id: UUID
+    project_name: str
+    sme_email: str
+    sme_full_name: str | None = None
+    needs_action: int
+    # The round's service fee (3% + VAT), once it closed and the invoice was
+    # issued. Null before (app/admin/fees.py).
+    fee_invoice: AdminRoundFeeOut | None = None
+
+
+class AdminTransferReceiptOut(BaseModel):
+    """The investor's reported transfer. ``parsed_fields`` is what staff read off the receipt (null until then);
+    ``failure_codes`` are the checks it failed against the QR FundLok issued."""
+
+    id: UUID
+    check_status: str
+    failure_codes: list[str]
+    parsed_fields: dict[str, Any] | None = None
+    has_file: bool
+    original_filename: str | None = None
+    content_type: str | None = None
+    created_at: datetime | None = None
+
+
+class AdminTransferDisputeOut(BaseModel):
+    id: UUID
+    cause: str
+    status: str
+    outcome: str | None = None
+    statement: str | None = None
+    created_at: datetime | None = None
+
+
+class AdminTransferExpectedOut(BaseModel):
+    """What a matching receipt shows: the business's account the QR paid into, and the investor's KYC name."""
+
+    payee_bank_name: str | None = None
+    payee_account_number: str | None = None
+    payee_account_name: str | None = None
+    payer_kyc_name: str
+
+
+class AdminInvestorTransferOut(BaseModel):
+    """One investor ticket and the transfer reported for it. ``needs_action``: a receipt waits to be read, or a
+    review waits for a decision."""
+
+    id: UUID
+    window_id: UUID
+    project_id: UUID
+    project_name: str
+    investor_id: UUID
+    investor_email: str
+    investor_full_name: str | None = None
+    amount_vnd: int
+    reference_code: str
+    status: str
+    review_cause: str | None = None
+    void_reason: str | None = None
+    reserved_at: datetime
+    hold_expires_at: datetime
+    receipt_submitted_at: datetime | None = None
+    attested_at: datetime | None = None
+    confirmed_at: datetime | None = None
+    needs_action: bool
+    transfer: AdminTransferReceiptOut | None = None
+    dispute: AdminTransferDisputeOut | None = None
+    expected: AdminTransferExpectedOut
+
+
+class AdminReceiptUrlResponse(BaseModel):
+    """A short-lived read URL for an investor's transfer receipt."""
+
+    url: str
+    expires_in: int
+    content_type: str
+    original_filename: str | None = None
+
+
+class AdminReceiptFieldsRequest(BaseModel):
+    """What the receipt shows. Leave a field blank when the receipt does not show it: the checks then fail and
+    the ticket goes to review. ``reason`` is recorded with the entry."""
+
+    amount_vnd: int = Field(gt=0, le=10**13)
+    transferred_at: datetime
+    payer_name: str | None = Field(default=None, max_length=200)
+    payer_account: str | None = Field(default=None, max_length=40)
+    payee_account: str | None = Field(default=None, max_length=40)
+    memo: str | None = Field(default=None, max_length=300)
+    bank_txn_id: str | None = Field(default=None, max_length=100)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("transferred_at")
+    @classmethod
+    def _aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("transferred_at needs a timezone")
+        return value
+
+
+class AdminTransferDecisionRequest(BaseModel):
+    """Settle a ticket under review: whether the money reached the business's account."""
+
+    outcome: Literal["RECEIVED", "NOT_RECEIVED"]
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class AdminReceiptDecisionRequest(BaseModel):
+    """Approve or deny an investor's transfer after looking at the receipt. The note is optional; an empty one
+    records that the decision was made by viewing the receipt."""
+
+    outcome: Literal["APPROVED", "DENIED"]
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class AdminFundingActivityOut(BaseModel):
+    """One entry of the transfers' audit trail: who did what to which ticket, and why. ``check_status`` and
+    ``failure_codes`` come with a receipt check (MATCHED: recorded as paid; MISMATCH: sent to review; REJECTED);
+    ``reason`` is the note staff gave. ``actor`` is null for an action no signed-in person took."""
+
+    id: UUID
+    action: str
+    created_at: datetime | None = None
+    ip_address: str | None = None
+    actor: ActorOut | None = None
+    tranche_id: UUID | None = None
+    reference_code: str | None = None
+    amount_vnd: int | None = None
+    project_name: str | None = None
+    investor: ActorOut | None = None
+    check_status: str | None = None
+    failure_codes: list[str] = []
+    tranche_status: str | None = None
+    reason: str | None = None
+
+
+class AdminRepaymentAccountOut(BaseModel):
+    """A bank account as staff check a repayment receipt against it."""
+
+    bank_name: str
+    account_number: str
+    account_name: str
+
+
+class AdminRepaymentDayOut(BaseModel):
+    """One repayment day a business's receipt pays, and the transfer recorded for it."""
+
+    repayment_day_id: UUID
+    transfer_id: UUID
+    kind: Literal["INSTALMENT", "STUB"]
+    day_index: int = 0
+    due_date: date
+    principal_vnd: int
+    interest_vnd: int
+    gross_vnd: int
+    tax_withheld_vnd: int
+    net_vnd: int
+    status: Literal["DUE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
+    check_status: str
+
+
+class AdminRepaymentReceiptOut(BaseModel):
+    """A receipt the business uploaded for a repayment to one investor, and the days it pays. ``check_status``:
+    AWAITING_FIELDS (waits for the investor to confirm it arrived; ``needs_action``), MATCHED (confirmed by the
+    investor, or approved by staff before investors confirmed: the days are paid and settled) or REJECTED (denied
+    by staff before investors confirmed: the days were due again). Read-only for staff. ``payee`` is the investor's
+    account the money should reach, ``payer`` the business's. ``open_report``: the investor reported one of these
+    days as never arriving."""
+
+    id: UUID
+    tranche_id: UUID
+    window_id: UUID
+    project_name: str
+    reference_code: str
+    tranche_amount_vnd: int = 0
+    tranche_paid_days: int = 0
+    tranche_total_days: int = 0
+    business: ActorOut
+    investor: ActorOut
+    submitted_at: datetime
+    check_status: Literal["AWAITING_FIELDS", "MATCHED", "REJECTED"]
+    needs_action: bool
+    gross_vnd: int
+    tax_withheld_vnd: int
+    net_vnd: int
+    days: list[AdminRepaymentDayOut]
+    payee: AdminRepaymentAccountOut | None = None
+    payer: AdminRepaymentAccountOut | None = None
+    original_filename: str | None = None
+    content_type: str | None = None
+    open_report: bool = False
+    # The ticket's late days (app/admin/repayments.py `overdue_summary`): days the business has not marked paid
+    # after their due date. ``tranche_overdue_days`` counts due dates; the amount is what it owes for them (net).
+    tranche_overdue_days: int = 0
+    tranche_overdue_net_vnd: int = 0
+    tranche_oldest_overdue_date: date | None = None
+    tranche_working_days_late: int = 0
+
+
+class AdminOverdueRepaymentOut(BaseModel):
+    """One investor ticket the business is late repaying: days still DUE (not marked paid, no receipt) after
+    their due date. ``overdue_days`` counts due dates; ``working_days_late`` counts the working days since the
+    oldest one (that day included, today not: a day due Monday and unpaid on Tuesday is 1 working day late);
+    ``overdue_net_vnd`` is what the business owes the investor for them."""
+
+    tranche_id: UUID
+    window_id: UUID
+    project_name: str
+    reference_code: str
+    business: ActorOut
+    investor: ActorOut
+    overdue_days: int
+    oldest_due_date: date
+    working_days_late: int
+    overdue_net_vnd: int
+
+
+class AdminOverdueRepaymentsOut(BaseModel):
+    """Every late repayment on the platform as of ``as_of`` (today, ICT), most working days late first."""
+
+    as_of: date
+    tickets: int
+    businesses: int
+    overdue_days: int
+    overdue_net_vnd: int
+    items: list[AdminOverdueRepaymentOut]
+
+
+class AdminRepaymentPreviewOut(ProjectedScheduleOut):
+    """How an investment's repayment is worked out, for the approval panel. PREVIEW: the days it gets if staff
+    approve it today (repayment starts the next working day). ACTUAL: the days it got when it was approved.
+    ``basis`` walks through each step of the arithmetic."""
+
+    kind: Literal["PREVIEW", "ACTUAL"]
+    basis: ProjectionBasisOut

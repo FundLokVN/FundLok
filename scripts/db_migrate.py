@@ -14,6 +14,7 @@ Usage -- see scripts/README-db-migrate.md for the full guide:
   bun run db:copy                                    # interactive: asks for both URLs
   bun run db:copy --dry-run                          # pre-flight only, changes nothing
   python3 scripts/db_migrate.py --dump-file fl.dump  # dump to a file, then restore it
+  bun run db:dump --dump-file fl.dump                # download only: save the source to a file
 
 Without a terminal (CI), pass the URLs via SOURCE_DATABASE_URL / TARGET_DATABASE_URL
 (env vars keep passwords out of shell history and `ps`) and --yes.
@@ -84,6 +85,16 @@ class MigrationError(Exception):
     """A step failed; the message is shown to the user as-is."""
 
 
+# Shown when a URL cannot be split into its parts. Never include the URL or a
+# parser message here: when a symbol in the password broke the URL, both carry
+# part of the password.
+_UNREADABLE_URL = (
+    "invalid database URL: could not read its host, port and database. If the password has "
+    "# ? / or other symbols, percent-encode them (# as %23, ? as %3F, / as %2F) or use a "
+    "password of letters and digits"
+)
+
+
 @dataclass(frozen=True)
 class Database:
     """A libpq connection URL with the password held separately."""
@@ -134,10 +145,19 @@ class DatabaseInfo:
 
 def parse_database_url(raw: str) -> Database:
     """Turn an app/SQLAlchemy/libpq Postgres URL into a password-free libpq URL."""
-    parts = urlsplit(raw.strip())
+    try:
+        parts = urlsplit(raw.strip())
+    except ValueError:  # e.g. an unclosed IPv6 bracket
+        raise MigrationError(_UNREADABLE_URL) from None
     scheme = parts.scheme.split("+", 1)[0]
     if scheme not in ("postgresql", "postgres"):
         raise MigrationError(f"not a PostgreSQL URL (scheme {parts.scheme!r})")
+    # A raw # ? or / in the password ends the credentials early: the rest of the
+    # password lands in the fragment, query or path, and the user:password part
+    # is read as host:port. A Postgres URL has no fragment, and an @ after the
+    # host means the split happened inside the credentials.
+    if parts.fragment or "@" in parts.path or "@" in parts.query:
+        raise MigrationError(_UNREADABLE_URL)
 
     userinfo, at, hostinfo = parts.netloc.rpartition("@")
     password = None
@@ -162,8 +182,8 @@ def parse_database_url(raw: str) -> Database:
     )
     try:
         _, _, dbname = db.identity
-    except ValueError as exc:  # e.g. a non-numeric port
-        raise MigrationError(f"invalid database URL: {exc}") from None
+    except ValueError:  # a non-numeric port; the parser's message would quote it
+        raise MigrationError(_UNREADABLE_URL) from None
     if not dbname:
         raise MigrationError("database URL has no database name")
     return db
@@ -400,7 +420,17 @@ def is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
-def greet() -> None:
+def greet(dump_only: bool = False) -> None:
+    if dump_only:
+        print(
+            "\n👋 Hello! This downloads one PostgreSQL database into a file.\n\n"
+            "   1. Checks the database and picks a matching pg_dump\n"
+            "   2. Saves everything to the file (readable only by you)\n"
+            "   3. Checks the file can be read back\n\n"
+            "   The database is only read. Ctrl+C quits.\n",
+            flush=True,
+        )
+        return
     print(
         "\n👋 Hello! This copies one PostgreSQL database into another.\n\n"
         "   1. Checks both databases and picks matching pg_dump/pg_restore tools\n"
@@ -472,6 +502,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--dump-file", type=Path, help="dump to this new file (mode 600) and restore from it, instead of streaming"
     )
     parser.add_argument(
+        "--dump-only",
+        action="store_true",
+        help="only download the source into --dump-file; no target, nothing is restored",
+    )
+    parser.add_argument(
         "--pg-bin-dir",
         default=os.environ.get("PG_BIN_DIR"),
         help="directory with pg_dump/pg_restore/psql (default: $PG_BIN_DIR, else found automatically)",
@@ -488,6 +523,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
     parser.add_argument("-v", "--verbose", action="store_true", help="pass --verbose to pg_dump and pg_restore")
     args = parser.parse_args(argv)
+    if args.dump_only:
+        if not args.dump_file:
+            parser.error("--dump-only needs --dump-file PATH: the file to save the download in")
+        if not args.source and not is_interactive():
+            parser.error("--source (or SOURCE_DATABASE_URL) is required when not running in a terminal")
+        return args
     if (not args.source or not args.target) and not is_interactive():
         parser.error(
             "--source and --target (or SOURCE_DATABASE_URL / TARGET_DATABASE_URL) are required "
@@ -496,7 +537,49 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return args
 
 
+def dump_only(args: argparse.Namespace) -> int:
+    """Download the source into a new file and check it reads back. No target."""
+    source = resolve_database(args.source, "Source", "the database to download (it is only read)")
+    if args.dump_file.exists():
+        raise MigrationError(f"{args.dump_file} already exists; choose a new --dump-file path")
+
+    installs = discover_tool_installs(args.pg_bin_dir)
+    _, inspector = installs[-1]
+    log("Pre-flight checks")
+    src = inspect_database(inspector, source)
+    log(
+        f"  source: {source.label}  (PostgreSQL {src.server_major}, {len(src.tables)} tables, alembic {src.alembic_revision or '-'})"
+    )
+    tools_major, tools = choose_tools(installs, src.server_major)
+    log(f"  tools:  PostgreSQL {tools_major} client  ({Path(tools.pg_dump).parent})")
+    if "-pooler." in source.identity[0]:
+        warn(f"{source.label} looks like a Neon pooled endpoint; pg_dump needs the direct host (drop '-pooler')")
+    if not src.tables:
+        warn("source has no tables; the file will be empty")
+
+    dump_cmd = dump_command(tools, source, verbose=args.verbose)
+    if args.dry_run:
+        log(f"Would run: {shlex.join(dump_cmd)} > {shlex.quote(str(args.dump_file))}")
+        log("Dry run: nothing was saved.")
+        return 0
+
+    log(f"Downloading {source.label} to {args.dump_file} ...")
+    dump_to_file(dump_cmd, source, args.dump_file)
+    listing = subprocess.run(
+        [tools.pg_restore, "--list", str(args.dump_file)], capture_output=True, text=True, check=False
+    )
+    if listing.returncode != 0:
+        raise MigrationError(f"the file was saved but pg_restore cannot read it (exit {listing.returncode})")
+    data_entries = sum(" TABLE DATA " in line for line in listing.stdout.splitlines())
+    size_mb = args.dump_file.stat().st_size / (1024 * 1024)
+    log(f"Saved {args.dump_file} ({size_mb:,.1f} MB, data for {data_entries} tables). It reads back cleanly.")
+    log("It contains the full database, including personal and financial data: keep it private and delete it when done.")
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
+    if args.dump_only:
+        return dump_only(args)
     source = resolve_database(args.source, "Source", "the database to copy FROM (it is only read)")
     target = resolve_database(args.target, "Target", "the database to copy INTO (its objects get replaced)")
     if source.identity == target.identity:
@@ -605,7 +688,7 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(errors="replace")
     args = parse_args(argv)
     if is_interactive():
-        greet()
+        greet(dump_only=args.dump_only)
     try:
         return run(args)
     except MigrationError as exc:

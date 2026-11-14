@@ -96,6 +96,35 @@ def test_parse_url_rejects_invalid(raw):
         parse_database_url(raw)
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # The # ends the URL: "postgres:`Zq<|Wx" is read as host:port, and the
+        # port error used to quote it back, password fragment and all.
+        "postgresql://postgres:`Zq<|Wx#Vy}~#Tu@127.0.0.1:6543/fundlok",
+        "postgresql://postgres:Zq?WxVy@127.0.0.1:6543/fundlok",
+        "postgresql://postgres:Zq/WxVy@127.0.0.1:6543/fundlok",
+        # A password starting with digits parses as a valid port, so only the @
+        # left in the path gives the split away.
+        "postgresql://postgres:1234/WxVy@127.0.0.1:6543/fundlok",
+    ],
+)
+def test_parse_url_error_never_shows_a_password_split_by_a_symbol(raw):
+    with pytest.raises(MigrationError) as excinfo:
+        parse_database_url(raw)
+    message = str(excinfo.value)
+    assert "could not read its host, port and database" in message
+    assert "%23" in message  # says how to fix it
+    for fragment in ("Zq", "Wx", "Vy", "Tu", "1234"):
+        assert fragment not in message
+
+
+def test_parse_url_accepts_the_same_symbols_percent_encoded():
+    db = parse_database_url("postgresql://postgres:%60Zq%3C%7CWx%23Vy%7D~%23Tu@127.0.0.1:6543/fundlok")
+    assert db.password == "`Zq<|Wx#Vy}~#Tu"
+    assert db.label == "127.0.0.1:6543/fundlok"
+
+
 def test_identity_treats_spellings_of_one_database_as_equal():
     a = parse_database_url("postgresql+asyncpg://u:p@LocalHost/db?ssl=require")
     b = parse_database_url("postgres://other:x@localhost:5432/db")
@@ -261,3 +290,87 @@ def test_discover_tool_installs_errors_on_incomplete_bin_dir(tmp_path):
     (tmp_path / "pg_dump").chmod(0o755)
     with pytest.raises(MigrationError, match="not found"):
         discover_tool_installs(str(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# --dump-only: download the source into a file, no target
+# --------------------------------------------------------------------------- #
+
+
+def test_dump_only_needs_a_file(capsys):
+    with pytest.raises(SystemExit):
+        main(["--dump-only", "--source", "postgresql://u:p@h/db"])
+    assert "--dump-only needs --dump-file" in capsys.readouterr().err
+
+
+def _fake_source(monkeypatch, dumped: Path):
+    monkeypatch.setattr(db_migrate, "discover_tool_installs", lambda bin_dir: [(16, TOOLS)])
+    monkeypatch.setattr(
+        db_migrate,
+        "inspect_database",
+        lambda tools, db: db_migrate.DatabaseInfo(
+            server_major=16, tables=[("public", "users"), ("public", "projects")], alembic_revision="abc123"
+        ),
+    )
+
+    def fake_dump(cmd, source, path):
+        assert source.password == "s3cret"  # via PGPASSWORD, not the command
+        assert all("s3cret" not in part for part in cmd)
+        path.write_bytes(b"PGDMP")
+
+    monkeypatch.setattr(db_migrate, "dump_to_file", fake_dump)
+
+    def fake_run(cmd, **kwargs):
+        assert cmd == [TOOLS.pg_restore, "--list", str(dumped)]
+        listing = "1; 0 0 TABLE DATA public users owner\n2; 0 0 TABLE DATA public projects owner\n"
+        return db_migrate.subprocess.CompletedProcess(cmd, 0, stdout=listing, stderr="")
+
+    monkeypatch.setattr(db_migrate.subprocess, "run", fake_run)
+
+
+def test_dump_only_saves_the_source_without_asking_for_a_target(monkeypatch, tmp_path, capsys):
+    out = tmp_path / "neon.dump"
+    _fake_source(monkeypatch, out)
+
+    rc = main(["--dump-only", "--dump-file", str(out), "--source", "postgresql://u:s3cret@ep-x.neon.tech/neondb"])
+
+    assert rc == 0
+    assert out.read_bytes() == b"PGDMP"
+    printed = capsys.readouterr()
+    assert "data for 2 tables" in printed.out
+    assert "Target" not in printed.out
+    assert "s3cret" not in printed.out + printed.err
+
+
+def test_dump_only_dry_run_saves_nothing(monkeypatch, tmp_path, capsys):
+    out = tmp_path / "neon.dump"
+    _fake_source(monkeypatch, out)
+
+    rc = main(
+        ["--dump-only", "--dry-run", "--dump-file", str(out), "--source", "postgresql://u:s3cret@ep-x.neon.tech/neondb"]
+    )
+
+    assert rc == 0
+    assert not out.exists()
+    assert "nothing was saved" in capsys.readouterr().out
+
+
+def test_dump_only_never_overwrites_a_file(monkeypatch, tmp_path, capsys):
+    out = tmp_path / "neon.dump"
+    out.write_bytes(b"older backup")
+    _fake_source(monkeypatch, out)
+
+    rc = main(["--dump-only", "--dump-file", str(out), "--source", "postgresql://u:s3cret@ep-x.neon.tech/neondb"])
+
+    assert rc == 1
+    assert out.read_bytes() == b"older backup"
+    assert "already exists" in capsys.readouterr().err
+
+
+def test_dump_only_warns_about_the_neon_pooler(monkeypatch, tmp_path, capsys):
+    out = tmp_path / "neon.dump"
+    _fake_source(monkeypatch, out)
+
+    main(["--dump-only", "--dump-file", str(out), "--source", "postgresql://u:s3cret@ep-x-pooler.neon.tech/neondb"])
+
+    assert "Neon pooled endpoint" in capsys.readouterr().err

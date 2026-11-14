@@ -2,11 +2,13 @@
 # the console-created Cloud Build trigger has been deleted, see
 # docs/deployment/ci-cd-pipeline.md).
 #
-#   PR to preview / main  -> migration check + tests + dependency audit
-#   push to preview       -> migration check + tests + dependency audit -> deploy "staging"
-#   push to main          -> migration check + tests + dependency audit -> deploy "prod-api"
+#   PR to preview / main  -> migration check + tests + dependency audit + image scan
+#   push to preview       -> migration check + tests + dependency audit + image scan -> deploy "staging"
+#   push to main          -> migration check + tests + dependency audit + image scan -> deploy "prod-api"
+#   nightly on main       -> dependency audit + image scan only; never deploys
 #
-# Deploy jobs are gated with `needs: [migration-check, tests, dependency-audit]`
+# Deploy jobs are gated with
+# `needs: [migration-check, tests, dependency-audit, image-scan]`
 # — deployment only runs when all CI pipelines pass.
 # Google Cloud auth is keyless via Workload Identity Federation.
 #
@@ -25,16 +27,28 @@ on:
     branches: [ "main", "preview" ]
   pull_request:
     branches: [ "main", "preview" ]
+  # New advisories are published with no change to our code (dnspython
+  # CVE-2026-128089 appeared between two pushes on 2026-11-13/14). The nightly
+  # run re-scans main so they show up within a day, not at the next push.
+  # 01:00 UTC is 08:00 in Vietnam. GitHub emails a scheduled run's failure to
+  # whoever last changed this cron line.
+  schedule:
+    - cron: "0 1 * * *"
 
 # One run at a time per branch; never cancel a deploy mid-flight.
+# The nightly run gets its own group: it shares refs/heads/main with pushes,
+# and a newer queued run cancels an older *pending* one in the same group,
+# so it could otherwise cancel a prod deploy waiting its turn.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
   cancel-in-progress: false
 
 jobs:
   migration-check:
     name: Check Schema Migrations
     runs-on: ubuntu-latest
+    # Code checks: nothing changes overnight, so the nightly scan skips them.
+    if: github.event_name != 'schedule'
 
     services:
       postgres:
@@ -83,6 +97,7 @@ jobs:
   tests:
     name: Run Test Suite
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
 
     services:
       postgres:
@@ -135,8 +150,8 @@ jobs:
     name: Audit Dependencies
     runs-on: ubuntu-latest
 
-    # Gating the deploy jobs via `needs: [migration-check, tests, dependency-audit]`.
-    # Deploys will only trigger if all CI checks, including vulnerability audit, pass.
+    # Gates the deploy jobs (see their `needs:`). Deploys only trigger if all
+    # CI checks, including this audit and the image scan, pass.
 
     steps:
       - name: Check out repository
@@ -161,10 +176,54 @@ jobs:
           pipx run pip-audit==2.10.1 \
             --requirement requirements-dev.txt --no-deps --strict
 
+  image-scan:
+    name: Scan Container Image
+    runs-on: ubuntu-latest
+
+    # The audit above reads only requirements*.txt. Prod runs the image Cloud
+    # Run builds from ./Dockerfile, so this builds that image and scans all of
+    # it: the base image's Debian packages, the installed Python packages, and
+    # any secret copied in by mistake.
+    #
+    # Fails only on HIGH/CRITICAL findings that have a fix (--ignore-unfixed).
+    # python:3.12-slim carries ~200 Debian advisories with no released fix
+    # (2026-11-14); nothing in this repo can fix those, and failing on them
+    # would keep this job red forever. The first scan step lists every
+    # fixable finding at any severity, for the log.
+    #
+    # trivy runs from its official image pinned by digest rather than through
+    # a third-party action, so a re-pushed tag cannot change what runs here.
+    # To upgrade: docker buildx imagetools inspect aquasec/trivy:<version>
+    env:
+      TRIVY_IMAGE: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build the image Cloud Run deploys
+        run: |
+          docker build --pull -t fundlok-api:ci .
+          docker save fundlok-api:ci -o "$RUNNER_TEMP/image.tar"
+
+      - name: List fixable findings (all severities, report only)
+        run: |
+          docker run --rm -v "$RUNNER_TEMP:/scan" "$TRIVY_IMAGE" image \
+            --input /scan/image.tar --cache-dir /scan/trivy-cache \
+            --scanners vuln,secret --ignore-unfixed --exit-code 0 \
+            --table-mode detailed
+
+      - name: Fail on fixable HIGH/CRITICAL findings
+        run: |
+          docker run --rm -v "$RUNNER_TEMP:/scan" "$TRIVY_IMAGE" image \
+            --input /scan/image.tar --cache-dir /scan/trivy-cache --skip-db-update \
+            --scanners vuln,secret --ignore-unfixed \
+            --severity HIGH,CRITICAL --exit-code 1 --table-mode detailed
+
   deploy-staging:
     name: Deploy to Cloud Run (staging)
     runs-on: ubuntu-latest
-    needs: [migration-check, tests, dependency-audit]
+    needs: [migration-check, tests, dependency-audit, image-scan]
     if: github.event_name == 'push' && github.ref == 'refs/heads/preview'
 
     permissions:
@@ -206,7 +265,7 @@ jobs:
   deploy-production:
     name: Deploy to Cloud Run (prod-api)
     runs-on: ubuntu-latest
-    needs: [migration-check, tests, dependency-audit]
+    needs: [migration-check, tests, dependency-audit, image-scan]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     permissions:

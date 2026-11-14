@@ -19,10 +19,6 @@ MAX_RECIPIENTS = 50
 # a newline in a header would let the value add headers of its own (Bcc: …).
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
-# Google shows an App Password as four groups of four letters. ASCII only:
-# [A-Za-z0-9], not \w, which would also accept non-ASCII letters and digits.
-_APP_PASSWORD = re.compile(r"[A-Za-z0-9]{16}")
-
 # A lower-case ASCII host name with at least one dot. IDNs go in their
 # punycode (xn--) form, which is what the recipient check compares against.
 _DOMAIN = re.compile(
@@ -52,14 +48,21 @@ def _plain_address(address: str) -> str:
 
 
 class EmailSettingsOut(BaseModel):
-    """The signed-in admin's own Gmail connection. Never the password itself:
-    only whether one is stored."""
+    """The signed-in admin's own Gmail connection. Never the OAuth token:
+    only whether one is stored (`configured`)."""
 
+    # A Google account is connected and can send.
     configured: bool
     enabled: bool
+    # The connected Google account, from Google's verified ID token. Also set
+    # when `needs_reconnect`, to say which account to reconnect.
     gmail_address: str | None = None
     from_name: str | None = None
-    has_app_password: bool
+    # An account was connected but Google no longer accepts it (revoked in
+    # the Google account, or an App Password connection from before OAuth).
+    needs_reconnect: bool = False
+    # When the current token was granted.
+    connected_at: datetime | None = None
     last_verified_at: datetime | None = None
     updated_at: datetime | None = None
     # The admin's email signature (appended when "Include my email signature"
@@ -67,27 +70,26 @@ class EmailSettingsOut(BaseModel):
     signature_name: str | None = None
     signature_title: str | None = None
     signature_phone: str | None = None
+    # A system admin chose this account to send FundLok's automatic
+    # repayment reminders (System settings), so disconnecting it or pausing
+    # sending also stops those.
+    is_reminder_sender: bool = False
 
 
 class EmailSettingsUpdate(BaseModel):
+    """What an admin edits by hand. The Google account itself comes from the
+    OAuth flow (GET /admin/email/oauth/authorize), never from this body."""
+
     model_config = ConfigDict(extra="forbid")
 
-    gmail_address: EmailStr
     from_name: str = Field(min_length=1, max_length=80)
-    # None or blank keeps the stored password. Spaces are dropped, so it can be
-    # pasted exactly as Google displays it ("abcd efgh ijkl mnop").
-    app_password: str | None = Field(default=None, max_length=64)
+    # Turning it on needs a connected account (400 EMAIL_NOT_CONFIGURED).
     enabled: bool
     # The admin's email signature. Blank keeps the stored value for the
     # existing fields (the whole row is sent each save).
     signature_name: str | None = Field(default=None, max_length=80)
     signature_title: str | None = Field(default=None, max_length=120)
     signature_phone: str | None = Field(default=None, max_length=40)
-
-    @field_validator("gmail_address")
-    @classmethod
-    def _gmail_address(cls, value: str) -> str:
-        return _plain_address(value)
 
     @field_validator("from_name")
     @classmethod
@@ -104,17 +106,12 @@ class EmailSettingsUpdate(BaseModel):
         # the message body. Single line, blank kept as None.
         return _single_line(value, "A signature field") or None
 
-    @field_validator("app_password")
-    @classmethod
-    def _app_password(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = "".join(value.split())
-        if not value:
-            return None
-        if not _APP_PASSWORD.fullmatch(value):
-            raise ValueError("Enter the 16-character app password from your Google account")
-        return value
+
+class EmailOAuthStart(BaseModel):
+    """Where to send the admin's browser to connect their Google account."""
+
+    authorization_url: str
+
 
 class EmailPolicyOut(BaseModel):
     """Org-wide rules for every admin's email. Any admin can read them (the
@@ -217,6 +214,49 @@ class SendEmailRequest(EmailContent):
     @classmethod
     def _to(cls, values: list[str]) -> list[str]:
         return [_plain_address(value) for value in values]
+
+
+# Whether an admin's connected account can send repayment reminders now.
+#   READY:           connected, sending on, the owner an active admin.
+#   PAUSED:          connected, but its owner switched sending off.
+#   NEEDS_RECONNECT: Google no longer accepts the token, or it belongs to
+#                    another address than the owner's sign-in email.
+#   NOT_CONNECTED:   no Google account connected (or disconnected since).
+#   NOT_ADMIN:       the owner is no longer an active admin.
+ReminderSenderStatus = Literal[
+    "READY", "PAUSED", "NEEDS_RECONNECT", "NOT_CONNECTED", "NOT_ADMIN"
+]
+
+
+class ReminderSenderAccount(BaseModel):
+    """An admin's connected account, as the reminder-sender picker shows it.
+    Never the token."""
+
+    user_id: UUID
+    full_name: str | None = None
+    gmail_address: str | None = None
+    from_name: str | None = None
+    status: ReminderSenderStatus
+
+
+class ReminderSenderOut(BaseModel):
+    """SYSTEM_ADMIN only. Whose connected Gmail account sends the automatic
+    repayment reminders, and which accounts could."""
+
+    # Null: none chosen, so no automatic reminder goes out.
+    sender: ReminderSenderAccount | None = None
+    # Active admins with a connected Google account, the chosen one included
+    # whatever its state.
+    candidates: list[ReminderSenderAccount]
+    updated_at: datetime | None = None
+    updated_by: UUID | None = None
+
+
+class ReminderSenderUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # The admin whose connected account sends reminders. Null stops them.
+    user_id: UUID | None
 
 
 class RecipientOut(BaseModel):

@@ -9,6 +9,7 @@ from uuid import UUID
 
 from app.auth.password_policy import reject_breached_password
 from app.auth.service import require_step_up, revoke_other_sessions
+from app.phone_verification.phone import same_number
 from app.users.models import Role, User
 from app.users.schemas import (
     ChangePasswordRequest,
@@ -38,6 +39,21 @@ def build_avatar_url(user: User) -> str | None:
         return None
 
 
+# FundLok staff, not platform users: never asked for a phone, as for the consent.
+_PHONE_EXEMPT_ROLES = {Role.ADMIN.value, Role.SYSTEM_ADMIN.value}
+
+
+def phone_verification_pending(user: User) -> bool:
+    """Whether the account must prove a phone number before it goes on. Every
+    SME and investor, and every new account before it has a role: accounts that
+    signed up before phone verification are asked too (spec rule 1)."""
+    return (
+        settings.PHONE_VERIFICATION_REQUIRED
+        and user.role not in _PHONE_EXEMPT_ROLES
+        and user.phone_verified_at is None
+    )
+
+
 def user_me_payload(user: User) -> dict:
     return {
         "id": str(user.id),
@@ -47,6 +63,12 @@ def user_me_payload(user: User) -> dict:
         "phone": user.phone,
         "status": user.status,
         "email_verified": user.email_verified,
+        "phone_verified": user.phone_verified_at is not None,
+        # The phone gate (docs/specs/users/phone-verification.md): every SME
+        # and investor account proves a phone number, a new one before it
+        # chooses a role. Computed here so the frontend proxy has one flag to
+        # route on and never re-derives the rule. Staff are never gated.
+        "phone_verification_required": phone_verification_pending(user),
         "bio": user.bio,
         "email_signature": user.email_signature,
         "avatar_url": build_avatar_url(user),
@@ -127,6 +149,10 @@ async def update_user_profile(db: AsyncSession, body: UserUpdateRequest, current
             clash = result.scalar_one_or_none()
             if clash:
                 raise HTTPException(status_code=400, detail="Phone number already registered")
+        # A proof covers one number. Re-saving the same number in another
+        # spelling (0912… for +84912…) keeps it.
+        if not same_number(current_user.phone, phone):
+            current_user.phone_verified_at = None
         current_user.phone = phone
 
     if "full_name" in data:
@@ -150,6 +176,11 @@ async def select_user_role(db: AsyncSession, role: Role, current_user: User) -> 
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Role has already been set",
+        )
+    if phone_verification_pending(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Verify your phone number before choosing a role",
         )
     current_user.role = role.value
     db.add(current_user)

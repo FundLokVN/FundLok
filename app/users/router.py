@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.consent import service as consent_service
 from app.core.database import get_db
 from app.notifications.models import (
     EVENT_VERIFICATION_REQUIRED,
@@ -40,10 +41,13 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 
 @router.get("/me")
-def read_current_user(current_user: User = Depends(get_current_user_without_second_factor)):
-    # Readable without the admin second-factor check, so the frontend can load
-    # an admin who still has to set one up and show them where to do it.
-    return user_me_payload(current_user)
+async def read_current_user(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_without_second_factor),
+):
+    payload = user_me_payload(current_user)
+    payload["consent_required"] = await consent_service.is_required(db, current_user)
+    return payload
 
 
 @router.patch("/me")
@@ -124,6 +128,7 @@ async def select_role(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    await consent_service.require_consent(db, current_user)
     before = {"role": current_user.role}
     user = await select_user_role(db, body.role, current_user)
     append_audit(

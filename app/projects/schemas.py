@@ -97,10 +97,10 @@ class LoanApprovalOut(BaseModel):
     The business score and reference rate are the STORED result of the score
     run the operator decided on (INV-5: never recomputed here). A decided
     request cannot be re-scored, so these do not change after approval. The
-    repayment figures follow INV-2 (flat interest, charged once); the daily
-    amount is an estimate on the params' working-day count until the
-    business-day calendar exists (INV-6). The offer the SME signs is the
-    binding version.
+    repayment figures follow INV-2 (flat interest, charged once) and are the
+    repayment schedule's own (21 working days a month, the daily instalment
+    floored; agreement/terms.repayment_estimate), the same the Standing Offer
+    prints. The documents the SME signs are the binding version.
 
     Deliberately absent: the bank reference rate, factor scores and every
     other pricing input — internal, never on an applicant surface.
@@ -160,7 +160,6 @@ class MarketplaceListingOut(BaseModel):
     target_amount: int
     funded_amount: int
     min_ticket: int | None
-    # Distinct investors with a FILLED order.
     investor_count: int
     open_at: datetime | None
     close_at: datetime | None

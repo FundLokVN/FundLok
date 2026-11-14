@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.consent import service as consent_service
 from app.core.config import settings
 from app.core.database import get_db
 from app.gverify import kyb_service, service
@@ -96,6 +97,7 @@ async def _run_verification(
     user: User,
     handoff: HandoffClaims | None = None,
 ) -> KycVerifyResponse:
+    await consent_service.require_consent(db, user)
     await service.lock_user_verification(db, user.id, "KYC")
     latest = await service.latest_for_user(db, user.id)
     # A handoff token is spent once any attempt has been made since it was
@@ -299,6 +301,7 @@ async def kyb_verify(
     A REJECTED outcome is still 201 — the business verdict is in the body.
     Only provider failures surface as 502 (the attempt is persisted FAILED).
     """
+    await consent_service.require_consent(db, current_user)
     await service.lock_user_verification(db, current_user.id, "KYB")
     latest = await kyb_service.latest_for_user(db, current_user.id)
     if latest is not None and latest.is_approved:

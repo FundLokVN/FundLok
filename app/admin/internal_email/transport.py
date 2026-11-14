@@ -1,36 +1,26 @@
-"""Deliver one message through Gmail SMTP with the stored app password.
+"""Deliver messages through the Gmail API as the admin's connected account.
 
-FIXED HOST
-Gmail's SMTP endpoint is a constant, not a setting. If the host and port were
-editable, the settings screen could point the server at anything on its
-network and have it open connections there (SSRF over SMTP). Only the address
-and password are configurable.
+Each send trades the stored refresh token for a fresh access token, then
+posts each message (RFC 2822, base64url) to users.messages.send. Google's
+hosts are constants in google.py; nothing on the settings screen can point
+the server anywhere else.
 
-TLS
-Implicit TLS on 465 with `ssl.create_default_context()`, which verifies the
-certificate and host name. smtplib's own default context does neither, which
-would hand the app password to anyone able to intercept the connection.
-
-Blocking smtplib, called from the async service through a thread
-(run_in_threadpool), with a timeout so a stalled connection cannot hold a
-worker forever.
+Async httpx with a timeout per request, and an overall budget per send, so a
+stalled Google cannot hold the request past the proxy in front of the API.
 """
 
 import logging
-import smtplib
-import ssl
 import time
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 
+import httpx
+
+from app.admin.internal_email import google
 from app.utils.email import logo_bytes
 from app.utils.email_templates import LOGO_CID
 
 logger = logging.getLogger(__name__)
-
-GMAIL_SMTP_HOST = "smtp.gmail.com"
-GMAIL_SMTP_PORT = 465
-TIMEOUT_SECONDS = 20
 
 # Overall budget for one send's loop of messages. Past it, no new message is
 # started and the rest are returned undelivered, as when the connection
@@ -40,16 +30,51 @@ TIMEOUT_SECONDS = 20
 # undelivered addresses back in the To list for a second send.
 SEND_BUDGET_SECONDS = 25
 
+# Gmail API answers that mean the token cannot send at all: revoked or
+# expired (401), or connected without the gmail.send scope.
+_RECONNECT_REASONS = {"insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "authError"}
+# A 400 is about the one message (an address Gmail will not take) unless it
+# says the account itself cannot send, e.g. "Mail service not enabled".
+_ACCOUNT_REASONS = _RECONNECT_REASONS | {"failedPrecondition", "FAILED_PRECONDITION"}
+# The Gmail API is not enabled on the OAuth client's Google Cloud project: a
+# setup step, so retrying is pointless until someone enables it.
+_API_DISABLED_REASONS = {"SERVICE_DISABLED", "accessNotConfigured"}
+
 
 class DeliveryError(Exception):
     """A send that did not happen. `code` is the X-Error-Code the console
     translates; `message` is the English detail. Neither carries Gmail's raw
     response, which goes to the log instead."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, reconnect: bool = False):
         super().__init__(message)
         self.code = code
         self.message = message
+        # Google refused the token itself: the stored connection is dead and
+        # only "Connect with Google" again can fix it.
+        self.reconnect = reconnect
+
+
+def _reconnect_required() -> DeliveryError:
+    return DeliveryError(
+        "GMAIL_RECONNECT_REQUIRED",
+        "Google no longer accepts this connection. Reconnect your Google account under Email settings.",
+        reconnect=True,
+    )
+
+
+def _unavailable() -> DeliveryError:
+    return DeliveryError(
+        "GMAIL_UNAVAILABLE", "Could not send through Gmail. Try again in a few minutes."
+    )
+
+
+def _api_disabled() -> DeliveryError:
+    return DeliveryError(
+        "GMAIL_API_DISABLED",
+        "The Gmail API is not enabled in the Google Cloud project behind this "
+        "connection. Ask the developer to enable it, then try again.",
+    )
 
 
 def build_message(
@@ -91,70 +116,69 @@ def build_message(
     return message
 
 
-def _connect() -> smtplib.SMTP_SSL:
-    # A seam: tests replace this with a fake server.
-    return smtplib.SMTP_SSL(
-        GMAIL_SMTP_HOST,
-        GMAIL_SMTP_PORT,
-        timeout=TIMEOUT_SECONDS,
-        context=ssl.create_default_context(),
-    )
-
-
-def deliver(
-    gmail_address: str, app_password: str, messages: list[tuple[str, EmailMessage]]
+async def deliver(
+    refresh_token: str, messages: list[tuple[str, EmailMessage]]
 ) -> list[str]:
-    """Send each (recipient, message) over one Gmail connection. Returns the
+    """Send each (recipient, message) as the connected account. Returns the
     recipients that did not get theirs.
 
     One message per recipient, so nobody sees anyone else's address: the
     recipients can be customers picked from the user list, not colleagues.
 
-    Raises DeliveryError when nothing was sent at all: a rejected login, an
-    unreachable server, or every recipient refused. A connection that drops
-    part-way leaves the rest undelivered and returns normally, so the sends
-    that did go out are recorded as sent.
+    Raises DeliveryError when nothing was sent at all: a revoked token
+    (reconnect=True), Google unreachable, or every recipient refused. Google
+    failing part-way leaves the rest undelivered and returns normally, so the
+    sends that did go out are recorded as sent.
 
-    Logs say which step failed and Gmail's numeric code, never the password.
+    Logs say which step failed and Google's status, never a token.
     """
     undelivered: list[str] = []
     sent = 0
     deadline = time.monotonic() + SEND_BUDGET_SECONDS
-    try:
-        with _connect() as server:
-            server.login(gmail_address, app_password)
-            for index, (recipient, message) in enumerate(messages):
-                if index > 0 and time.monotonic() > deadline:
-                    logger.warning("Send budget used up; %d left undelivered", len(messages) - index)
-                    undelivered.extend(r for r, _ in messages[index:])
-                    break
-                try:
-                    server.send_message(message)
+    async with google._client() as http:
+        try:
+            access_token = await google.refresh_access_token(refresh_token, http)
+        except google.GoogleTokenRevoked as exc:
+            raise _reconnect_required() from exc
+        except google.GoogleUnavailable as exc:
+            raise _unavailable() from exc
+
+        for index, (recipient, message) in enumerate(messages):
+            if index > 0 and time.monotonic() > deadline:
+                logger.warning("Send budget used up; %d left undelivered", len(messages) - index)
+                undelivered.extend(r for r, _ in messages[index:])
+                break
+            stop: DeliveryError | None = None
+            try:
+                resp = await google.send_raw(http, access_token, message.as_bytes())
+            except httpx.HTTPError as exc:
+                logger.warning("Gmail API send failed: %s", type(exc).__name__)
+                stop = _unavailable()
+            else:
+                if resp.is_success:
                     sent += 1
-                except smtplib.SMTPRecipientsRefused:
-                    logger.warning("Gmail refused a recipient")
+                    continue
+                reasons = google.gmail_error_reasons(resp)
+                logger.warning(
+                    "Gmail API refused a message (HTTP %s, %s)",
+                    resp.status_code,
+                    ",".join(sorted(reasons)) or "no reason",
+                )
+                if reasons & _API_DISABLED_REASONS:
+                    stop = _api_disabled()
+                elif resp.status_code == 400 and not reasons & _ACCOUNT_REASONS:
+                    # A malformed or refused address: this recipient only.
                     undelivered.append(recipient)
-                except (smtplib.SMTPException, OSError) as exc:
-                    if sent == 0:
-                        raise
-                    logger.warning("Gmail send stopped part-way: %s", type(exc).__name__)
-                    undelivered.extend(r for r, _ in messages[index:])
-                    break
-    except smtplib.SMTPAuthenticationError as exc:
-        logger.warning("Gmail rejected the login (SMTP %s)", exc.smtp_code)
-        raise DeliveryError(
-            "GMAIL_AUTH_FAILED", "Google rejected the Gmail address or app password."
-        ) from exc
-    except (smtplib.SMTPException, OSError) as exc:
-        if sent == 0:
-            # OSError covers DNS failure, refused connections, TLS errors,
-            # timeouts.
-            logger.warning("Gmail send failed: %s", type(exc).__name__)
-            raise DeliveryError(
-                "GMAIL_UNAVAILABLE", "Could not send through Gmail. Try again in a few minutes."
-            ) from exc
-        # Failed while closing, after the messages were accepted.
-        logger.warning("Gmail connection closed badly after sending: %s", type(exc).__name__)
+                    continue
+                elif resp.status_code == 401 or reasons & _RECONNECT_REASONS:
+                    stop = _reconnect_required()
+                else:
+                    # 403 rate limits, 429, 5xx: stop, keep what went.
+                    stop = _unavailable()
+            if sent == 0:
+                raise stop
+            undelivered.extend(r for r, _ in messages[index:])
+            break
 
     if sent == 0:
         raise DeliveryError("GMAIL_RECIPIENT_REFUSED", "Gmail refused the recipient address.")

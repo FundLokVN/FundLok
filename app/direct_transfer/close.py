@@ -46,6 +46,19 @@ def compute_stub_interest(amount_vnd: int, annual_rate_pct: Decimal, stub_days: 
     return int(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
+def investor_rate_pct(loan_rate_pct: Decimal, term_months: int, params: DirectTransferParams) -> Decimal:
+    """The yearly rate the loan is formed at: the investors' flat return over the whole loan as a yearly rate
+    (2.5% over 4 months is 7.5% a year), never above the business's own rate, so never above the legal cap.
+
+    The days, the stub and the cap test all run on it. The business's all-in rate (the score run's, on the window)
+    is what it was quoted; the part above the investors' return is FundLok's, invoiced separately (ADR-009), never
+    in these days. Shared with the investor's projection (app/market/projection.py)."""
+    if params.investor_return_bps is None:
+        return Decimal(loan_rate_pct)
+    flat = Decimal(params.investor_return_bps) / 100 * 12 / Decimal(term_months)
+    return min(Decimal(loan_rate_pct), flat)
+
+
 async def _tranches(db: AsyncSession, window_id: UUID, *, lock: bool = True) -> list[Tranche]:
     stmt = select(Tranche).where(Tranche.window_id == window_id).order_by(Tranche.confirmed_at.nulls_last(), Tranche.id)
     if lock:
@@ -208,11 +221,18 @@ async def finalize_window(
             await transition_tranche(db, t, "EXPIRED", now=now, reason="WINDOW_CLOSED")
     await db.flush()
 
+    listing = await db.get(Listing, window.listing_id)
+    if params.repay_from_approval:
+        await _close_repaying_investments(
+            db, window=window, tranches=tranches, listing=listing, now=now, params=params, calendar=calendar,
+            invoice_provider=invoice_provider,
+        )
+        return
+
     confirmed = [t for t in tranches if t.status == "CONFIRMED"]
     total = sum(t.amount_vnd for t in confirmed)
     window.closed_at = now
     window.confirmed_total_vnd = total
-    listing = await db.get(Listing, window.listing_id)
 
     if total < window.min_raise_vnd:
         # Below 50%: no loan, every tranche voided and refunded by the SME, no fee. PROVISIONAL(Q-D8)
@@ -229,6 +249,127 @@ async def finalize_window(
         return
 
     await _form_loan(db, window=window, confirmed=confirmed, total=total, listing=listing, now=now, params=params, calendar=calendar, invoice_provider=invoice_provider)
+
+
+async def form_investment_loan(
+    db: AsyncSession,
+    *,
+    tranche: Tranche,
+    window: FundingWindow,
+    now: dt.datetime,
+    params: DirectTransferParams | None = None,
+    calendar: BusinessDayCalendar | None = None,
+) -> None:
+    """repay_from_approval: one approved (CONFIRMED) investment becomes its own loan at once, the way `_form_loan`
+    forms the round's at close, for a round of one: a facility on the round's contract (at the investors' rate,
+    starting the first working day after the day staff approved it), the investor's holding, the ticket ACTIVE, its
+    repayment days with their stub, and the ledger claims. The SME's activation fee is still invoiced once, when the
+    round closes."""
+    p = resolve(params)
+    cal = calendar or default_calendar()
+    await lock_window(db, window.id)
+    if tranche.status != "CONFIRMED":
+        raise conflict("NOT_CONFIRMED", "Only a confirmed investment forms its loan")
+    # The loan works from the approval: repayment starts the next working day after it, even when the loan forms
+    # later (an investment approved before repay_from_approval, started by staff advancing its round).
+    start_date = first_working_day_after(ict_date(tranche.confirmed_at or now), cal)
+    term = window.term_months
+    rate = investor_rate_pct(Decimal(window.annual_rate_pct), term, p)
+    tranche.stub_receipt_date = await _receipt_date(db, tranche)
+    tranche.stub_days = count_business_days(tranche.stub_receipt_date, start_date, cal)
+    tranche.stub_interest_vnd = compute_stub_interest(tranche.amount_vnd, rate, tranche.stub_days, p.stub_basis_days)
+
+    facility = originate_facility(
+        db,
+        contract_id=window.contract_id,
+        principal_vnd=tranche.amount_vnd,
+        annual_rate_pct=rate,
+        contractual_term_months=term,
+        payment_reference=await unique_reference_code(db),
+        start_date=start_date,
+        calendar=cal,
+        working_days_per_month=p.working_days_per_month,
+        actor_id=None,
+    )
+    await db.flush()
+    context = {"source": "DIRECT_TRANSFER_APPROVAL", "tranche_id": str(tranche.id)}
+    apply_transition(db, facility, to_status="APPROVED", trigger="ADMIN_APPROVE", context=context)
+    apply_transition(db, facility, to_status="DISBURSED", trigger="DISBURSEMENT_POSTED", context=context)
+    facility.disbursed_at = now
+    apply_transition(db, facility, to_status="ACTIVE", trigger="SCHEDULE_ACTIVATED", context=context)
+    await db.flush()
+
+    holding = Holding(
+        contract_id=window.contract_id, investor_id=tranche.investor_id, principal=tranche.amount_vnd,
+        share_ratio=Decimal(1),  # the whole of its own loan
+    )
+    db.add(holding)
+    await db.flush()
+    tranche.holding_id = holding.id
+    tranche.investor_fee_total_vnd = fees.investor_fee_total(tranche.amount_vnd, term, p) if p.fees_enabled else 0
+    await transition_tranche(db, tranche, "ACTIVE", now=now, reason="APPROVED_REPAYING")
+
+    if window.repayment_start_date is None:
+        window.repayment_start_date = start_date
+    contract = await db.get(Contract, window.contract_id)
+    contract.funded_amount = int(contract.funded_amount or 0) + tranche.amount_vnd
+    listing = await db.get(Listing, window.listing_id)
+    listing.funded_amount = int(listing.funded_amount or 0) + tranche.amount_vnd
+    await db.flush()
+
+    await generate_repayment_days(
+        db, window=window, facility=facility, tranches=[tranche], start_date=start_date, params=p, calendar=cal
+    )
+    await post_tranche_claims(db, tranche=tranche, contract_id=window.contract_id, sme_user_id=window.sme_user_id)
+    await log_event(
+        db, entity_type="TRANCHE", entity_id=tranche.id, event_type="LOAN_FORMED", now=now,
+        payload={
+            "facility_id": str(facility.id), "principal_vnd": tranche.amount_vnd, "annual_rate_pct": str(rate),
+            "start_date": start_date.isoformat(), "stub_interest_vnd": tranche.stub_interest_vnd,
+        },
+    )
+
+
+async def _close_repaying_investments(
+    db: AsyncSession, *, window: FundingWindow, tranches: list[Tranche], listing: Listing, now: dt.datetime,
+    params: DirectTransferParams, calendar: BusinessDayCalendar, invoice_provider: fees.InvoiceProvider | None,
+) -> None:
+    """repay_from_approval at close: every investment already repays as its own loan (any approved one still
+    waiting forms its loan now), so nothing is pooled and nobody is refunded; the round just closes. REPAYING if
+    any investment repays, FAILED if none came in. The SME's activation fee is invoiced on what was raised."""
+    for t in tranches:
+        if t.status == "CONFIRMED":
+            await form_investment_loan(db, tranche=t, window=window, now=now, params=params, calendar=calendar)
+    active = [t for t in tranches if t.status == "ACTIVE"]
+    total = sum(t.amount_vnd for t in active)
+    window.closed_at = now
+    window.confirmed_total_vnd = total
+    if not active:
+        window.status = "FAILED"
+        listing.status = "CANCELLED"
+        await db.flush()
+        await log_event(
+            db, entity_type="WINDOW", entity_id=window.id, event_type="WINDOW_CLOSED", now=now,
+            payload={"outcome": "FAILED", "confirmed_total_vnd": 0, "mode": "REPAY_FROM_APPROVAL"},
+        )
+        return
+    window.status = "REPAYING"
+    listing.status = "FUNDED" if total == window.target_vnd else "CLOSED"
+    listing.funded_amount = total
+    contract = await db.get(Contract, window.contract_id)
+    contract.funded_amount = total
+    contract.status = "ACTIVE_FUNDED"
+    contract.activated_at = contract.activated_at or now
+    await db.flush()
+    await fees.issue_sme_activation_invoice(
+        db, window=window, confirmed_total_vnd=total, now=now, provider=invoice_provider, params=params
+    )
+    await log_event(
+        db, entity_type="WINDOW", entity_id=window.id, event_type="WINDOW_CLOSED", now=now,
+        payload={
+            "outcome": "REPAYING", "confirmed_total_vnd": total, "mode": "REPAY_FROM_APPROVAL", "investments": len(active),
+        },
+    )
 
 
 async def _receipt_date(db: AsyncSession, t: Tranche) -> dt.date:
@@ -249,8 +390,9 @@ async def _form_loan(
     params: DirectTransferParams, calendar: BusinessDayCalendar, invoice_provider: fees.InvoiceProvider | None,
 ) -> None:
     start_date = first_working_day_after(ict_date(now), calendar)  # PROVISIONAL(Q-D4)
-    rate = Decimal(window.annual_rate_pct)
     term = window.term_months
+    # Investors' return, not the business's all-in rate: see investor_rate_pct.
+    rate = investor_rate_pct(Decimal(window.annual_rate_pct), term, params)
 
     # Stub interest per tranche: separate dated obligation, outside T0 (E3).
     for t in confirmed:

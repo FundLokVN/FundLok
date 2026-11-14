@@ -95,6 +95,9 @@ async def submit_application(db: AsyncSession, application_id: UUID, current_use
         raise HTTPException(status_code=403, detail="Not authorized")
     if row.status != "DRAFT":
         raise HTTPException(status_code=400, detail="Application is not in DRAFT status")
+    # The SME Service Agreement and the Standing Offer are signed after
+    # approval, with the approved terms in them (app/loans/signing.py), not
+    # with the application.
     row.status = "SUBMITTED"
     row.submitted_at = datetime.now(timezone.utc)
     db.add(row)
