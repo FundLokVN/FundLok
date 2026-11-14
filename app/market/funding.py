@@ -37,6 +37,7 @@ from app.direct_transfer.tranche_state import transition_tranche
 from app.direct_transfer.tranches import accept_tranche
 from app.direct_transfer.windows import lock_window, open_funding_window, refresh_window_fullness
 from app.lending.models import Contract, Listing, LoanApplication, Project, ProjectOwnership, ScoreRun
+from app.projects import borrower
 from app.market.investor_agreement import service as investor_agreement
 from app.utils.audit import append_audit
 
@@ -157,6 +158,10 @@ async def publish_project_for_funding(
         return live
     if project.status != "ACTIVE":
         raise conflict("PROJECT_NOT_LIVE", "The project is not live on the marketplace")
+    try:
+        await borrower.check_can_open(db, project=project)
+    except borrower.BorrowerRefused as exc:
+        raise conflict(exc.code, exc.detail) from exc
     account = await _sme_payout_account(db, project_id)
     if account is None:
         raise conflict("ACCOUNT_NOT_APPROVED", "The business has no approved bank account at a listed bank")

@@ -16,6 +16,7 @@ import pytest
 from app.projects.engine_constraints import params
 from app.projects.schemas import ProjectCreate
 from conftest import auth_headers
+from tests.tax_codes import fake_tax_code
 
 CONSTRAINTS = params().loan_constraints
 MIN_VND = int(CONSTRAINTS["min_vnd"])
@@ -25,7 +26,7 @@ MAX_VND = int(CONSTRAINTS["max_vnd"])
 def _payload(**overrides):
     payload = {
         "legal_name": f"Validation Co {uuid.uuid4().hex[:8]}",
-        "tax_id": f"TAX-{uuid.uuid4().hex[:10]}",
+        "tax_id": fake_tax_code(),
         "industry": "IT Services",
         "employee_count": 25,
         "incorporation_date": "2023-05-10",

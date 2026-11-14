@@ -178,6 +178,14 @@ class FundingWindow(Base):
             unique=True,
             postgresql_where=text("status IN ('OPEN','FULL','CLOSING','REPAYING')"),
         ),
+        # The same rule across the SME's projects (D-016, docs/specs/projects/one-borrower.md): a second project
+        # cannot list while the first is open or repaying. open_funding_window reports it as SME_HAS_LIVE_LISTING.
+        Index(
+            "uq_funding_windows_one_live_per_sme",
+            "sme_user_id",
+            unique=True,
+            postgresql_where=text("status IN ('OPEN','FULL','CLOSING','REPAYING')"),
+        ),
     )
 
 

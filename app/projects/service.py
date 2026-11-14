@@ -8,6 +8,7 @@ from fastapi import HTTPException, status
 
 from app.direct_transfer.models import PaymentAccount
 from app.lending.models import LoanApplication, Project, ProjectOwnership
+from app.projects import borrower
 from app.projects.schemas import ProjectCreate
 from app.users.models import Role, User
 
@@ -23,14 +24,21 @@ async def create_project(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only SMEs can create projects",
         )
+    # One borrower, one project in progress, one business (app/projects/borrower.py): a valid tax code, the business
+    # the SME verified, not already on FundLok, and no other project of the SME's still going.
+    try:
+        tax_id = await borrower.check_new_project(db, user_id=current_user.id, tax_id=project_data.tax_id)
+    except borrower.BorrowerRefused as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail, headers={"X-Error-Code": exc.code}) from exc
     try:
         # employee_count is stored; company_size is not — it is derived from
         # the count at grading time, so a change to the bands in the params
         # file cannot leave a stale size on the row.
         new_project = Project(
             **project_data.model_dump(
-                exclude={"loan_application", "company_size"}
+                exclude={"loan_application", "company_size", "tax_id"}
             ),
+            tax_id=tax_id,
             status="DRAFT",
         )
         db.add(new_project)
@@ -82,10 +90,12 @@ async def create_project(
     except IntegrityError as e:
         await db.rollback()
         err_msg = str(e.orig)
-        if "tax_id" in err_msg:
+        # The tax code's business is already on FundLok, however its code was written (uq_projects_tax_business).
+        if "tax_id" in err_msg or "tax_business" in err_msg:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Your bussiness tax ID is already associated with another project. Please contact support if you believe this is an error.",
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This business already has a project on FundLok. Contact support if you believe this is an error",
+                headers={"X-Error-Code": borrower.DUPLICATE_TAX_CODE},
             )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -19,6 +19,7 @@ from app.direct_transfer.signing import MockSigner
 from app.direct_transfer.storage import InMemoryStorage
 from app.lending.models import Contract, Listing, LoanApplication, Project, ProjectOwnership, ScoreRun
 from app.users.models import User
+from tests.tax_codes import fake_tax_code
 
 # Monday 2 Nov 2026, 10:00 ICT. Window days 14 -> Monday 16 Nov 2026 10:00 ICT. No VN public holidays in this range.
 T0 = dt.datetime(2026, 11, 2, 10, 0, tzinfo=ICT)
@@ -100,7 +101,7 @@ async def make_world(
     params = params or DirectTransferParams(investor_return_bps=None, repay_from_approval=False)
     admin = await make_user(db, role="ADMIN", full_name="Staff Admin")
     sme = await make_user(db, role="SME", full_name="Cong Ty ABC")
-    project = Project(legal_name=f"ABC Co {uuid.uuid4().hex[:6]}", tax_id=f"TAX-{uuid.uuid4().hex[:10]}")
+    project = Project(legal_name=f"ABC Co {uuid.uuid4().hex[:6]}", tax_id=fake_tax_code())
     db.add(project)
     await db.flush()
     db.add(ProjectOwnership(project_id=project.id, user_id=sme.id))

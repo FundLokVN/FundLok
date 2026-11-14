@@ -15,12 +15,13 @@ path directly.
 import uuid
 
 from conftest import auth_headers
+from tests.tax_codes import fake_tax_code
 
 
 def _payload(**overrides):
     payload = {
         "legal_name": f"Inline Co {uuid.uuid4().hex[:8]}",
-        "tax_id": f"TAX-{uuid.uuid4().hex[:10]}",
+        "tax_id": fake_tax_code(),
         "industry": "IT Services",
         "incorporation_date": "2023-05-10",
         "address": {

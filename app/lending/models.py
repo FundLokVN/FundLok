@@ -4,6 +4,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    Computed,
     Date,
     DateTime,
     Float,
@@ -22,12 +23,24 @@ from sqlalchemy.orm import relationship
 from app.core.base import Base
 
 
+# projects.tax_business: a well-formed tax code's business part (see Project.tax_business).
+TAX_BUSINESS_SQL = (
+    "CASE WHEN tax_id ~ '^[0-9]{12}$' THEN tax_id "
+    "WHEN tax_id ~ '^[0-9]{10}(-[0-9]{3})?$' THEN left(tax_id, 10) END"
+)
+
+
 class Project(Base):
     __tablename__ = "projects"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     legal_name = Column(Text, nullable=False)
     tax_id = Column(Text, unique=True)
+    # The business the tax code belongs to, so one business has one project however its code is written: a branch
+    # ("0123456789-001") is its company's 10 digits, a 12-digit personal number (household business) is itself.
+    # Null for a code in neither shape (older rows), which the unique index then leaves alone.
+    # docs/specs/projects/one-borrower.md.
+    tax_business = Column(Text, Computed(TAX_BUSINESS_SQL, persisted=True))
     industry = Column(Text)
     address = Column(JSONB)
     incorporation_date = Column(Date)
@@ -45,6 +58,8 @@ class Project(Base):
 
     ownerships = relationship("ProjectOwnership", back_populates="project", cascade="all, delete-orphan")
     loan_applications = relationship("LoanApplication", back_populates="project")
+
+    __table_args__ = (Index("uq_projects_tax_business", "tax_business", unique=True),)
 
 
 class ProjectOwnership(Base):

@@ -15,6 +15,7 @@ from app.lending.models import AuditLog, Contract, Listing, LoanApplication, Pro
 from app.market.funding import INVESTOR_TERMS_VERSION
 from app.projects.service import activate_project_if_approved
 from conftest import attach_signed_listing_documents
+from tests.tax_codes import fake_tax_code
 
 SME_ACCOUNT = "19036789012"
 
@@ -22,7 +23,7 @@ SME_ACCOUNT = "19036789012"
 async def _project(db_session, sme, *, requested=80_000_000, status="ACTIVE", rate=16.0, term=4):
     """A project with an approved request, LOCKED terms and the SME's signed listing documents (what the admin, the
     engine and the SME's signing leave behind); its id."""
-    project = Project(legal_name=f"ABC Co {uuid.uuid4().hex[:6]}", tax_id=f"TAX-{uuid.uuid4().hex[:10]}", status=status)
+    project = Project(legal_name=f"ABC Co {uuid.uuid4().hex[:6]}", tax_id=fake_tax_code(), status=status)
     db_session.add(project)
     await db_session.flush()
     db_session.add(ProjectOwnership(project_id=project.id, user_id=uuid.UUID(sme["id"])))

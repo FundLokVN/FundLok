@@ -98,6 +98,7 @@ from app.core.database import engine, get_db  # noqa: E402
 from app.lending.models import Document  # noqa: E402
 from app.main import app  # noqa: E402
 from app.users.models import RefreshToken, User  # noqa: E402
+from tests.tax_codes import fake_tax_code
 
 TEST_DATABASE_URL = os.environ["DATABASE_URL"]
 # Alembic intentionally stays on a sync driver (HANDOFF-02 Fix A) -- derive
@@ -492,7 +493,7 @@ async def _second_factor_session(db_session, user: dict) -> dict:
 def make_project(client):
     async def _make(sme: dict, legal_name: str | None = None, tax_id: str | None = None):
         legal_name = legal_name or f"Test Co {uuid.uuid4().hex[:8]}"
-        tax_id = tax_id if tax_id is not None else f"TAX-{uuid.uuid4().hex[:10]}"
+        tax_id = tax_id if tax_id is not None else fake_tax_code()
         resp = await client.post(
             "/projects",
             json={"legal_name": legal_name, "tax_id": tax_id},
