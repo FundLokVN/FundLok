@@ -85,12 +85,15 @@ async def test_only_that_company_s_applications_are_returned(
     client, make_admin, make_user, make_project, make_loan_application
 ):
     """Guards the WHERE clause: a missing project_id filter would leak every
-    company's funding requests into one preview."""
+    company's funding requests into one preview. The other company belongs to
+    another SME: one SME has one project in progress at a time
+    (docs/specs/projects/one-borrower.md)."""
     sme = await make_user(role="SME")
+    other = await make_user(role="SME")
     mine = await make_project(sme)
-    theirs = await make_project(sme)
+    theirs = await make_project(other)
     ours = await make_loan_application(sme, mine["id"], requested_amount="30000000")
-    await make_loan_application(sme, theirs["id"], requested_amount="40000000")
+    await make_loan_application(other, theirs["id"], requested_amount="40000000")
     admin = await make_admin()
 
     resp = await client.get(f"/admin/projects/{mine['id']}", headers=admin["headers"])
