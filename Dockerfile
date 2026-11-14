@@ -8,8 +8,14 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # 1.3.1-1+b1 (CVE-2026-76844, CVE-2026-85091, CVE-2026-27171) although Debian
 # had released +deb13u1. Whenever this layer is rebuilt it picks up every
 # security fix Debian has published by then.
+#
+# Tesseract and its Vietnamese data read investors' transfer receipts on this
+# server, so no receipt is sent to an outside OCR service (Q-025;
+# docs/specs/direct_transfer/receipt-ocr.md). Used only when
+# RECEIPT_OCR_ENABLED is on.
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-vie tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

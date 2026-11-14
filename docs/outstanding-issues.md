@@ -372,6 +372,14 @@ A decision is blocking for a piece of work only if reversing it would force rewo
 **Blocks.** Nothing before the spike measures how many banks fill `description`.
 **Owner.** `Edward`, `Loc`.
 **Provenance.** SePay payload documentation read 2026-10-31; Loc, 2026-10-30, Slack.
+
+### Q-033 — May the system accept or deny an investor's receipt on its own (receipt OCR)? `PENDING-BLOCKING` for switching it on
+**Context.** Staff read every receipt today (D-018, ADR-009 point 4: "confirmations rest on uploaded documents reviewed by staff"). Phat proposes reading each receipt with OCR on our own server (Tesseract in the API container, nothing sent outside, so Q-025's cross-border concern does not arise) and deciding it: a confident read that matches the payment and the business's verified account (bank, account number, holder name) confirms the ticket; one that does not match rejects the receipt and the investor uploads the right one; anything unsure goes to staff. The loan of an accepted ticket forms only when staff approve it (or the round closes), and staff can reverse either verdict. A forged receipt that matches would be accepted, as one typed in by staff would be. Spec: `docs/specs/direct_transfer/receipt-ocr.md`.
+**Options.** A. Allow it as specified. B. OCR only as a suggestion to staff (`RECEIPT_AUTO_VERDICT_ENABLED` off), staff still decide. C. No OCR.
+**Default.** B once `RECEIPT_OCR_ENABLED` is switched on; both switches are off until answered.
+**Blocks.** Switching `RECEIPT_AUTO_VERDICT_ENABLED` on in production. Not the code (built behind the switches).
+**Owner.** `Edward` (amends ADR-009 point 4 and `transfer-and-evidence.md`), `Loc`; `Minh` for whether local OCR is within Q-025 option A on the current host.
+**Provenance.** Phat, 2026-11-14 (match confirms, mismatch denies, unsure to staff, loan after staff review, receiver checked).
 ---
 
 ## Provisional rules from HANDOFF-04 (`Q-D` series)
@@ -453,3 +461,4 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | 2026-10-30 | Edward / Claude | Q-028 resolved as D-032: existing accounts are test data, leave them. |
 | 2026-10-31 | Edward / Claude | Added D-033 (sandbox spike of a SePay bank feed), D-034 (idempotency ownership and day-1 sync design), Q-031 (Loc: amend D-018?), Q-032 (payer check under a feed) and Q-D19. |
 | 2026-11-03 | Edward / Claude | Added D-035: the account-verification task is delegated to Phat end to end; HANDOFF-05 gets ownership, sync rules, a definition of done and starting instructions. |
+| 2026-11-14 | Phat / Claude | Added Q-033: automatic verdict on receipts read by local OCR (`receipt-ocr.md`). |

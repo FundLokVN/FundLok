@@ -49,6 +49,9 @@ from app.market.funding import expire_lapsed_holds, reserve_and_accept
 from app.market.investor_agreement import service as investor_agreement
 from app.market.investor_agreement.models import InvestorServiceAgreement
 from app.market.portfolio import business_analytics, business_transactions, investor_analytics, investor_transactions
+from app.market.receipt_auto import ACCEPTED as SYSTEM_ACCEPTED
+from app.market.receipt_auto import DENIED as SYSTEM_DENIED
+from app.market.receipt_auto import run_system_check
 from app.market.projection import project_ticket, sum_by_day
 from app.market.schemas import (
     AgreementCodeOut,
@@ -71,8 +74,9 @@ from app.market.schemas import (
 )
 from app.market.service import _require_eligible_investor
 from app.notifications import realtime
-from app.notifications.models import EVENT_INVESTMENT_RECEIPT_SUBMITTED
+from app.notifications.models import EVENT_INVESTMENT_RECEIPT_SUBMITTED, EVENT_INVESTMENT_TRANSFER_APPROVED
 from app.notifications.service import create_notification
+from app.uploads.receipt_ocr import ReceiptOcr, receipt_ocr
 from app.users.models import Role, User
 from app.utils.audit import append_audit
 from app.utils.jwt import get_current_user
@@ -575,11 +579,16 @@ async def upload_receipt(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_investor),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ocr: ReceiptOcr | None = Depends(receipt_ocr),
 ):
     """The investor's bank receipt for their transfer to the SME (ticket 1.5): PDF, PNG, JPEG or WEBP, at most
-    10 MB. Staff read it in the MVP (check_status AWAITING_FIELDS). A receipt sent after the hold lapsed is still
+    10 MB. With RECEIPT_OCR_ENABLED the receipt is read on our own server (receipt-ocr.md): a confident read that
+    matches confirms the ticket (MATCHED, CONFIRMED; the loan waits for staff review), one that does not match is
+    rejected (REJECTED with failure_codes: upload the right one while the hold lasts), anything else waits for
+    staff (AWAITING_FIELDS), as every receipt does with OCR off. A receipt sent after the hold lapsed is still
     taken, for staff to review (LATE_RECEIPT), since the money may already have moved. The business is emailed to
-    look for the money under the memo (once, not on a replay); its bell rings when staff approve the transfer."""
+    look for the money under the memo (once, not on a replay, not for a rejected receipt); its bell rings when the
+    transfer is approved."""
     limit = DEFAULT_PARAMS.max_evidence_bytes
     content = await file.read(limit + 1)
     if len(content) > limit:
@@ -592,6 +601,10 @@ async def upload_receipt(
     replay = idempotency_key is not None and (
         await db.execute(select(Transfer.id).where(Transfer.idempotency_key == idempotency_key))
     ).first() is not None
+    # OCR (receipt-ocr.md) runs before submit_receipt takes the ticket and round locks: a slow read must not hold up
+    # other investors in the round. Not on a replay: that receipt was read the first time.
+    reading = await ocr.reader.read(content=content, content_type=content_type) if ocr and not replay else None
+    now = _now()
     try:
         result = await submit_receipt(
             db,
@@ -603,11 +616,28 @@ async def upload_receipt(
             extractor=ManualEntryExtractor(),
             storage=funding.evidence_storage(),
             idempotency_key=idempotency_key,
-            now=_now(),
+            now=now,
         )
     except DirectTransferError as exc:
         await _raise_mapped(db, exc)
-    notice = await receipt_notice(db, tranche_id=tranche_id) if not replay else None
+    check = None
+    if reading is not None:
+        check = await run_system_check(
+            db, transfer_id=result.transfer_id, reading=reading, auto_verdict=ocr.auto_verdict, now=now
+        )
+        transfer = await db.get(Transfer, result.transfer_id)
+        tranche = await db.get(Tranche, tranche_id)
+        result = ReceiptResultOut(
+            transfer_id=transfer.id,
+            tranche_status=tranche.status,
+            check_status=transfer.check_status,
+            failure_codes=list(transfer.failure_codes or []),
+            confirmation_level=transfer.confirmation_level,
+        )
+    denied = check is not None and check.verdict == SYSTEM_DENIED
+    accepted = check is not None and check.verdict == SYSTEM_ACCEPTED
+    # A receipt the system rejected is not news for the business: the investor uploads the right one.
+    notice = await receipt_notice(db, tranche_id=tranche_id) if not replay and not denied else None
     if not replay:
         append_audit(
             db,
@@ -626,7 +656,8 @@ async def upload_receipt(
             create_notification(
                 db,
                 user_id=notice.sme_user_id,
-                event=EVENT_INVESTMENT_RECEIPT_SUBMITTED,
+                # Accepted by the system: the business hears it was approved, as when staff approve it.
+                event=EVENT_INVESTMENT_TRANSFER_APPROVED if accepted else EVENT_INVESTMENT_RECEIPT_SUBMITTED,
                 entity_type="TRANCHE",
                 entity_id=tranche_id,
                 data=notice.notification_data(result.tranche_status),

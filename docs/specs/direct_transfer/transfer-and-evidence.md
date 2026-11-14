@@ -24,7 +24,7 @@ FundLok has no bank API and no bank-data partner (D-018). Every confirmation the
 
 ## 2. Out of Scope
 
-- A real OCR, LLM or bank-data integration. **No receipt may be sent to an external AI/OCR service** (I-14, Q-025). Local OCR can be added behind `ReceiptExtractor` later.
+- A real OCR, LLM or bank-data integration. **No receipt may be sent to an external AI/OCR service** (I-14, Q-025). Local OCR can be added behind `ReceiptExtractor` later. *Proposed (DRAFT, Q-033): local OCR and an automatic verdict in `receipt-ocr.md`, behind switches that are off.*
 - Bank feeds, OAuth, SePay/Casso (ADR-009).
 - The `VERIFIED` (bank-data match) level: reserved in the enum, never set.
 - Dispute decisions (see `disputes.md`); tranche transitions (see `funding-window.md`).
