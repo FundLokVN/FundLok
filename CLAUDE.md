@@ -13,7 +13,7 @@ FundLok (FL) is a Vietnam-registered P2P lending platform connecting SMB borrowe
 - **Revenue model:** FL charges two fees, each invoiced separately and paid into FL's own account after the fact (ADR-009, D-023): an SME activation fee of 3% of confirmed principal (VAT invoice, due 7 days, never netted from principal) and an investor service fee of 2.5% a year (accrued monthly, invoiced).
 - **No custody (ADR-009):** FL never holds money. Money moves directly between the investor's and the SME's own bank accounts (Decree 94 Art. 11.1.b). FL issues a dynamic VietQR, collects uploaded receipts, records evidence, computes schedules and reports. There is no FL cash account, no bank API and no CIC connection yet; confirmations rest on uploaded documents reviewed by staff. ADR-002/003's omnibus account and ADR-008's GPay rail are superseded for all new paths.
 - **Ledger:** FL maintains an internal append-only ledger. On the direct-transfer path it is a confirmed-transfer model: `transfers` is the evidence record and claim legs post against a platform-level `EXTERNAL` account; no `OMNIBUS_CASH` legs (D-026, `docs/specs/direct_transfer/ledger-amendment.md`). It is immutable at both the application layer and the database layer (PostgreSQL trigger).
-- **Borrower journey:** SMB registers → 3rd-party KYC → describes project/enterprise → applies for loan → ML grading engine assigns interest rate tier → listed on marketplace → lenders fund → disbursement → scheduled repayments → lenders receive pro-rata distributions + converted shares after repayment.
+- **Borrower journey:** SMB registers → 3rd-party KYC → describes project/enterprise → applies for loan → deterministic 0–100 grade (no tiers, no letter grades) and the handbook 8.3 rate formula with a versioned parameter set set the rate → listed on marketplace → lenders commit → SME accepts or declines → disbursement → daily repayments paid by the SME directly to each lender, with interest and tax split per instalment (ADR-011).
 - **Early repayment** is encouraged as a platform value — better practice, better outcomes.
 - **Regulatory framework:** Vietnam Decree No. 94/2025/ND-CP (fintech/P2P regulatory sandbox) and Circular 64/2024/TT-NHNN (banking Open API technical standard). See ADR-004.
 
@@ -53,13 +53,12 @@ Key carry-forwards:
 **Ownership is strict. Do not modify files outside your boundary without explicit agreement.**
 
 ### Edward (CTO) — Backend, Architecture, Compliance
-- `app/banking/` — Brankas API client, omnibus account service, webhook handlers (see also `docs/specs/banking/account-linking-mock.md` — Brankas is not expected to happen; this module is mocked indefinitely pending a partner decision)
-- `app/verification/` — KYC/KYB identity verification (Didit client, session state, signed webhook)
+- `app/banking/` — mocked indefinitely; superseded by ADR-009 direct transfer (see `docs/specs/banking/account-linking-mock.md`). No Brankas client or omnibus account is in use
+- `app/verification/` — legacy KYC/KYB (Didit client, session state, signed webhook); still mounted but not the live path. Live KYC/KYB runs on `app/gverify/` (TPV Datatrust, Phat's, Edward reviews)
 - `app/underwriting/` — ML grading engine (async)
 - `app/contracts/` — loan contract creation from a locked score run (final terms, funding target)
 - `app/repayment_schedule/` — amortization engine, early repayment tracking
-- `app/share_conversion/` — post-repayment share issuance
-- `app/compliance/` — Decree 94 reporting, exposure cap enforcement
+- Decree 94 reporting and the borrower cap: there is no `app/compliance/` module. The cap lives in `app/direct_transfer/windows.py` (target is 100M per legal entity per D-040; the code still carries a provisional `cross_platform_cap_vnd` of 400M until it is changed)
 - `app/ledger/` — double-entry ledger, custodial/ledger accounts, balance-by-sum (see ADR-003, docs/specs/ledger/ledger-foundation.md)
 - `app/direct_transfer/` — funding window, tranches, transfers and evidence, disputes, repayment collection, fees, CIC event log (ADR-009). Phat's routers call its service functions.
 - `app/payments/` — legacy omnibus disbursement/repayment shim over `app/ledger/` (deprecated behind a flag once `app/direct_transfer/` is wired)
@@ -72,6 +71,11 @@ Key carry-forwards:
 
 ### Phat — Full Stack + Sole Frontend Owner
 - All React frontend (Edward does not touch UI under any circumstances)
+- `app/gverify/` — live eKYC/eKYB via TPV Datatrust (Edward reviews the verification domain)
+- `app/consent/` — sign-up terms and consent records
+- `app/phone_verification/` — phone OTP and Zalo
+- `app/scheduled_jobs/` — Cloud Scheduler endpoints (reminders, fee emails)
+- `app/rates/` — investor rate calculator
 - `app/users/router.py`, `app/users/schemas.py` — user-facing endpoints
 - `app/projects/` — project management endpoints
 - `app/loans/` — loan application endpoints
@@ -147,7 +151,7 @@ All specs live in `docs/specs/<module>/<feature>.md`. See `docs/specs/_TEMPLATE.
 
 ### Testing
 - Every new module must have a pytest file under `tests/<module>/`
-- Tests use fixtures — never hit a real DB or Brankas API in tests
+- Tests use fixtures and run on a throwaway Postgres (`scripts/docker_test.sh`, mirroring CI) — never a shared or dev DB, and never a real bank, KYC or Zalo API
 - Acceptance criteria from the spec map 1:1 to test function names
 
 ### Git
@@ -175,7 +179,7 @@ ScoreRun:         RUNNING → READY → LOCKED
 Contract:         DRAFT → SIGNED → ACTIVE_PENDING_FUNDING → ACTIVE_FUNDED → CLOSED
 Listing:          DRAFT → OPEN → FUNDED → CLOSED
 Order:            legacy omnibus path only (deprecated behind a flag)
-Tranche:          RESERVED → SIGNED → ATTESTED → CONFIRMED → ACTIVE
+Tranche:          RESERVED → SIGNED → ATTESTED → CONFIRMED → ACTIVE   (today's code; ADR-011 replaces this with commit-then-accept: see HANDOFF-06)
                   RESERVED|SIGNED → EXPIRED; SIGNED|ATTESTED → UNDER_REVIEW → CONFIRMED | VOID; CONFIRMED → VOID (before ACTIVE)
 ```
 
