@@ -16,7 +16,7 @@ _DEFAULT_CAL: BusinessDayCalendar | None = None
 def default_calendar() -> BusinessDayCalendar:
     global _DEFAULT_CAL
     if _DEFAULT_CAL is None:
-        _DEFAULT_CAL = BusinessDayCalendar()
+        _DEFAULT_CAL = BusinessDayCalendar(observe_public_holidays=False)  # D-046: holidays ignored; flip to True to restore
     return _DEFAULT_CAL
 
 
