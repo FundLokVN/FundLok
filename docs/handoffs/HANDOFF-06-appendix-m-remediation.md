@@ -5,7 +5,7 @@
 | **Status** | **Phase 1 READY to implement.** Phases 2 and 3 are BLOCKED on specs (listed below; Edward and Claude write them next). Provisional until handbook v3.2 lands (D-052) |
 | **From** | Edward |
 | **To** | Implementer (Claude Sonnet) for Edward-owned backend; Phat for `app/market` routers, UI and wording (D-051) |
-| **Decisions** | D-036 to D-052 and TD-01 to TD-04 in `docs/outstanding-issues.md`; flow in `docs/adr/011-commit-then-accept-flow.md` |
+| **Decisions** | D-036 to D-057 and TD-01 to TD-04 in `docs/outstanding-issues.md`; flow in `docs/adr/011-commit-then-accept-flow.md` |
 | **Source** | Loc's Appendix M test run, 14 Nov 2026, backend `main` @ `ece64a4`; plan: https://claude.ai/artifact/278iMYJYz1MaNVtBJiw2Gb |
 
 ## Read first
@@ -65,6 +65,10 @@ Corrected 2026-11-15 (Edward chose the stated rule): the first version of this t
 - **Edward reviews the PR first** (migration `6664b74ae183`, `projects.tax_business`, index on `funding_windows`). Then: replace `uq_projects_tax_business` with a rule of one in-progress project per business, so a repaid business can borrow again; move the per-SME live-listing check into `open_funding_window` instead of leaning on the index `IntegrityError`; leave `check_borrower_cap` as is.
 - Acceptance: `test_business_can_borrow_again_after_full_repayment`; `test_second_in_progress_project_for_a_business_is_refused`; `test_open_funding_window_refuses_second_live_listing_for_an_sme`.
 
+### T8. Borrower cap to 100M (D-054)
+- In `app/direct_transfer/config.py` set `cross_platform_cap_vnd` from 400_000_000 to 100_000_000 and drop its `PROVISIONAL(Q-D12)` tag in favour of D-054. `check_borrower_cap` (`app/direct_transfer/windows.py`) keeps summing target plus declared outside debt. No other behaviour change.
+- Acceptance: `test_borrower_cap_is_100m_including_declared_outside_debt` (a 60M target with 50M declared outside debt is refused with `BORROWER_CAP_EXCEEDED`; a 60M target with 40M passes); `test_per_listing_cap_unchanged`.
+
 ### T7. Grading params: confirm one fact before T1 merges
 `pricing.py` reads `working_days_per_month` from the params, while `pricing.py`'s docstring says 21. Confirm that only the YAML value is wrong and nothing else hardcodes 22.
 
@@ -77,12 +81,14 @@ Edward writes the API contract section first; Phat reviews it and builds screens
 - No-show lock at 15:00 Day 14: re-eKYC plus acknowledgement sentence logged, permanent closure at the second, force-majeure waiver by staff.
 - Two-way check on disbursement: SME receipt step, 24-hour windows, 30-day bank-statement dispute with staff decision route; the window is shown beside each auto-confirmation.
 - All deadlines in calendar days (rename `*_working_days` config fields).
-- Cloud Scheduler endpoints for the money jobs (round advance, Day-13 and Day-14 cut-offs, settlement, invoices, monthly lender fee), added only after Phase 3's Late handling, so no job ever runs `presume_paid_days` (`repayment.py:322`) on a schedule (D-049).
+- **Late status (D-055):** a day with no SME proof by the end of its due date is Late, shown as overdue to staff, SME and lender, never paid, not counted for lender fees, and blocks extension filing; `presume_paid_days` (`repayment.py:322`) is removed for unproven days. Spec: `docs/specs/repayment_schedule/late-status.md`. Late-interest accrual is **not** in this phase; screens show overdue without an interest figure until Phase 3.
+- **SME acceptance reminders (D-056):** 3 days and 1 day before the Day-13 deadline, by in-app, Zalo and email, each logged. Build an SMS sender interface with a mock; no SMS provider is chosen (Loc to choose and confirm Zalo plus email for launch).
+- Cloud Scheduler endpoints for the money jobs (round advance, Day-13 and Day-14 cut-offs, settlement, invoices, monthly lender fee), added **after** the Late status lands in this phase, so no job ever runs `presume_paid_days` on a schedule (D-049).
 - A migration for the new tranche fields; many current tests rewritten (they encode pay-at-commit).
 
 ## Phase 3: late interest, automatic extension, rest (BLOCKED on specs)
 
-- **Late interest** (D-041): spec `docs/specs/repayment_schedule/late-interest.md`. A day with no SME proof by the end of its due date is Late and replaces the presume-paid rule; late interest and ledger claim legs per D-041. Needs Edward's spec confirmation before any ledger code.
+- **Late-interest accrual and ledger legs** (D-041, D-055): spec `docs/specs/repayment_schedule/late-interest.md`. 150% of the loan rate on overdue principal (cap 30%) plus 10% a year on overdue interest, calendar days, paid by the SME to each lender; ledger claim legs per D-041. Needs Edward's confirmation of the spec before any ledger code. The Late status itself ships in Phase 2.
 - **Automatic extension** (D-042): spec `docs/specs/repayment_schedule/automatic-extension.md`. SME files by the 5th; shortfall test; a Late instalment blocks filing; days rounded up to 5 inside the backstop room; new schedule version; no fee, no staff step.
 - **Phat:** offer card shows DRR, `s` and guarantor; wording (D-043); SME Service Agreement Art. 5.4 (remove late interest); return-for-correction is TD-02, not now; KYB manual form records legal representative and address (M1.3); lender fee invoice visible to the lender.
 - **Open with Loc:** how an extra commitment is signed; counsel on late interest for the SME fee; confirmation of `s` = daily repayment rate; OCR check on extension revenue.
@@ -100,8 +106,10 @@ Tests green in `./scripts/docker_test.sh`; spec and register updated in the same
 - [ ] T5 fee blocking and fee QR
 - [ ] T6 one borrower follow-ups (after Edward's review)
 - [ ] T7 confirm no other hardcoded 22
+- [ ] T8 borrower cap to 100M
 - [ ] Spec: commit-then-accept flow ACCEPTED
-- [ ] Spec: late interest ACCEPTED
+- [ ] Spec: late status ACCEPTED (Phase 2)
+- [ ] Spec: late-interest accrual and ledger legs ACCEPTED (Phase 3)
 - [ ] Spec: automatic extension ACCEPTED
 - [ ] Phase 2 built, Appendix M M3 to M6 rerun by Loc
 - [ ] Phase 3 built, Appendix M rerun after the smaller fixes
