@@ -96,9 +96,9 @@ async def make_world(
     db: AsyncSession, *, target: int = 100_000_000, rate: float = 16.0, term: int = 4, params: DirectTransferParams | None = None,
     listing_min_ticket: int = 10_000_000,
 ) -> World:
-    # The spec's worked examples have investors earning the business's full rate in one loan formed at close; the
-    # flat investor return and repaying from approval (the product defaults) are tested in tests/market.
-    params = params or DirectTransferParams(investor_return_bps=None, repay_from_approval=False)
+    # The spec's worked examples have one loan formed at close; repaying from approval (the product default) is
+    # tested in tests/market.
+    params = params or DirectTransferParams(repay_from_approval=False)
     admin = await make_user(db, role="ADMIN", full_name="Staff Admin")
     sme = await make_user(db, role="SME", full_name="Cong Ty ABC")
     project = Project(legal_name=f"ABC Co {uuid.uuid4().hex[:6]}", tax_id=fake_tax_code())

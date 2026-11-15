@@ -489,11 +489,11 @@ async def test_the_approval_panel_works_out_the_repayment_approving_starts(
     # Approved today, it repays from the next working day.
     assert basis["approved_on"] == today.isoformat()
     assert basis["start_date"] == plan["start_date"] == first_working_day_after(today).isoformat()
-    # 2.5% over the 4-month loan (7.5% a year), 84 working days, the leftover on the last.
-    assert float(basis["investor_return_pct"]) == 2.5 and float(basis["investor_rate_pct"]) == 7.5
-    assert basis["interest_vnd"] == 500_000 and basis["total_vnd"] == 20_500_000
+    # The full graded rate (16% a year, D-044), 84 working days, the leftover on the last.
+    assert basis["investor_return_pct"] is None and float(basis["investor_rate_pct"]) == 16.0
+    assert basis["interest_vnd"] == 1_066_667 and basis["total_vnd"] == 21_066_667
     assert basis["business_day_count"] == 84 == basis["term_months"] * basis["working_days_per_month"]
-    assert basis["daily_vnd"] == 20_500_000 // 84 and basis["final_vnd"] == 20_500_000 - 83 * basis["daily_vnd"]
+    assert basis["daily_vnd"] == 21_066_667 // 84 and basis["final_vnd"] == 21_066_667 - 83 * basis["daily_vnd"]
     # The first-period interest: the working days from the money's arrival (today, on approval) to day one. One
     # on a working day; none when it arrives on a weekend or holiday, which is when this test may run.
     assert basis["received_on"] == today.isoformat()

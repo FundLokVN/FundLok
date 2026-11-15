@@ -94,9 +94,7 @@ def project_ticket(
         "basis": {
             "principal_vnd": amount_vnd,
             "loan_rate_pct": Decimal(loan_rate_pct),
-            "investor_return_pct": (
-                Decimal(p.investor_return_bps) / 100 if p.investor_return_bps is not None else None
-            ),
+            "investor_return_pct": None,  # D-044: investors earn the full graded rate, no flat return
             "investor_rate_pct": annual_rate_pct,
             "term_months": term_months,
             "working_days_per_month": p.working_days_per_month,

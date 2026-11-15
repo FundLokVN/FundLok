@@ -1,27 +1,39 @@
-"""Investors earn a flat return over the whole loan (investor_return_bps, 2.5%), not the business's yearly rate.
+"""Investors earn the full graded rate (D-044, Appendix M 2.4): no flat investor return, no second figure.
 
-The loan is formed at that return as a yearly rate (2.5% over 4 months is 7.5% a year), capped at the business's own
-rate so a short loan never goes above it (or above the legal cap).
+The 2.5% yearly lender service fee is separate (invoiced, never in the repayment days).
 """
 from decimal import Decimal
 
+import pytest
+
 from app.direct_transfer.close import investor_rate_pct
 from app.direct_transfer.config import DirectTransferParams
-
-PARAMS = DirectTransferParams()  # the product default: 2.5% over the loan
-
-
-def test_two_and_a_half_percent_over_the_loan_whatever_its_term():
-    for term, yearly in ((2, Decimal("15")), (3, Decimal("10")), (4, Decimal("7.5")), (6, Decimal("5"))):
-        assert investor_rate_pct(Decimal("16"), term, PARAMS) == yearly
-        # Over the term, that is 2.5% of the principal.
-        assert yearly * term / 12 == Decimal("2.5")
+from app.direct_transfer.repayment import principal_for_day
+from app.market.projection import project_ticket
+from app.repayment_schedule.origination import compute_origination
 
 
-def test_never_above_the_business_s_own_rate():
-    # 2.5% over 1 month would be 30% a year: the business's 15.44% is the most it can be.
-    assert investor_rate_pct(Decimal("15.443"), 1, PARAMS) == Decimal("15.443")
+def test_investor_earns_the_full_graded_rate():
+    assert not hasattr(DirectTransferParams(), "investor_return_bps")
+    for term in (1, 2, 4, 6):
+        assert investor_rate_pct(Decimal("15"), term, DirectTransferParams()) == Decimal("15")
+    assert investor_rate_pct(Decimal("15.443"), 3, DirectTransferParams()) == Decimal("15.443")
 
 
-def test_without_a_flat_return_investors_earn_the_business_s_rate():
-    assert investor_rate_pct(Decimal("16"), 4, DirectTransferParams(investor_return_bps=None)) == Decimal("16")
+@pytest.mark.parametrize("term", [2, 4])
+def test_offer_total_equals_repayment_plan_total(term):
+    """The offer card (the ticket projection) and the repayment plan (the origination schedule) are one figure."""
+    import datetime as dt
+
+    amount, rate = 100_000_000, Decimal("15")
+    orig = compute_origination(principal_vnd=amount, annual_rate_pct=rate, contractual_term_months=term)
+    plan_total = orig.daily_amount_vnd * (orig.business_day_count - 1) + orig.final_instalment_vnd
+    day = dt.date(2026, 11, 16)  # a Monday
+    offer = project_ticket(
+        amount_vnd=amount, loan_rate_pct=rate, term_months=term, individual=False, confirmed_on=day, close_on=day
+    )
+    instalments = [d for d in offer["days"] if d["kind"] == "INSTALMENT"]
+    assert sum(d["gross_vnd"] for d in instalments) == plan_total == orig.total_obligation_vnd
+    assert offer["basis"]["total_vnd"] == orig.total_obligation_vnd
+    assert offer["basis"]["interest_vnd"] == orig.interest_vnd == amount * 15 * term // 1200
+    assert sum(principal_for_day(amount, i, orig.business_day_count) for i in range(1, orig.business_day_count + 1)) == amount
