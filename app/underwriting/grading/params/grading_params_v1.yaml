@@ -25,7 +25,7 @@
 # (curve-fit artifacts); the clamp neutralises them. Do not change them to 100.
 
 engine_version: "1.0.0"
-params_version: "wb-v2-20261005"  # loan_constraints.max_vnd 1bn -> 100M. Prior: wb-v1-20260917 (T0a/T0b/T3/T5: gate 3 enabled, working_days_per_month 21->22, bank_rate now sourced from config)
+params_version: "wb-v3-20261114"  # working_days_per_month 22 -> 21 (HANDOFF-06 T1, D14). Prior: wb-v2-20261005 (loan_constraints.max_vnd 1bn -> 100M); wb-v1-20260917 (T0a/T0b/T3/T5: gate 3 enabled, working_days_per_month 21->22, bank_rate now sourced from config)
 source_workbook: "FundLok formula factors v0.xlsx"
 source_tab: "Scoring From Raw"
 factor_count: 22
@@ -355,14 +355,13 @@ pricing:
   formula: "min(rate_cap_pct, bank_rate_pct + (rate_cap_pct - bank_rate_pct) * (100 - final_grade) / 100)"
 
 repayment:
-  # T5 (HANDOFF-03): aligned to 22 to match the repayment mechanism's actual
-  # business-day calendar (D14 default, app/repayment_schedule/calendar.py's
-  # DEFAULT_WORKING_DAYS_PER_MONTH) -- was 21, an unrelated guess that
-  # predates the repayment spec. working_days_per_year is intentionally left
+  # HANDOFF-06 T1 (D14: 21 wins): back to 21, matching
+  # app/repayment_schedule/calendar.py's DEFAULT_WORKING_DAYS_PER_MONTH and
+  # app/direct_transfer/config.py. T5 (HANDOFF-03) had set it to 22. working_days_per_year is intentionally left
   # at 252 (a distinct "trading days per year" revenue-annualization
   # convention for avg_daily_revenue, not a schedule count) and is NOT
   # 12*working_days_per_month -- see grading-engine-deviations.md.
-  working_days_per_month: 22
+  working_days_per_month: 21
   working_days_per_year: 252
   target_payment: "loan_size * (1 + rate_pct/100 * duration_months/12)"
   target_daily_repayment: "target_payment / (duration_months * working_days_per_month)"

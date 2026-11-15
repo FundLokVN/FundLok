@@ -326,6 +326,10 @@ class ScoreRun(Base):
     interest_rate_pct = Column(Float)
     bank_rate_pct = Column(Numeric(6, 4))
     bank_rate_effective_from = Column(Date)
+    # HANDOFF-06 T1: target daily repayment / average daily revenue, a fraction
+    # (0.1234 = 12.34%), rounded once to 4 dp. The revenue share s the Offer and
+    # Loan Contract read. NULL when the run priced nothing.
+    daily_repayment_rate = Column(Numeric(7, 4))
 
     application = relationship("LoanApplication", back_populates="score_runs")
     contracts = relationship("Contract", back_populates="score_run")

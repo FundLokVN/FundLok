@@ -118,6 +118,7 @@ def test_originate_facility_generates_full_schedule_and_sets_backstop():
         principal_vnd=300_000_000,
         annual_rate_pct=Decimal("12"),
         contractual_term_months=4,
+        working_days_per_month=22,  # the spec's §12.1 example; the default is 21 (HANDOFF-06 T1)
         payment_reference=f"FL-{uuid.uuid4().hex[:10]}",
         start_date=datetime.date(2026, 9, 21),
         calendar=cal,

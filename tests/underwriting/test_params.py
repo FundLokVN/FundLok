@@ -39,7 +39,10 @@ def test_params_version_pinned(params):
     # -> 100,000,000. No factor, curve or rollup changed. The golden set is
     # unaffected because tests/underwriting/conftest.py widens max_vnd to 5bn
     # for golden-set reconciliation (its loans are 200M-5bn).
-    assert params.params_version == "wb-v2-20261005"
+    #
+    # wb-v2-20261005 -> wb-v3-20261114 (HANDOFF-06 T1, D14): working_days_per_month
+    # 22 -> 21, so the daily repayment rate divides by 21 working days a month.
+    assert params.params_version == "wb-v3-20261114"
     assert params.engine_version == "1.0.0"
 
 
