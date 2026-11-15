@@ -44,9 +44,11 @@ Each task is its own PR.
 | Lender | Daily | Day-1 interest | Tax/day | Transfer/day | Last instalment | Total tax |
 |---|---|---|---|---|---|---|
 | A 40M | 976,190 | 23,809 | 1,190 | 975,000 | 976,210 | 50,000 |
-| B 30M | 732,142 | 17,856 | 892 | 731,249 | 732,178 | 37,500 |
-| C 20M | 488,095 | 11,905 | 595 | 487,500 | 488,105 | 25,000 |
-| D 10M | 244,047 | 5,952 | 297 | 243,749 | 244,073 | 12,500 |
+| B 30M | 732,142 | 17,857 | 893 | 731,249 | 732,178 | 37,500 |
+| C 20M | 488,095 | 11,904 | 595 | 487,500 | 488,105 | 25,000 |
+| D 10M | 244,047 | 5,952 | 298 | 243,749 | 244,073 | 12,500 |
+
+Corrected 2026-11-15 (Edward chose the stated rule): the first version of this table took the interest and tax columns from the old code's output, which contradicted the handbook's own transfer column. Transfer/day = daily − tax. Total tax still closes exactly through the last-day true-up.
 
 - Acceptance: `test_p1_money_check_matches_handbook_10_8` (all four lenders, all columns).
 
