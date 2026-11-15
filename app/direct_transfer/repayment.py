@@ -55,6 +55,21 @@ def split_gross(amount: int, weights: list[int]) -> list[int]:
     return bases
 
 
+def tax_nearest(interest: int, withholding_bps: int) -> int:
+    """Withholding on one day's interest, rounded to the nearest dong (D-045, handbook 10.8)."""
+    return rdiv(interest * withholding_bps, 10_000)
+
+
+def split_instalment_interest(grosses: list[int], principal_total: int) -> list[int]:
+    """Each day's interest part = gross x I / T rounded DOWN (I = total interest, T = total repayable); the last day
+    takes the remainder so the interest sums to I exactly. Principal is gross minus this (D-045)."""
+    total = sum(grosses)
+    interest_total = total - principal_total
+    parts = [g * interest_total // total for g in grosses[:-1]]
+    parts.append(interest_total - sum(parts))
+    return parts
+
+
 def principal_for_day(principal_total: int, day_index: int, day_count: int) -> int:
     """Cumulative round-half-up so the principal over the term is exactly `principal_total`."""
     return rdiv(principal_total * day_index, day_count) - rdiv(principal_total * (day_index - 1), day_count)
@@ -87,14 +102,15 @@ async def generate_repayment_days(
         raise RepaymentInvariantError("schedule length does not match business_day_count")
 
     per_tranche: list[list[tuple[ScheduledPayment, int, int, int]]] = [[] for _ in tranches]  # (sp, gross, principal, interest)
-    for sp in schedule:
-        gross_split = split_gross(int(sp.expected_amount_vnd), weights)
-        for i, t in enumerate(tranches):
-            principal = principal_for_day(t.amount_vnd, sp.day_index, n_days)
-            interest = gross_split[i] - principal
-            if interest < 0:
-                raise RepaymentInvariantError(f"negative interest for tranche {t.id} on day {sp.day_index}")
-            per_tranche[i].append((sp, gross_split[i], principal, interest))
+    splits = [split_gross(int(sp.expected_amount_vnd), weights) for sp in schedule]
+    for i, t in enumerate(tranches):
+        grosses = [split[i] for split in splits]
+        interests = split_instalment_interest(grosses, t.amount_vnd)
+        for sp, gross, interest in zip(schedule, grosses, interests):
+            principal = gross - interest
+            if principal < 0:
+                raise RepaymentInvariantError(f"negative principal for tranche {t.id} on day {sp.day_index}")
+            per_tranche[i].append((sp, gross, principal, interest))
 
     created = 0
     for i, t in enumerate(tranches):
@@ -103,7 +119,7 @@ async def generate_repayment_days(
         taxes: list[int] = []
         if individual:
             for _, _, _, interest in rows[:-1]:
-                taxes.append(interest * p.withholding_bps // 10_000)
+                taxes.append(tax_nearest(interest, p.withholding_bps))
             total_interest = sum(r[3] for r in rows)
             total_tax = rdiv(total_interest * p.withholding_bps, 10_000)
             last_interest = rows[-1][3]
