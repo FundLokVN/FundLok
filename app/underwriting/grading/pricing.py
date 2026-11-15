@@ -39,6 +39,12 @@ class PricingResult(NamedTuple):
     daily_repayment_rate: float
 
 
+# HANDOFF-06 D-053: below this, the nearest-dong daily tax (D-045) can sum above the exact 5% of total interest, and
+# the schedule's last-day true-up would have to be negative. The lowest rate any borrower pays is the bank rate, so
+# the floor is on the bank rate.
+MIN_BANK_RATE_PCT = 2.0
+
+
 def price(
     *,
     final_grade: float,
@@ -49,6 +55,12 @@ def price(
     params: ParamSet,
 ) -> PricingResult:
     rate_cap_pct = params.pricing["rate_cap_pct"]
+
+    if bank_rate_pct < MIN_BANK_RATE_PCT:
+        raise ValueError(
+            f"bank_rate_pct ({bank_rate_pct}) < {MIN_BANK_RATE_PCT}; below this the nearest-dong daily tax can "
+            "exceed the exact total (HANDOFF-06 D-053) -- a config error, not a valid state"
+        )
 
     if bank_rate_pct >= rate_cap_pct:
         # D17: the min() below is unreachable while bank_rate_pct < cap. If
