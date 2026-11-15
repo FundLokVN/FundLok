@@ -240,7 +240,7 @@ async def test_reserve_blocked_when_investor_fee_unpaid(world):
         )
     )
     await world.db.flush()
-    await expect_error(reserve(world, inv, 10 * M), "INVESTOR_FEE_UNPAID", 409)
+    await expect_error(reserve(world, inv, 10 * M, now=T0 + dt.timedelta(days=7, hours=1)), "INVESTOR_FEE_UNPAID", 409)
 
 
 async def test_reserve_requires_risk_ack(world):

@@ -64,7 +64,7 @@ async def reserve_ticket(
         raise not_found("Window not found")
     if window.status != "OPEN" or now >= window.window_end:
         raise conflict("WINDOW_NOT_OPEN", "The window is not open for reservations")
-    if await fees.investor_has_unpaid_invoice(db, investor_id, p):
+    if await fees.investor_has_unpaid_invoice(db, investor_id, p, now=now):
         raise conflict("INVESTOR_FEE_UNPAID", "A FundLok invoice is unpaid")
     account = await get_usable_account(db, account_id=payment_account_id, user_id=investor_id, holder_role="INVESTOR")
 

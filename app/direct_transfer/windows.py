@@ -176,7 +176,7 @@ async def open_funding_window(
     if rate > Decimal(p.rate_cap_pct):
         raise conflict("RATE_ABOVE_CAP", "The rate exceeds the statutory cap")
 
-    if await fees.sme_has_unpaid_invoice(db, sme_user_id, p):
+    if await fees.sme_has_unpaid_invoice(db, sme_user_id, p, now=now):
         raise conflict("SME_INVOICE_UNPAID", "A FundLok invoice is unpaid")
 
     account = await get_usable_account(db, account_id=payment_account_id, user_id=sme_user_id, holder_role="SME")

@@ -175,3 +175,5 @@ class FeeInvoiceOut(_Out):
     paid_at: dt.datetime | None = None
     invoice_number: str
     reference_code: str
+    # EMVCo VietQR to FundLok's own fee account for the amount due; None when the fee account is not configured.
+    vietqr_payload: str | None = None

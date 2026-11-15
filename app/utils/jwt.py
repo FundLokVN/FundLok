@@ -78,6 +78,23 @@ async def get_current_user(
     return user
 
 
+async def get_current_user_allow_suspended(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
+    db: AsyncSession = Depends(get_db),
+):
+    """get_current_user, except a SUSPENDED account is let through.
+
+    D-047: a suspension stops new offers and new investments only; money already owed keeps moving. Used solely
+    by the repayment endpoints (the business paying its lenders, a lender confirming or reporting receipts).
+    Every other check, session and second factor included, is unchanged.
+    """
+    user, payload = await _session_user(request, credentials, db, allow_suspended=True)
+    if user.role in SECOND_FACTOR_ROLES and not payload.get("mfa"):
+        raise _second_factor_required()
+    return user
+
+
 async def is_system_admin_session(request: Request) -> bool:
     """Whether the request carries a SYSTEM_ADMIN's full session.
 
@@ -148,6 +165,7 @@ async def _session_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None,
     db: AsyncSession,
+    allow_suspended: bool = False,
 ) -> tuple[User, dict]:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -228,7 +246,7 @@ async def _session_user(
     #
     # Deny-list, not allow-list: PENDING_KYC is a normal onboarding state and
     # must keep working. Only SUSPENDED is a decision to shut someone out.
-    if user.status == USER_STATUS_SUSPENDED:
+    if user.status == USER_STATUS_SUSPENDED and not allow_suspended:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This account has been suspended",

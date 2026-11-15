@@ -124,8 +124,57 @@ async def test_monthly_invoice_groups_accruals_per_investor(loan):
 
 async def test_unpaid_sme_invoice_blocks_new_window(loan):
     world, _, _ = loan
-    assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id) is True
-    assert await fees.investor_has_unpaid_invoice(world.db, world.sme.id) is False
+    inv = await sme_invoice(world.db)
+    late = inv.due_at + dt.timedelta(seconds=1)
+    assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id, now=late) is True
+    assert await fees.investor_has_unpaid_invoice(world.db, world.sme.id, now=late) is False
+
+
+async def test_sme_fee_blocks_next_listing_only_after_seven_days(loan):
+    """D-047 / T5: the SME fee blocks the next listing only once 7 days from issue have passed (was: from issue)."""
+    world, _, _ = loan
+    inv = await sme_invoice(world.db)
+    assert inv.due_at - inv.issued_at == dt.timedelta(days=7)
+    for now in (inv.issued_at, inv.issued_at + dt.timedelta(days=6, hours=23), inv.due_at):
+        assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id, now=now) is False
+    after = inv.due_at + dt.timedelta(seconds=1)
+    assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id, now=after) is True
+    # No late interest on the SME fee: the rate stays 0 and an overdue invoice never grows.
+    assert DirectTransferParams().late_fee_bps_per_day == 0
+    await fees.mark_overdue_invoices(world.db, now=inv.due_at + dt.timedelta(days=30))
+    assert inv.status == "OVERDUE" and inv.late_fee_vnd == 0 and inv.total_vnd == 3_300_000
+    assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id, now=after + dt.timedelta(days=30)) is True
+
+
+async def test_lender_fee_unpaid_after_seven_days_blocks_new_commitments_only(world):
+    """D-047 / T5: inside the 7 days a lender can still invest; after them only NEW commitments are refused."""
+    window = await open_window(world)
+    inv = await make_investor(world)
+    invoice = FeeInvoice(
+        kind="INVESTOR_SERVICE", window_id=window.id, contract_id=world.contract.id, payer_user_id=inv.user.id, base_vnd=1_000_000,
+        fee_vnd=1_000, vat_vnd=100, total_vnd=1_100, status="ISSUED", invoice_number="INV-Y", provider="MANUAL", reference_code="FLDDDDDDDD",
+        issued_at=T0, due_at=T0 + dt.timedelta(days=7),
+    )
+    world.db.add(invoice)
+    await world.db.flush()
+    inside = await reserve(world, inv, 10 * M, now=T0 + dt.timedelta(days=6))
+    assert inside.status == "RESERVED"  # no block inside the 7 days
+    other = await make_investor(world)
+    other_invoice = FeeInvoice(
+        kind="INVESTOR_SERVICE", window_id=window.id, contract_id=world.contract.id, payer_user_id=other.user.id, base_vnd=1_000_000,
+        fee_vnd=1_000, vat_vnd=100, total_vnd=1_100, status="OVERDUE", invoice_number="INV-X", provider="MANUAL", reference_code="FLEEEEEEEE",
+        issued_at=T0, due_at=T0 + dt.timedelta(days=7),
+    )
+    world.db.add(other_invoice)
+    await world.db.flush()
+    after = T0 + dt.timedelta(days=7, seconds=1)
+    with pytest.raises(DirectTransferError) as info:
+        await reserve(world, other, 10 * M, now=after)
+    assert info.value.code == "INVESTOR_FEE_UNPAID"
+    # Nothing else is locked: the lender's existing ticket is untouched and the SME side is not blocked by it.
+    await world.db.refresh(inside)
+    assert inside.status == "RESERVED"
+    assert await fees.sme_has_unpaid_invoice(world.db, other.user.id, now=after) is False
 
 
 async def test_unpaid_investor_invoice_blocks_reservation_and_paying_lifts_it(world):
@@ -139,7 +188,7 @@ async def test_unpaid_investor_invoice_blocks_reservation_and_paying_lifts_it(wo
     world.db.add(invoice)
     await world.db.flush()
     with pytest.raises(DirectTransferError) as info:
-        await reserve(world, inv, 10 * M)
+        await reserve(world, inv, 10 * M, now=T0 + dt.timedelta(days=7, hours=1))
     assert info.value.code == "INVESTOR_FEE_UNPAID"
     await fees.mark_invoice_paid(world.db, invoice_id=invoice.id, bank_txn_id="FT-INV-1", reason="bank statement line", staff_id=world.admin.id, now=at(hours=1))
     assert (await reserve(world, inv, 10 * M, now=at(hours=1))).status == "RESERVED"
@@ -149,7 +198,7 @@ async def test_paying_invoice_lifts_blocks(loan):
     world, _, _ = loan
     inv = await sme_invoice(world.db)
     await fees.mark_invoice_paid(world.db, invoice_id=inv.id, bank_txn_id="FT-SME-1", reason="statement", staff_id=world.admin.id, now=ict(2026, 11, 10))
-    assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id) is False
+    assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id, now=ict(2027, 1, 1)) is False
 
 
 async def test_overdue_job_marks_overdue_and_assesses_late_fee(loan):
@@ -160,7 +209,7 @@ async def test_overdue_job_marks_overdue_and_assesses_late_fee(loan):
     assert await fees.mark_overdue_invoices(world.db, now=inv.due_at + dt.timedelta(days=3), params=params) == 1
     assert inv.status == "OVERDUE" and inv.late_fee_vnd == 3_000_000 * 100 * 3 // 10_000 == 90_000
     assert inv.total_vnd == 3_300_000 + 90_000
-    assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id) is True  # overdue still blocks
+    assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id, now=inv.due_at + dt.timedelta(days=3)) is True  # overdue still blocks
     assert await fees.mark_overdue_invoices(world.db, now=inv.due_at + dt.timedelta(days=3), params=params) == 0  # idempotent
     # default late fee is 0 but the block still works
     inv.status, inv.late_fee_vnd, inv.total_vnd = "ISSUED", 0, 3_300_000
@@ -216,7 +265,7 @@ async def test_fees_disabled_flag_removes_invoices_and_blocks(db_session):
         )
     )
     await world.db.flush()
-    assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id, world.params) is False
+    assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id, world.params, now=ict(2027, 1, 1)) is False
     assert await fees.accrue_investor_fees(world.db, now=ict(2027, 6, 1), params=world.params) == 0
 
 
@@ -243,3 +292,20 @@ async def test_invoice_vietqr_only_when_fee_account_configured(loan):
     from app.direct_transfer.vietqr import parse_tlv
 
     assert parse_tlv(qr)["54"] == "3300000" and parse_tlv(parse_tlv(qr)["62"])["08"] == inv.reference_code
+
+
+async def test_sme_fee_invoice_carries_a_qr(loan):
+    """D-047 / T5: the SME fee invoice data carries a payment QR built from the FUNDLOK_FEE_* settings."""
+    from app.direct_transfer.vietqr import parse_tlv, verify_crc
+
+    world, _, _ = loan
+    inv = await sme_invoice(world.db)
+    params = DirectTransferParams(fee_account_bin="970436", fee_account_number="0011001234567", fee_account_name="FUNDLOK")
+    out = fees.invoice_out(inv, params)
+    assert out.kind == "SME_ACTIVATION" and out.reference_code == inv.reference_code
+    assert verify_crc(out.vietqr_payload)
+    tlv = parse_tlv(out.vietqr_payload)
+    assert tlv["54"] == str(inv.total_vnd) == "3300000" and parse_tlv(tlv["62"])["08"] == inv.reference_code
+    assert "0011001234567" in out.vietqr_payload
+    # Unconfigured account: no QR, never a made-up one.
+    assert fees.invoice_out(inv, DirectTransferParams(fee_account_bin=None, fee_account_number=None)).vietqr_payload is None

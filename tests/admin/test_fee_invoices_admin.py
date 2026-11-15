@@ -6,6 +6,7 @@ docs/specs/admin/fee-invoices-admin.md.
 The invoices come from Edward's own round closing (tests/direct_transfer
 helpers): 10 investments of 10M, fee 3,000,000 + 300,000 VAT.
 """
+import datetime as dt
 from uuid import UUID
 
 import pytest
@@ -102,7 +103,8 @@ async def test_marking_paid_records_the_payment_and_lifts_the_block(
 ):
     admin = await make_admin()
     world, invoice = await _closed_round(db_session)
-    assert await fees.sme_has_unpaid_invoice(db_session, world.sme.id) is True
+    after_grace = invoice.due_at + dt.timedelta(seconds=1)  # the block starts after the 7 days (D-047)
+    assert await fees.sme_has_unpaid_invoice(db_session, world.sme.id, now=after_grace) is True
 
     body = {"bank_txn_id": "TCB-20261112-0001", "reason": "Seen on the Techcombank statement"}
     resp = await client.post(_mark(invoice.id), json=body, headers=admin["headers"])
@@ -118,7 +120,7 @@ async def test_marking_paid_records_the_payment_and_lifts_the_block(
         )
     ).scalars().all()
     assert len(transfers) == 1 and transfers[0].amount_vnd == 3_300_000
-    assert await fees.sme_has_unpaid_invoice(db_session, world.sme.id) is False
+    assert await fees.sme_has_unpaid_invoice(db_session, world.sme.id, now=after_grace) is False
     audit = (
         await db_session.execute(select(AuditLog).where(AuditLog.action == "FEE_INVOICE_MARKED_PAID"))
     ).scalar_one()
