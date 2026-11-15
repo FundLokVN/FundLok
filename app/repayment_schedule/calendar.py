@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-DEFAULT_WORKING_DAYS_PER_MONTH = 22  # T5 -- matches pricing.py's params_version bump to 22
+DEFAULT_WORKING_DAYS_PER_MONTH = 21  # HANDOFF-06 T1 (D14) -- matches grading_params_v1.yaml and direct_transfer config
 
 _DATA_PATH = Path(__file__).parent / "data" / "vn_public_holidays.yaml"
 

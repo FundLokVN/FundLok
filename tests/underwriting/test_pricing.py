@@ -32,12 +32,12 @@ def test_target_payment_worked_example(params):
     assert float(result.target_payment_vnd) == pytest.approx(3_107_409_741, abs=2)
 
 
-def test_daily_repayment_rate_uses_22_and_252_day_conventions(params):
-    """T5 (HANDOFF-03): working_days_per_month realigned 21 -> 22 to match
-    the repayment mechanism's actual business-day calendar
-    (app/repayment_schedule/calendar.py's DEFAULT_WORKING_DAYS_PER_MONTH).
-    working_days_per_year stays 252 -- a separate revenue-annualization
-    convention, not derived from working_days_per_month."""
+def test_daily_repayment_rate_uses_21_working_days(params):
+    """HANDOFF-06 T1 (D14: 21 wins): working_days_per_month is 21, back from
+    the 22 that T5 (HANDOFF-03) set. working_days_per_year stays 252 -- a
+    separate revenue-annualization convention, not derived from
+    working_days_per_month."""
+    assert params.repayment["working_days_per_month"] == 21
     result = pricing.price(
         final_grade=50.0,
         bank_rate_pct=12.0,
@@ -48,17 +48,19 @@ def test_daily_repayment_rate_uses_22_and_252_day_conventions(params):
     )
     assert result.avg_daily_revenue_vnd == Decimal("2520000000") / Decimal("252")
 
-    expected_target_daily = result.target_payment_vnd / (Decimal(6) * Decimal(22))
+    expected_target_daily = result.target_payment_vnd / (Decimal(6) * Decimal(21))
     assert result.target_daily_vnd == expected_target_daily
 
     expected_rate = float(result.target_daily_vnd / result.avg_daily_revenue_vnd)
     assert result.daily_repayment_rate == pytest.approx(expected_rate, rel=1e-12)
 
 
-def test_target_daily_vnd_matches_repayment_worked_example_at_22_days():
-    """T5 acceptance criterion, verbatim: for P=300,000,000 / r=12% / x=4,
-    target_daily_vnd equals A0 = 3,545,454 -- the same worked example T7's
-    origination.py reproduces from the repayment spec's §12.1.
+def test_target_daily_vnd_matches_repayment_worked_example_at_21_days():
+    """T5 acceptance criterion, re-based on 21 working days (HANDOFF-06 T1):
+    for P=300,000,000 / r=12% / x=4, N0 = 84 and target_daily_vnd is
+    312,000,000 / 84 = 3,714,285.71 (the repayment spec's §12.1 example ran
+    at 22 days, A0 = 3,545,454; origination.py's own tests still pass that
+    D explicitly).
 
     final_grade=100.0 makes pricing's formula
     `min(rate_cap, bank_rate + (rate_cap - bank_rate) * (100 - grade) / 100)`
@@ -88,7 +90,7 @@ def test_target_daily_vnd_matches_repayment_worked_example_at_22_days():
     # they truncated for display) rather than silently making pricing.py
     # match a schedule-generation rule it was not designed around.
     import math
-    assert math.floor(result.target_daily_vnd) == 3_545_454
+    assert math.floor(result.target_daily_vnd) == 3_714_285
 
 
 def test_bank_rate_at_or_above_20_raises(params):
