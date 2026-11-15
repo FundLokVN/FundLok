@@ -47,16 +47,11 @@ def compute_stub_interest(amount_vnd: int, annual_rate_pct: Decimal, stub_days: 
 
 
 def investor_rate_pct(loan_rate_pct: Decimal, term_months: int, params: DirectTransferParams) -> Decimal:
-    """The yearly rate the loan is formed at: the investors' flat return over the whole loan as a yearly rate
-    (2.5% over 4 months is 7.5% a year), never above the business's own rate, so never above the legal cap.
+    """The yearly rate the loan is formed at: the graded rate on the window, in full (D-044, Appendix M 2.4).
 
-    The days, the stub and the cap test all run on it. The business's all-in rate (the score run's, on the window)
-    is what it was quoted; the part above the investors' return is FundLok's, invoiced separately (ADR-009), never
-    in these days. Shared with the investor's projection (app/market/projection.py)."""
-    if params.investor_return_bps is None:
-        return Decimal(loan_rate_pct)
-    flat = Decimal(params.investor_return_bps) / 100 * 12 / Decimal(term_months)
-    return min(Decimal(loan_rate_pct), flat)
+    Investors earn the full graded rate; the 2.5% yearly lender service fee is separate, invoiced, and never in
+    these days. `term_months` and `params` are kept so the callers (here and app/market) need no change."""
+    return Decimal(loan_rate_pct)
 
 
 async def _tranches(db: AsyncSession, window_id: UUID, *, lock: bool = True) -> list[Tranche]:

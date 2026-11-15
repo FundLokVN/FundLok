@@ -205,10 +205,10 @@ async def test_approval_forms_the_investment_s_own_loan_at_once(
 
     real = (await client.get(f"/repayment/tranches/{first['id']}/schedule", headers=an["headers"])).json()
 
-    # 84 working days at 2.5% over the loan, plus the first-period interest: what the projection gives for today.
+    # 84 working days at the full graded rate (16% a year), plus the first-period interest: what the projection gives for today.
     instalments = [r for r in real if r["kind"] == "INSTALMENT"]
     assert len(instalments) == 84 and sum(r["principal_vnd"] for r in instalments) == 30_000_000
-    assert sum(r["interest_vnd"] for r in instalments) == 750_000  # 2.5% of 30M
+    assert sum(r["interest_vnd"] for r in instalments) == 1_600_000  # 16% a year over 4 months of 30M
     today = ict_date(dt.datetime.now(dt.timezone.utc))
     expected = project_ticket(
         amount_vnd=30_000_000, loan_rate_pct=Decimal("16"), term_months=4,
