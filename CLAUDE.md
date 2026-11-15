@@ -198,8 +198,9 @@ Tranche:          RESERVED → SIGNED → ATTESTED → CONFIRMED → ACTIVE
 | ADR-006 | fl-knowledge: BM25 → Pinecone + local embeddings | Accepted |
 | ADR-007 | fl-knowledge: PDF ingestion (regulatory source documents) | Accepted |
 | ADR-008 | Payment rails and custody model (GPay) | Superseded by ADR-009 |
-| ADR-009 | Direct-transfer custody model, funding window, evidence-based confirmation | Accepted |
+| ADR-009 | Direct-transfer custody model, funding window, evidence-based confirmation | Accepted (§2 funding window superseded by ADR-011) |
 | ADR-010 | fl-knowledge: hybrid search (semantic + BM25) and stale-vector cleanup | Accepted |
+| ADR-011 | Commit-then-accept funding flow (replaces ADR-009 §2 funding window) | Accepted |
 
 Full ADRs in `docs/adr/`.
 
