@@ -114,6 +114,22 @@ def test_bank_rate_at_or_above_20_raises(params):
         )
 
 
+def test_bank_rate_below_two_percent_raises(params):
+    """HANDOFF-06 D-053: below 2% the nearest-dong daily tax can sum above the exact total (up to 47 dong on a
+    schedule), so a bank rate under 2% is refused instead of quietly over-withholding."""
+    kwargs = dict(
+        final_grade=50.0,
+        loan_size_vnd=Decimal("10626000"),
+        duration_months=2,
+        revenue_y1_vnd=Decimal("1000000000"),
+        params=params,
+    )
+    with pytest.raises(ValueError):
+        pricing.price(bank_rate_pct=1.99, **kwargs)
+    # The boundary itself is allowed.
+    assert pricing.price(bank_rate_pct=pricing.MIN_BANK_RATE_PCT, **kwargs).interest_rate_pct >= 2.0
+
+
 def test_rate_never_exceeds_20_percent_cap(params):
     # grade=0 (worst possible) should still cap at 20, never overshoot.
     result = pricing.price(
