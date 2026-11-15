@@ -159,8 +159,9 @@ def test_originate_facility_generates_full_schedule_and_sets_backstop():
 def test_originate_facility_schedule_spans_tet_with_no_gap():
     """The generated schedule for a facility originated right before Tết
     2026 must still produce exactly N0 scheduled business days, skipping
-    the holiday block entirely (T8 EC-01), not shifting amounts around it."""
-    cal = BusinessDayCalendar()
+    the holiday block entirely (T8 EC-01), not shifting amounts around it.
+    Runs with observe_public_holidays=True (D-046: ignored by default)."""
+    cal = BusinessDayCalendar(observe_public_holidays=True)
     db = _FakeDB()
     facility = originate_facility(
         db,
