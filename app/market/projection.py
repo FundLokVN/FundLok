@@ -3,7 +3,7 @@
 The real days are created when the round closes (app/direct_transfer/close.py `_form_loan` ->
 `generate_repayment_days`). Until then the investor sees what those days would be, with the same arithmetic: the
 investors' rate (`investor_rate_pct`: their flat return over the loan, capped at the business's rate), the term
-(`compute_origination`), the business-day calendar, `principal_for_day`, the withholding on interest for individual
+(`compute_origination`), the business-day calendar, the withholding on interest for individual
 investors, and the first-period (stub) interest from the day the transfer was confirmed.
 
 Two assumptions, both said on the page: the round closes on its last day (the latest it can, so the dates are the
@@ -20,7 +20,7 @@ from decimal import Decimal
 from app.direct_transfer.calendar_utils import count_business_days, default_calendar, first_working_day_after
 from app.direct_transfer.close import compute_stub_interest, investor_rate_pct
 from app.direct_transfer.config import DirectTransferParams, resolve
-from app.direct_transfer.repayment import principal_for_day, rdiv
+from app.direct_transfer.repayment import rdiv, split_instalment_interest, tax_nearest
 from app.repayment_schedule.calendar import BusinessDayCalendar
 from app.repayment_schedule.origination import compute_origination
 
@@ -61,14 +61,15 @@ def project_ticket(
     n_days = orig.business_day_count
     dates = cal.generate_business_days(start, n_days)
 
-    instalments = []
-    for index, due in enumerate(dates, start=1):
-        gross = orig.final_instalment_vnd if index == n_days else orig.daily_amount_vnd
-        principal = principal_for_day(amount_vnd, index, n_days)
-        instalments.append((index, due, principal, gross - principal, gross))
-    # Withholding as generate_repayment_days does it: floored per day, the last day carrying the true-up.
+    grosses = [orig.final_instalment_vnd if i == n_days else orig.daily_amount_vnd for i in range(1, n_days + 1)]
+    interests = split_instalment_interest(grosses, amount_vnd)  # as generate_repayment_days does (D-045)
+    instalments = [
+        (index, due, gross - interest, interest, gross)
+        for (index, due), gross, interest in zip(enumerate(dates, start=1), grosses, interests)
+    ]
+    # Withholding as generate_repayment_days does it: nearest dong per day, the last day carrying the true-up.
     if individual:
-        taxes = [interest * p.withholding_bps // 10_000 for _, _, _, interest, _ in instalments[:-1]]
+        taxes = [tax_nearest(interest, p.withholding_bps) for _, _, _, interest, _ in instalments[:-1]]
         total_tax = rdiv(sum(i[3] for i in instalments) * p.withholding_bps, 10_000)
         taxes.append(min(instalments[-1][3], max(0, total_tax - sum(taxes))))
     else:
