@@ -100,33 +100,49 @@ def invoice_vietqr(invoice: FeeInvoice, params: DirectTransferParams | None = No
     )
 
 
+def invoice_out(invoice: FeeInvoice, params: DirectTransferParams | None = None):
+    """The invoice as the API returns it, carrying the payment QR (None when the fee account is not configured)."""
+    from app.direct_transfer.schemas import FeeInvoiceOut
+
+    out = FeeInvoiceOut.model_validate(invoice)
+    return out.model_copy(update={"vietqr_payload": invoice_vietqr(invoice, params)})
+
+
 # --------------------------------------------------------------------------- #
 # Blocks
 # --------------------------------------------------------------------------- #
-async def sme_has_unpaid_invoice(db: AsyncSession, user_id: UUID, params: DirectTransferParams | None = None) -> bool:
-    if not resolve(params).fees_enabled:
-        return False
+async def _has_overdue_invoice(db: AsyncSession, user_id: UUID, kind: str, now: dt.datetime) -> bool:
+    """An unpaid invoice of `kind` whose 7 days (`due_at`) are over at `now`. Inside them nothing is blocked (D-047):
+    the block starts on day 8, not on the issue date. Time is injected, never read from the wall clock."""
     row = (
         await db.execute(
             select(FeeInvoice.id).where(
-                FeeInvoice.payer_user_id == user_id, FeeInvoice.kind == "SME_ACTIVATION", FeeInvoice.status.in_(UNPAID)
+                FeeInvoice.payer_user_id == user_id,
+                FeeInvoice.kind == kind,
+                FeeInvoice.status.in_(UNPAID),
+                FeeInvoice.due_at < now,
             )
         )
     ).first()
     return row is not None
 
 
-async def investor_has_unpaid_invoice(db: AsyncSession, user_id: UUID, params: DirectTransferParams | None = None) -> bool:
+async def sme_has_unpaid_invoice(
+    db: AsyncSession, user_id: UUID, params: DirectTransferParams | None = None, *, now: dt.datetime
+) -> bool:
+    """Blocks the SME's NEXT listing, and only after the 7 days from issue (D-047, Appendix M 5.7)."""
     if not resolve(params).fees_enabled:
         return False
-    row = (
-        await db.execute(
-            select(FeeInvoice.id).where(
-                FeeInvoice.payer_user_id == user_id, FeeInvoice.kind == "INVESTOR_SERVICE", FeeInvoice.status.in_(UNPAID)
-            )
-        )
-    ).first()
-    return row is not None
+    return await _has_overdue_invoice(db, user_id, "SME_ACTIVATION", now)
+
+
+async def investor_has_unpaid_invoice(
+    db: AsyncSession, user_id: UUID, params: DirectTransferParams | None = None, *, now: dt.datetime
+) -> bool:
+    """Blocks NEW commitments only, and only after the 7 days from issue (D-047, Appendix M 8.3)."""
+    if not resolve(params).fees_enabled:
+        return False
+    return await _has_overdue_invoice(db, user_id, "INVESTOR_SERVICE", now)
 
 
 async def blocked_parties(db: AsyncSession) -> dict[str, list[dict]]:

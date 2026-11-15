@@ -53,8 +53,9 @@ from app.utils.rbac import require_roles
 
 router = APIRouter(prefix="/repayment", tags=["repayment"])
 
-require_sme = require_roles(Role.SME)
-require_investor = require_roles(Role.INVESTOR)
+# D-047: a suspended account may still repay and confirm receipts (only new offers and investments stop).
+require_sme = require_roles(Role.SME, allow_suspended=True)
+require_investor = require_roles(Role.INVESTOR, allow_suspended=True)
 
 
 def _now() -> dt.datetime:
