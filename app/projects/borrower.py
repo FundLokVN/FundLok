@@ -28,11 +28,11 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.direct_transfer.models import FundingWindow
+from app.direct_transfer.models import WINDOW_LIVE_STATES, FundingWindow
 from app.gverify.models import STATUS_APPROVED, GVerifyKybVerification
 from app.lending.models import LoanApplication, Project, ProjectOwnership
 
-LIVE_WINDOW_STATUSES = ("OPEN", "FULL", "CLOSING", "REPAYING")
+LIVE_WINDOW_STATUSES = WINDOW_LIVE_STATES
 ENDED_WINDOW_STATUSES = ("FAILED", "REPAID", "CANCELLED")
 ENDED_PROJECT_STATUSES = ("CLOSED", "ARCHIVED")
 

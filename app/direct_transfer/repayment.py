@@ -24,7 +24,15 @@ from app.direct_transfer.disputes import open_missed_day_dispute
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event
 from app.direct_transfer.ledger_posting import post_repayment_day_settled
-from app.direct_transfer.models import Dispute, FundingWindow, PaymentAccount, RepaymentDay, Tranche, Transfer
+from app.direct_transfer.models import (
+    WINDOW_LIVE_STATES,
+    Dispute,
+    FundingWindow,
+    PaymentAccount,
+    RepaymentDay,
+    Tranche,
+    Transfer,
+)
 from app.direct_transfer.tranches import mask_name
 from app.direct_transfer.vietqr import build_vietqr_payload
 from app.repayment_schedule.calendar import BusinessDayCalendar
@@ -194,7 +202,7 @@ async def todays_payments(db: AsyncSession, *, sme_user_id: UUID, on_date: dt.da
         await db.execute(
             select(FundingWindow).where(
                 FundingWindow.sme_user_id == sme_user_id,
-                FundingWindow.status.in_(("OPEN", "FULL", "CLOSING", "REPAYING")),
+                FundingWindow.status.in_(WINDOW_LIVE_STATES),
             )
         )
     ).scalars().all()

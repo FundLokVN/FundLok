@@ -30,7 +30,7 @@ from app.contracts.service import create_contract
 from app.direct_transfer import standing
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.errors import DirectTransferError, conflict, not_found
-from app.direct_transfer.models import FundingWindow, PaymentAccount, Tranche
+from app.direct_transfer.models import WINDOW_LIVE_STATES, FundingWindow, PaymentAccount, Tranche
 from app.direct_transfer.reservation import reserve_ticket
 from app.direct_transfer.signing import MockSigner, Signer
 from app.direct_transfer.storage import EvidenceStorage, R2Storage
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 # The window holds capacity and takes reservations in these states; at most one per project (Edward's partial
 # unique index uq_funding_windows_one_live_per_project).
-LIVE_WINDOW_STATUSES = ("OPEN", "FULL", "CLOSING", "REPAYING")
+LIVE_WINDOW_STATUSES = WINDOW_LIVE_STATES
 
 # The investing terms the investor agrees to before reserving. The text is the front end's
 # (investment.terms in lib/i18n); bump this with any change to it, so an investor holding the old text is asked to

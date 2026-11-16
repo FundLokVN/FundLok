@@ -46,6 +46,25 @@ class FundingWindowOut(_Out):
     pay_deadline_at: dt.datetime | None = None
     no_show_at: dt.datetime | None = None
     receipt_deadline_at: dt.datetime | None = None
+    # Commit-then-accept (spec 4.2); all None on LEGACY windows.
+    flow: Literal["LEGACY", "COMMIT_THEN_ACCEPT"] | None = None
+    commit_closes_at: dt.datetime | None = None
+    sme_deadline_at: dt.datetime | None = None
+    committed_total_vnd: int | None = None
+    committed_pct: int | None = None
+    sme_decision: Literal["ACCEPTED", "DECLINED", "AUTO_ACCEPTED", "AUTO_DECLINED"] | None = None
+    sme_decided_at: dt.datetime | None = None
+
+
+class CommitmentOut(_Out):
+    id: UUID
+    window_id: UUID
+    amount_vnd: int
+    status: Literal["PLEDGED", "FOLDED", "VOID"]
+    committed_at: dt.datetime
+    my_committed_total_vnd: int
+    window_committed_total_vnd: int
+    window_target_vnd: int
 
 
 class TrancheOut(_Out):
