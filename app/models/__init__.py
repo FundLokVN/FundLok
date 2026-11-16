@@ -44,7 +44,9 @@ from app.admin.fee_notice.models import FeeInvoiceNotice  # noqa: F401
 from app.scheduled_jobs.models import RepaymentReminder, RepaymentZaloReminder  # noqa: F401
 from app.consent.models import ConsentCode, UserConsent  # noqa: F401
 from app.direct_transfer.models import (  # noqa: F401
+    AcceptanceReminder,
     CicEvent,
+    Commitment,
     Dispute,
     DisputeEvidence,
     EvidenceFile,
@@ -52,6 +54,8 @@ from app.direct_transfer.models import (  # noqa: F401
     FeeInvoice,
     FundingWindow,
     InvestorFeeAccrual,
+    LenderStanding,
+    LenderUnlockAcknowledgement,
     PaymentAccount,
     RepaymentDay,
     StandingOffer,

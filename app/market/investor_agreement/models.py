@@ -17,7 +17,8 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, Text, UniqueConstraint, func,
+    BigInteger, CheckConstraint, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, Text, UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
@@ -104,11 +105,21 @@ class AgreementSigningCode(Base):
     """
 
     __tablename__ = "investor_agreement_codes"
-    __table_args__ = (Index("ix_investor_agreement_codes_investor_created", "investor_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_investor_agreement_codes_investor_created", "investor_id", "created_at"),
+        CheckConstraint("purpose IN ('SERVICE_AGREEMENT','LOAN_CONTRACT')", name="ck_investor_agreement_codes_purpose"),
+        CheckConstraint(
+            "purpose <> 'LOAN_CONTRACT' OR tranche_id IS NOT NULL",
+            name="ck_investor_agreement_codes_loan_contract_tranche",
+        ),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
-    tranche_id = Column(UUID(as_uuid=True), ForeignKey("tranches.id", ondelete="RESTRICT"), nullable=False)
+    # NULL for a SERVICE_AGREEMENT code asked at the first commitment of a commit-then-accept window (no tranche yet).
+    tranche_id = Column(UUID(as_uuid=True), ForeignKey("tranches.id", ondelete="RESTRICT"), nullable=True)
+    window_id = Column(UUID(as_uuid=True), ForeignKey("funding_windows.id", ondelete="RESTRICT"), nullable=True)
+    purpose = Column(Text, nullable=False, server_default="SERVICE_AGREEMENT")
     version = Column(Text, nullable=False)
     # Canonical +84xxxxxxxxx: the account's phone number when the code was sent.
     phone = Column(Text, nullable=False)

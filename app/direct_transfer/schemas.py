@@ -9,7 +9,9 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 TrancheStatus = Literal["RESERVED", "SIGNED", "ATTESTED", "CONFIRMED", "ACTIVE", "EXPIRED", "UNDER_REVIEW", "VOID"]
-WindowStatus = Literal["OPEN", "FULL", "CLOSING", "REPAYING", "FAILED", "REPAID", "CANCELLED"]
+WindowStatus = Literal[
+    "OPEN", "FULL", "CLOSING", "AWAITING_SME", "AWAITING_PAYMENT", "REPAYING", "FAILED", "REPAID", "CANCELLED"
+]
 
 
 class _Out(BaseModel):

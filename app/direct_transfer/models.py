@@ -38,8 +38,12 @@ from app.core.base import Base
 TRANCHE_STATES = ("RESERVED", "SIGNED", "ATTESTED", "CONFIRMED", "ACTIVE", "EXPIRED", "UNDER_REVIEW", "VOID")
 # States in which a tranche is "live" for the one-live-tranche-per-investor rule.
 TRANCHE_LIVE_STATES = ("RESERVED", "SIGNED", "ATTESTED", "CONFIRMED", "UNDER_REVIEW", "ACTIVE")
-WINDOW_STATES = ("OPEN", "FULL", "CLOSING", "REPAYING", "FAILED", "REPAID", "CANCELLED")
-WINDOW_LIVE_STATES = ("OPEN", "FULL", "CLOSING", "REPAYING")
+# AWAITING_SME and AWAITING_PAYMENT belong to the commit-then-accept flow (ADR-011); no LEGACY window enters them.
+WINDOW_STATES = (
+    "OPEN", "FULL", "CLOSING", "AWAITING_SME", "AWAITING_PAYMENT", "REPAYING", "FAILED", "REPAID", "CANCELLED",
+)
+WINDOW_LIVE_STATES = ("OPEN", "FULL", "CLOSING", "AWAITING_SME", "AWAITING_PAYMENT", "REPAYING")
+_WINDOW_LIVE_SQL = "status IN ('OPEN','FULL','CLOSING','AWAITING_SME','AWAITING_PAYMENT','REPAYING')"
 
 
 def _uuid_pk():
@@ -159,6 +163,14 @@ class FundingWindow(Base):
     repayment_start_date = Column(Date, nullable=True)
     facility_id = Column(UUID(as_uuid=True), ForeignKey("facility.id", ondelete="RESTRICT"), nullable=True)
     idempotency_key = Column(Text, nullable=True, unique=True)
+    # Commit-then-accept flow (ADR-011). LEGACY windows keep the old behaviour.
+    flow = Column(Text, nullable=False, server_default="LEGACY")
+    commit_closes_at = _ts(nullable=True)
+    sme_deadline_at = _ts(nullable=True)
+    pay_deadline_at = _ts(nullable=True)
+    sme_decision = Column(Text, nullable=True)
+    sme_decided_at = _ts(nullable=True)
+    sme_decided_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True)
     created_at = _ts(server_default=func.now())
     updated_at = _ts(server_default=func.now(), onupdate=func.now())
 
@@ -168,15 +180,20 @@ class FundingWindow(Base):
         CheckConstraint("target_vnd > 0 AND target_vnd <= 100000000", name="ck_funding_windows_target"),
         CheckConstraint("min_ticket_vnd > 0", name="ck_funding_windows_min_ticket"),
         CheckConstraint(
-            "status IN ('OPEN','FULL','CLOSING','REPAYING','FAILED','REPAID','CANCELLED')",
+            "status IN ('OPEN','FULL','CLOSING','AWAITING_SME','AWAITING_PAYMENT','REPAYING','FAILED','REPAID','CANCELLED')",
             name="ck_funding_windows_status",
+        ),
+        CheckConstraint("flow IN ('LEGACY','COMMIT_THEN_ACCEPT')", name="ck_funding_windows_flow"),
+        CheckConstraint(
+            "sme_decision IN ('ACCEPTED','DECLINED','AUTO_ACCEPTED','AUTO_DECLINED')",
+            name="ck_funding_windows_sme_decision",
         ),
         # One listing per SME (business) until the previous loan is repaid in full (Loc rule 1).
         Index(
             "uq_funding_windows_one_live_per_project",
             "project_id",
             unique=True,
-            postgresql_where=text("status IN ('OPEN','FULL','CLOSING','REPAYING')"),
+            postgresql_where=text(_WINDOW_LIVE_SQL),
         ),
         # The same rule across the SME's projects (D-016, docs/specs/projects/one-borrower.md): a second project
         # cannot list while the first is open or repaying. open_funding_window reports it as SME_HAS_LIVE_LISTING.
@@ -184,8 +201,96 @@ class FundingWindow(Base):
             "uq_funding_windows_one_live_per_sme",
             "sme_user_id",
             unique=True,
-            postgresql_where=text("status IN ('OPEN','FULL','CLOSING','REPAYING')"),
+            postgresql_where=text(_WINDOW_LIVE_SQL),
         ),
+    )
+
+
+class Commitment(Base):
+    """A lender's pledge to a commit-then-accept window. Moves no money and creates no tranche (ADR-011)."""
+
+    __tablename__ = "commitments"
+
+    id = _uuid_pk()
+    window_id = Column(UUID(as_uuid=True), ForeignKey("funding_windows.id", ondelete="RESTRICT"), nullable=False)
+    investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    investor_account_id = Column(
+        UUID(as_uuid=True), ForeignKey("payment_accounts.id", ondelete="RESTRICT"), nullable=True
+    )
+    investor_type = Column(Text, nullable=False)
+    amount_vnd = Column(BigInteger, nullable=False)
+    status = Column(Text, nullable=False, server_default="PLEDGED")
+    void_reason = Column(Text, nullable=True)
+    tranche_id = Column(UUID(as_uuid=True), ForeignKey("tranches.id", ondelete="RESTRICT"), nullable=True)
+    idempotency_key = Column(Text, nullable=True, unique=True)
+    request_fingerprint = Column(Text, nullable=True)
+    pledge_file_key = Column(Text, nullable=False)
+    pledge_sha256 = Column(Text, nullable=False)
+    pledge_certificate = Column(JSONB, nullable=False)
+    committed_at = _ts(nullable=False)
+    created_at = _ts(server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("investor_type IN ('INDIVIDUAL','ENTITY')", name="ck_commitments_investor_type"),
+        CheckConstraint("amount_vnd > 0", name="ck_commitments_amount"),
+        CheckConstraint("status IN ('PLEDGED','FOLDED','VOID')", name="ck_commitments_status"),
+        Index("ix_commitments_window_status", "window_id", "status"),
+        Index("ix_commitments_window_investor", "window_id", "investor_id"),
+    )
+
+
+class LenderStanding(Base):
+    __tablename__ = "lender_standing"
+
+    investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), primary_key=True)
+    status = Column(Text, nullable=False, server_default="GOOD")
+    no_show_count = Column(Integer, nullable=False, server_default="0")
+    locked_at = _ts(nullable=True)
+    locked_window_id = Column(UUID(as_uuid=True), ForeignKey("funding_windows.id", ondelete="RESTRICT"), nullable=True)
+    unlocked_at = _ts(nullable=True)
+    closed_at = _ts(nullable=True)
+    updated_at = _ts(server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (CheckConstraint("status IN ('GOOD','LOCKED','CLOSED')", name="ck_lender_standing_status"),)
+
+
+class LenderUnlockAcknowledgement(Base):
+    """Append-only by convention: the app only inserts."""
+
+    __tablename__ = "lender_unlock_acknowledgements"
+
+    id = _uuid_pk()
+    investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    locked_window_id = Column(
+        UUID(as_uuid=True), ForeignKey("funding_windows.id", ondelete="RESTRICT"), nullable=False
+    )
+    sentence_text = Column(Text, nullable=False)
+    sentence_version = Column(Text, nullable=False)
+    ekyc_verification_id = Column(UUID(as_uuid=True), nullable=False)
+    acknowledged_at = _ts(nullable=False)
+    ip_address = Column(Text, nullable=True)
+    user_agent = Column(Text, nullable=True)
+
+    __table_args__ = (Index("ix_lender_unlock_ack_investor", "investor_id"),)
+
+
+class AcceptanceReminder(Base):
+    __tablename__ = "acceptance_reminders"
+
+    window_id = Column(
+        UUID(as_uuid=True), ForeignKey("funding_windows.id", ondelete="RESTRICT"), primary_key=True
+    )
+    kind = Column(Text, primary_key=True)
+    channel = Column(Text, primary_key=True)
+    status = Column(Text, nullable=False)
+    sent_to = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    sent_at = _ts(nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('D_MINUS_3','D_MINUS_1')", name="ck_acceptance_reminders_kind"),
+        CheckConstraint("channel IN ('IN_APP','ZALO','EMAIL','SMS')", name="ck_acceptance_reminders_channel"),
+        CheckConstraint("status IN ('SENT','FAILED','SKIPPED')", name="ck_acceptance_reminders_status"),
     )
 
 
