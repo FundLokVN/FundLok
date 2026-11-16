@@ -172,6 +172,27 @@ class AdminKybResolveRequest(AdminDecisionRequest):
     business_name: str | None = Field(default=None, max_length=300)
     tax_code: str | None = Field(default=None, max_length=32)
     representative_id_numbers: list[str] = Field(default_factory=list, max_length=20)
+    # What the contracts print for the SME's legal representative and address. A provider read fills them from the
+    # certificate; in manual mode staff type them here. Optional, but never blank when sent.
+    legal_representative_name: str | None = Field(default=None, max_length=200)
+    legal_representative_position: str | None = Field(default=None, max_length=100)
+    company_address: str | None = Field(default=None, max_length=500)
+
+    @field_validator("legal_representative_name", "legal_representative_position", "company_address")
+    @classmethod
+    def _not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError("must not be blank when given")
+        return value
+
+    @model_validator(mode="after")
+    def _position_needs_a_name(self) -> "AdminKybResolveRequest":
+        if self.legal_representative_position and not self.legal_representative_name:
+            raise ValueError("legal_representative_position needs legal_representative_name")
+        return self
 
     @field_validator("representative_id_numbers")
     @classmethod
@@ -392,6 +413,13 @@ class AdminKybVerificationOut(BaseModel):
     updated_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+class AdminKybResolveOut(AdminKybVerificationOut):
+    """The resolved attempt, plus what the SME's contracts would still print as blanks after this decision
+    (LEGAL_REPRESENTATIVE, COMPANY_ADDRESS), so staff see what is missing. Empty for a rejection."""
+
+    missing_signing_details: list[str] = []
 
 
 # --- KYC manual review ------------------------------------------------------ #

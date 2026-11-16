@@ -21,6 +21,7 @@ from app.admin.schemas import (
     AdminDocumentUrlResponse,
     AdminKybCertificateUrlResponse,
     AdminKybReviewOut,
+    AdminKybResolveOut,
     AdminKybVerificationOut,
     AdminKycAccountRef,
     AdminKycConflict,
@@ -674,7 +675,10 @@ async def resolve_kyb_verification(
     business_name: str | None = None,
     tax_code: str | None = None,
     representative_id_numbers: list[str] | None = None,
-) -> AdminKybVerificationOut:
+    legal_representative_name: str | None = None,
+    legal_representative_position: str | None = None,
+    company_address: str | None = None,
+) -> AdminKybResolveOut:
     """Settle a KYB attempt parked for a human.
 
     Only MANUAL_REVIEW is resolvable. An APPROVED or REJECTED attempt is the
@@ -688,6 +692,11 @@ async def resolve_kyb_verification(
     printed on the certificate (the SME's declared code pre-fills the latter).
     On an attempt the provider read, those fields are the provider's and are
     not editable here.
+
+    The legal representative (name, position) and the company address are what
+    the SME's contracts print; a provider read stores them from the certificate
+    (`representatives`, `company_address`) and staff enter them here for a
+    manual attempt, stored in that same shape so the contracts need no change.
     """
     row = (
         await db.execute(
@@ -707,7 +716,16 @@ async def resolve_kyb_verification(
         raise HTTPException(status_code=403, detail="You cannot review your own verification")
 
     provider_checked = kyb_service.provider_checked(row)
-    if provider_checked and (business_name or tax_code):
+    entered_signing_fields = [
+        name
+        for name, value in (
+            ("legal_representative_name", legal_representative_name),
+            ("legal_representative_position", legal_representative_position),
+            ("company_address", company_address),
+        )
+        if value
+    ]
+    if provider_checked and (business_name or tax_code or entered_signing_fields):
         raise HTTPException(
             status_code=400,
             detail="This attempt's business details were read by the provider and cannot be edited",
@@ -734,6 +752,14 @@ async def resolve_kyb_verification(
         row.tax_code = effective_tax_code
         if tax_code and not row.license_code:
             row.license_code = tax_code
+        if legal_representative_name:
+            # The shape the provider response leaves (OCR X `representatives`), first entry first.
+            rep = {"name": legal_representative_name}
+            if legal_representative_position:
+                rep["position"] = legal_representative_position
+            row.representatives = [rep, *list(row.representatives or [])[1:]]
+        if company_address:
+            row.company_address = company_address
 
     note = (note or "").strip() or None
     before = {"status": row.status}
@@ -758,6 +784,8 @@ async def resolve_kyb_verification(
                     "provider_checked": False,
                     "business_name": row.business_name,
                     "tax_code": row.tax_code,
+                    # Which fields staff entered; the values are on the KYB record, not repeated here.
+                    "entered_signing_fields": entered_signing_fields,
                 }
                 if not provider_checked
                 else {}
@@ -767,7 +795,33 @@ async def resolve_kyb_verification(
     )
     await db.commit()
     await db.refresh(row)
-    return AdminKybVerificationOut.model_validate(row)
+    out = AdminKybResolveOut.model_validate(row)
+    if decision is AdminDecision.approved:
+        out.missing_signing_details = await _missing_signing_details(db, row)
+    return out
+
+
+async def _missing_signing_details(db: AsyncSession, row: GVerifyKybVerification) -> list[str]:
+    """What the SME's contracts would still print as a blank after this approval, read the way
+    app/loans/agreement/service.py reads it: the representative from the KYB record only, the address from the
+    record or else the owner's project address."""
+    from app.loans.agreement.pdf import COMPANY_ADDRESS, LEGAL_REPRESENTATIVE, address_line
+    from app.loans.agreement.service import _representative
+
+    missing = []
+    if not _representative(row.representatives):
+        missing.append(LEGAL_REPRESENTATIVE)
+    if not (row.company_address or "").strip():
+        addresses = (
+            await db.execute(
+                select(Project.address)
+                .join(ProjectOwnership, ProjectOwnership.project_id == Project.id)
+                .where(ProjectOwnership.user_id == row.user_id)
+            )
+        ).scalars().all()
+        if not any(address_line(a) for a in addresses):
+            missing.append(COMPANY_ADDRESS)
+    return missing
 
 
 
