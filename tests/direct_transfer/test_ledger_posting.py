@@ -68,7 +68,7 @@ async def test_no_new_path_leg_touches_omnibus_cash(loan):
 async def test_repayment_day_posts_principal_legs_only(loan):
     world, _, _ = loan
     await repayment.presume_paid_days(world.db, now=ict(2026, 11, 9))
-    await repayment.settle_days(world.db, now=ict(2026, 11, 9))
+    await repayment.settle_days(world.db, now=ict(2026, 11, 6))  # only day 1 (due Wed 4 Nov) is past its deadline
     repay = (await world.db.execute(select(LedgerEntry).where(LedgerEntry.type.in_(("REPAYMENT", "DISTRIBUTION"))))).scalars().all()
     day1 = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.day_index == 1, RepaymentDay.kind == "INSTALMENT"))).scalars().all()
     assert len(repay) == 2 * len(day1)  # one borrower leg + one lender leg per day row; stub rows post nothing

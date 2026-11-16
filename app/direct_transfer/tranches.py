@@ -12,7 +12,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.direct_transfer.calendar_utils import working_deadline
+from app.direct_transfer.calendar_utils import calendar_deadline
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.disputes import open_tranche_dispute
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
@@ -351,7 +351,7 @@ async def apply_receipt_fields(
         transfer.confirmation_level = "ATTESTED"
         await transition_tranche(
             db, tranche, "ATTESTED", now=now, actor_id=actor_id, actor_role=actor_role,
-            confirm_deadline=working_deadline(now, params.dispute_working_days),
+            confirm_deadline=calendar_deadline(now, hours=params.sme_confirm_hours),
         )
     else:
         transfer.check_status = "MISMATCH"

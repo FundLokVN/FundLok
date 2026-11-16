@@ -7,7 +7,7 @@ import datetime as dt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.direct_transfer.calendar_utils import working_deadline
+from app.direct_transfer.calendar_utils import calendar_deadline
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.evidence import log_event
 from app.direct_transfer.models import FundingWindow, Tranche, Transfer
@@ -39,7 +39,7 @@ async def create_refund_transfer(
         rail="MANUAL",
         confirmation_level="REPORTED",
         check_status="DUE",
-        due_by=working_deadline(now, p.refund_working_days),
+        due_by=calendar_deadline(now, days=p.refund_days),
     )
     db.add(refund)
     await db.flush()

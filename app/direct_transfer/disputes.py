@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.direct_transfer import cic
-from app.direct_transfer.calendar_utils import working_deadline
+from app.direct_transfer.calendar_utils import calendar_deadline
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event
@@ -62,7 +62,7 @@ async def open_tranche_dispute(
         raise bad_request("Invalid dispute cause")
     window = await db.get(FundingWindow, tranche.window_id)
     if cause == "SME_DISPUTE":
-        next_party, deadline = "INVESTOR", working_deadline(now, p.dispute_response_working_days)
+        next_party, deadline = "INVESTOR", calendar_deadline(now, days=p.dispute_response_days)
     else:
         next_party, deadline = "STAFF", None
     dispute = Dispute(
@@ -102,7 +102,7 @@ async def open_missed_day_dispute(
         raise bad_request("Invalid dispute cause")
     tranche = await db.get(Tranche, day.tranche_id)
     if cause == "MISSED_DAY":
-        next_party, deadline = "SME", working_deadline(now, p.dispute_response_working_days)  # SME proves first
+        next_party, deadline = "SME", calendar_deadline(now, days=p.dispute_response_days)  # SME proves first
     else:
         next_party, deadline = "STAFF", None
     dispute = Dispute(
@@ -182,7 +182,7 @@ async def submit_dispute_evidence(
     first, second = _proof_order(dispute)
     if not proofs:
         dispute.required_next_party = second
-        dispute.response_deadline = working_deadline(now, p.dispute_response_working_days)
+        dispute.response_deadline = calendar_deadline(now, days=p.dispute_response_days)
     else:
         dispute.required_next_party = "STAFF"
         dispute.response_deadline = None

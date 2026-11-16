@@ -52,7 +52,7 @@ repayment_days
 ├── tax_withheld_vnd BIGINT NOT NULL CHECK (>= 0 AND <= interest_vnd)
 ├── net_vnd BIGINT NOT NULL CHECK (net_vnd = gross_vnd - tax_withheld_vnd)
 ├── status TEXT NOT NULL DEFAULT 'DUE' CHECK IN ('DUE','PRESUMED_PAID','REPORTED_MISSED','MATCHED')
-├── report_deadline TIMESTAMPTZ NOT NULL   -- end of the 2nd working day after due_date
+├── report_deadline TIMESTAMPTZ NOT NULL   -- 24 hours after the due date ends (start of the next ICT day + lender_report_hours)
 ├── marked_paid_at TIMESTAMPTZ NULL, marked_paid_by UUID NULL
 ├── reported_at TIMESTAMPTZ NULL, reported_by UUID NULL
 ├── matched_at TIMESTAMPTZ NULL
@@ -64,7 +64,7 @@ UNIQUE (tranche_id, kind, day_index)
 `repayment_days` rows are generated once at window finalize. Amounts never change afterwards (no re-spread in MVP); status columns change.
 
 ### Configuration
-`withholding_bps = 500` (5%), `missed_day_report_working_days = 2`, `late_report_cap_working_days = 5` (PROVISIONAL(Q-D14)).
+`withholding_bps = 500` (5%), `lender_report_hours = 24` (was `missed_day_report_working_days = 2`), `late_report_cap_days = 30` (was `late_report_cap_working_days = 5`; PROVISIONAL(Q-D14)). Both count calendar time (AM-E20). `report_deadline` = start of the ICT day after the due date + `lender_report_hours`; the Late-status spec (`docs/specs/repayment_schedule/late-status.md`, draft) will re-anchor it on the SME's proof time.
 
 ---
 
@@ -115,8 +115,8 @@ PRESUMED_PAID ──[staff match with receipt]───────────�
 4. **Withholding** (PROVISIONAL(Q-D6)): only tranches with `investor_type = INDIVIDUAL`. Per instalment day `tax = floor(interest * 5%)`; on the **final instalment** `tax = round_half_up(5% * SUM(instalment interest)) - SUM(earlier instalment tax)`, so the total equals 5% of total interest (e.g. 84 x 317 = 26,628 against 26,667; the remainder lands on day 84). ENTITY investors: tax 0. The stub row: `tax = floor(5% * stub)`.
 5. **Stub rows** (D-027): one `STUB` row per tranche with `stub_interest_vnd > 0`, `due_date = repayment_start_date`, `principal 0`, `interest = stub_interest`, due on the first instalment day, outside `T0`, shown in today's payments with `kind = STUB`.
 6. **Today's payments.** The SME pays each investor the **net** amount (gross minus withheld tax) to the investor's registered `APPROVED` account, one VietQR per row (amount = `net_vnd`, memo = the tranche's `reference_code`). The SME declares and pays the withheld tax itself.
-7. **Day counts as paid unless reported.** The job `presume_paid_days(now)` moves `DUE` rows with `due_date < today (ICT)` to `PRESUMED_PAID`. The investor may report a row once `due_date <= today` and until `report_deadline` (end of the 2nd working day after `due_date`); reporting sets `REPORTED_MISSED`, opens a `MISSED_DAY` dispute with the SME as `required_next_party` (burden of proof: SME first, `disputes.md`) and emits CIC `MISSED_DAY_CORRECTION`.
-8. **Late report** (PROVISIONAL(Q-D14)): after `report_deadline` and within 5 working days, a report is accepted into reconciliation as a `LATE_REPORT` dispute **without** changing the row status (history is never silently rewritten); beyond 5 working days it is refused (`REPORT_WINDOW_CLOSED`).
+7. **Day counts as paid unless reported.** The job `presume_paid_days(now)` moves `DUE` rows with `due_date < today (ICT)` to `PRESUMED_PAID`. The investor may report a row once `due_date <= today` and until `report_deadline` (24 calendar hours after the due date ends); reporting sets `REPORTED_MISSED`, opens a `MISSED_DAY` dispute with the SME as `required_next_party` (burden of proof: SME first, `disputes.md`) and emits CIC `MISSED_DAY_CORRECTION`.
+8. **Late report** (PROVISIONAL(Q-D14)): after `report_deadline` and within `late_report_cap_days` (30 calendar days), a report is accepted into reconciliation as a `LATE_REPORT` dispute **without** changing the row status (history is never silently rewritten); beyond that it is refused (`REPORT_WINDOW_CLOSED`).
 9. **Settlement.** `settle_days(now)` sets `settled_at` and posts principal ledger legs for `PRESUMED_PAID` rows past `report_deadline` with no open dispute, and for `MATCHED` rows at match time; `facility.collected_to_date_vnd` increases by `gross_vnd`. A `REPORTED_MISSED` row is never settled until resolved.
 10. **Loan closed.** When every row of the facility is settled: facility `ACTIVE -> SETTLED` (`OBLIGATION_SATISFIED`, balance 0), window `REPAID`, SME unlocked (one-listing lock, Q-D16), commission eligibility (`fees.md`) evaluated per tranche. A facility with unresolved rows cannot settle.
 11. **CIC.** `emit_daily_balances(now)` emits a `DAILY_BALANCE` event per ACTIVE tranche per business day counting `PRESUMED_PAID` and `MATCHED` rows as paid (`cic-event-log.md`).
@@ -160,7 +160,7 @@ PRESUMED_PAID ──[staff match with receipt]───────────�
 - [ ] `test_mark_paid_rejects_future_rows`
 - [ ] `test_presume_paid_job_is_idempotent_and_clock_injected`
 - [ ] `test_report_missing_before_deadline_marks_reported_missed_and_opens_dispute`
-- [ ] `test_report_deadline_is_two_working_days`
+- [ ] `test_lender_report_window_is_24_hours_after_the_due_date_ends`, `test_late_report_cap_is_30_calendar_days`
 - [ ] `test_late_report_within_cap_goes_to_reconciliation_without_changing_status`
 - [ ] `test_late_report_beyond_cap_refused`
 - [ ] `test_settle_days_posts_principal_ledger_legs_once`
@@ -177,8 +177,8 @@ PRESUMED_PAID ──[staff match with receipt]───────────�
 | # | Question | Owner | Resolution |
 |---|---|---|---|
 | 1 | Withholding for corporate investors and exact rounding (IBL item 6, Q-D6, Q-024) | Legal / Huy | — |
-| 2 | Missed-report window 2 working days vs noon next day (Q-026) | Lok / Edward | — |
-| 3 | Late-report cap 5 working days (Q-D14) | Lok | — |
+| 2 | Missed-report window 24 calendar hours (was 2 working days; AM-E20) vs noon next day (Q-026) | Lok / Edward | — |
+| 3 | Late-report cap 30 calendar days (was 5 working days; AM-E20, Q-D14) | Lok | — |
 | 4 | What happens operationally after outcome `NOT_PAID` (no arrears in MVP) | Lok | — |
 | 5 | Should the memo carry a per-day reference rather than the tranche reference? | Phat / Edward | — |
 
@@ -189,3 +189,4 @@ PRESUMED_PAID ──[staff match with receipt]───────────�
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-10-28 | Edward / Claude | Initial draft from HANDOFF-04 |
+| 0.2 | 2026-11-16 | Edward / Claude | AM-E20 (SCRUM-625, D-046/D-049): `missed_day_report_working_days = 2` -> `lender_report_hours = 24`, `late_report_cap_working_days = 5` -> `late_report_cap_days = 30`. Instalments stay Monday to Friday. |
