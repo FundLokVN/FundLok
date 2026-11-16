@@ -498,7 +498,8 @@ async def test_the_approval_panel_works_out_the_repayment_approving_starts(
     # on a working day; none when it arrives on a weekend or holiday, which is when this test may run.
     assert basis["received_on"] == today.isoformat()
     assert basis["stub_days"] == count_business_days(today, first_working_day_after(today))
-    assert basis["stub_interest_vnd"] == round(20_000_000 * 0.075 * basis["stub_days"] / 252)
+    # At the full graded rate (16%, D-044), not the old flat 7.5%: it only passed on weekends, when stub_days is 0.
+    assert basis["stub_interest_vnd"] == round(20_000_000 * 0.16 * basis["stub_days"] / 252)
     assert plan["totals"]["tax_withheld_vnd"] == basis["tax_vnd"]
     assert [d["kind"] for d in plan["days"]].count("INSTALMENT") == 84
 
