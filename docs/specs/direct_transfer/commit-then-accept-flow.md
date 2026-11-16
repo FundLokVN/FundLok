@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | **ACCEPTED** by Edward, 2026-11-16 (merged as PR #108). Provisional until handbook v3.2 (D-052): Loc's open points in section 9 are built on the stated defaults and change only by amendment. Phat's review of sections 4 and 5 is still welcome; the API contract is what he builds screens against |
+| **Status** | **ACCEPTED** by Edward, 2026-11-16 (merged as PR #108). **v1.1, 2026-11-16: amended for Loc's answers of 16 Nov (D-060).** Provisional until handbook v3.2 (D-052). Phat's review of sections 4 and 5 is still welcome; the API contract is what he builds screens against |
 | **Owner** | Edward |
 | **Implementer(s)** | Edward's modules: a Claude Sonnet implementer (HANDOFF-06 Phase 2). Phat: routers in `app/market`, all UI, notification wording (D-051) |
 | **Module** | `app/direct_transfer/` (backend), `app/market/funding_router.py` and `app/market/funding.py` (Phat's routers, calling the service functions here), `app/market/investor_agreement/` (shared, section 3) |
@@ -125,7 +125,7 @@ The Lender Service Agreement is now signed at the **first commitment**, when no 
 + window_id    UUID   nullable → funding_windows(id)
 + purpose      TEXT   NOT NULL, default 'SERVICE_AGREEMENT', CHECK IN ('SERVICE_AGREEMENT','LOAN_CONTRACT')
 ```
-`purpose = 'LOAN_CONTRACT'` requires `tranche_id`. `_check_can_sign` (`investor_agreement/service.py:275`) drops its RESERVED/SIGNED and hold-expiry test for `SERVICE_AGREEMENT`.
+`purpose = 'LOAN_CONTRACT'` requires `tranche_id`. **v1.1 (Loc, 16 Nov):** each pledge is signed with an OTP, so `purpose` gains a third value, `'PLEDGE'`, which requires `window_id` and no tranche; a pledge code is bound to the investor, the window and the exact amount. This is a small new migration (the S1 CHECK allows only the first two). `commitments.void_reason` gains the value `WITHDRAWN` (it is free text, no CHECK). `_check_can_sign` (`investor_agreement/service.py:275`) drops its RESERVED/SIGNED and hold-expiry test for `SERVICE_AGREEMENT`.
 
 ### Notifications (`notifications/models.py` `NOTIFICATION_EVENTS`)
 Add: `COMMITMENT_RECEIVED`, `ACCEPTANCE_DUE_3D`, `ACCEPTANCE_DUE_1D`, `WINDOW_ACCEPTED`, `WINDOW_DECLINED`, `CONTRACT_SIGNING_OPEN`, `LENDER_LOCKED`, `TRANCHE_CONFIRMED`, `LOAN_FORMED`. A new event not in the frozenset raises `ValueError`.
@@ -147,7 +147,8 @@ All routes are under `/funding` (`app/market/funding_router.py`). Investor route
   "amount_vnd": 20000000,            // required; at least min_ticket_vnd (10M) or exactly the remaining capacity
   "ack_risk_disclosure": true,       // required, must be true
   "terms_version": "string",         // required, the current INVESTOR_TERMS_VERSION
-  "payment_account_id": "uuid"       // required, an APPROVED account of the lender
+  "payment_account_id": "uuid",      // required, an APPROVED account of the lender
+  "code": "123456"                   // required (v1.1): the OTP sent for this exact amount, see 4.1a
 }
 // response 201
 {
@@ -161,7 +162,7 @@ All routes are under `/funding` (`app/market/funding_router.py`). Investor route
 
 | Status | Code | Condition |
 |---|---|---|
-| 409 | `WINDOW_NOT_OPEN` | window not in `OPEN` (the commitment phase has ended) |
+| 409 | `WINDOW_NOT_OPEN` | window not `OPEN` (the commitment phase has ended, or the window is `FULL` and has no capacity: `CAPACITY_EXCEEDED` applies) |
 | 409 | `INVESTOR_AGREEMENT_REQUIRED` | no current Lender Service Agreement signed (sign it first; first commitment only) |
 | 409 | `LENDER_LOCKED` | no-show lock (unlock first) |
 | 409 | `LENDER_CLOSED` | permanently closed after a second no-show |
@@ -172,7 +173,12 @@ All routes are under `/funding` (`app/market/funding_router.py`). Investor route
 | 400 | `RISK_ACK_REQUIRED`, `TERMS_OUTDATED`, `ACCOUNT_NOT_APPROVED` | as today |
 | 409 | `IDEMPOTENCY_CONFLICT` | same key, different request |
 
-Removed for this flow: `ALREADY_HAS_LIVE_TRANCHE`, `HOLD_EXPIRED`. When the commitments reach the target, the window moves to `AWAITING_SME` in the same transaction.
+Added in v1.1: `CODE_INVALID`, `CODE_EXPIRED` (409/400 as the agreement code), `PHONE_REQUIRED`, `PHONE_NO_ZALO`. Removed for this flow: `ALREADY_HAS_LIVE_TRANCHE`, `HOLD_EXPIRED`. When the pledges reach the target the window becomes `FULL`, **but nothing advances early** (Loc, 16 Nov): it stays open until `commit_closes_at`, because a pledge can be withdrawn and free capacity.
+
+### 4.1a Lender: pledge OTP and withdrawal (v1.1)
+
+- `POST /funding/windows/{window_id}/commitments/code` · INVESTOR · `{ "amount_vnd": 20000000 }` → `200 { "sent_to_masked": "090***1234", "expires_in_seconds": 300, "resend_after_seconds": 60 }`. Sends a Zalo OTP bound to the investor, the window and the amount (purpose `PLEDGE`). Same OTP rules as the other codes (5 min, 60 s cooldown, 5 per day, 5 attempts, single use). Errors: `CODE_COOLDOWN`, `CODE_DAILY_LIMIT`, `PHONE_REQUIRED`, `PHONE_NO_ZALO`, `CODE_NOT_SENT`, `WINDOW_NOT_OPEN`.
+- `POST /funding/commitments/{commitment_id}/withdraw` · INVESTOR (the pledge's owner) · `200 CommitmentOut` with `status: "VOID"`. Allowed while the window is `OPEN` or `FULL` and before `commit_closes_at` (the start of Day 13). It frees the capacity, and a `FULL` window returns to `OPEN`. Errors: `WITHDRAWAL_CLOSED` (409, the commit phase has ended or the pledge is already folded or void), `403`/`404` for another lender's pledge.
 
 `GET /funding/me/commitments?window_id=<uuid>` · INVESTOR · `200 list[CommitmentOut]` (the object above, newest first).
 
@@ -229,8 +235,8 @@ Stores the SME's own screenshot of the money arriving. If amount, reference and 
 
 ### 4.7 Lender lock (new)
 
-- `GET /funding/me/standing` → `200 { "status": "GOOD|LOCKED|CLOSED", "no_show_count": 0, "locked_at": null, "unlock_requires": ["EKYC", "ACKNOWLEDGEMENT"], "acknowledgement_sentence": "…" | null }`.
-- `POST /funding/me/standing/unlock` → `{ "acknowledgement": "<exact sentence>" }` → `200` standing. Requires an `APPROVED` eKYC completed after `locked_at`, and the sentence matching exactly (after trimming). Errors: `EKYC_REQUIRED`, `ACKNOWLEDGEMENT_MISMATCH`, `NOT_LOCKED`, `LENDER_CLOSED`.
+- `GET /funding/me/standing` → `200 { "status": "GOOD|LOCKED|CLOSED", "no_show_count": 0, "locked_at": null, "unlock_requires": ["EKYC", "ACKNOWLEDGEMENT"], "acknowledgement_sentence": "Tôi hiểu việc không có mặt giải ngân ảnh hưởng rất nhiều đến doanh nghiệp, tôi cam kết sẽ đầu tư chuẩn mực" | null }`.
+- `POST /funding/me/standing/unlock` → `{ "acknowledgement": "<exact sentence>" }` → `200` standing. Requires an `APPROVED` eKYC completed after `locked_at`, and the sentence matching exactly, after Unicode NFC normalisation and trimming surrounding spaces (case and diacritics must match; the sentence is Loc's of 16 Nov, `sentence_version = "v1"`; the English text and legal sign-off are AM-L6). Errors: `EKYC_REQUIRED`, `ACKNOWLEDGEMENT_MISMATCH`, `NOT_LOCKED`, `LENDER_CLOSED`.
 
 ### 4.8 Staff (`/admin`, `require_admin`)
 
@@ -246,7 +252,8 @@ Stores the SME's own screenshot of the money arriving. If amount, reference and 
 ### Window (`funding_windows.status`, `COMMIT_THEN_ACCEPT`)
 
 ```
-OPEN ──[commitments reach target, or commit_closes_at]──────────► AWAITING_SME
+OPEN ◄──► FULL   (FULL while pledges equal the target; back to OPEN when one is withdrawn)
+OPEN | FULL ──[commit_closes_at only, never early]──────────────► AWAITING_SME
 AWAITING_SME ──[SME ACCEPT, or auto-accept at sme_deadline_at when committed ≥ 50%]──► AWAITING_PAYMENT
 AWAITING_SME ──[SME DECLINE, or auto-decline at sme_deadline_at when committed < 50%]─► FAILED   (close_reason DECLINED | AUTO_DECLINED)
 AWAITING_PAYMENT ──[pay_deadline_at]────────────────────────────► CLOSING
@@ -254,11 +261,12 @@ CLOSING ──[no tranche pending, or close_wait_until]────────�
 OPEN | AWAITING_SME | AWAITING_PAYMENT ──[staff]───────────────► CANCELLED
 REPAYING ──[last day settled]──────────────────────────────────► REPAID
 ```
-`FULL` is not used. On `FAILED` by decline: every commitment is `VOID` (`DECLINED` or `AUTO_DECLINED`), no tranche exists, no money moved, no fee is issued, the listing goes `CANCELLED`, and every lender is notified (`WINDOW_DECLINED`). The one-borrower rule then closes the project (`one-borrower.md` rule 3), so the SME may re-apply straight away.
+`FULL` is used only while the pledges equal the target (v1.1); no transition happens before `commit_closes_at`. On `FAILED` by decline: every commitment is `VOID` (`DECLINED` or `AUTO_DECLINED`), no tranche exists, no money moved, no fee is issued, the listing goes `CANCELLED`, and every lender is notified (`WINDOW_DECLINED`). The one-borrower rule then closes the project (`one-borrower.md` rule 3), so the SME may re-apply straight away.
 
 ### Commitment
 ```
 PLEDGED ──[window accepted]──► FOLDED   (tranche_id set)
+PLEDGED ──[lender withdraws before commit_closes_at]──► VOID   (void_reason WITHDRAWN)
 PLEDGED ──[window declined / auto-declined / cancelled]──► VOID
 FOLDED  ──[tranche EXPIRED as a no-show]──► VOID   (void_reason NO_SHOW)
 ```
@@ -284,19 +292,19 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 
 ## 6. Business Rules
 
-1. **Timeline.** Day 0 is the ICT date the window opens. The commitment phase ends at the end of Day 12 (`commit_closes_at`), `sme_deadline_at` is 15:00 on Day 13, `pay_deadline_at` is 15:00 on Day 14. All three are calendar days (D-046). A2: weekends do not move them. If the commitments reach the target earlier, the phase ends at once and the deadlines move to 15:00 on the next calendar day (SME) and 15:00 the day after (lenders); open question 1.
-2. **Commit (A6).** Minimum 10M per commitment, or exactly the remaining capacity. Total of PLEDGED commitments ≤ target. Several commitments per lender are allowed. No money moves, no payment details are shown. Each commitment stores a signed pledge (the acceptance document through the signer, as today; open question 4). The Lender Service Agreement is signed once, before the first commitment, with the existing OTP flow.
+1. **Timeline.** Day 0 is the ICT date the window opens. The commitment phase ends at the end of Day 12 (`commit_closes_at`), `sme_deadline_at` is 15:00 on Day 13, `pay_deadline_at` is 15:00 on Day 14. All three are calendar days (D-046). A2: weekends do not move them. **The deadlines never move** (Loc, 16 Nov: no advancements, for consistency on every loan): a round that fills early waits for Day 13, and the phase stays open because pledges may be withdrawn.
+2. **Commit (A6).** Minimum 10M per commitment, or exactly the remaining capacity. Total of PLEDGED commitments ≤ target. Several commitments per lender are allowed. No money moves, no payment details are shown. Each commitment is signed with an OTP at the moment of commitment and stores the signed pledge (the OTP is the signature; D-060). A lender may withdraw a pledge until `commit_closes_at`, which frees its capacity. The Lender Service Agreement is signed once, before the first commitment, with the existing OTP flow.
 3. **Gates at commit.** Eligible investor, approved payment account, risk acknowledgement, current terms, `lender_standing.status = GOOD`, no investor fee invoice more than 7 days past issue (D-047), the SME is not the investor.
 4. **Accept (A3).** An explicit SME `ACCEPT` before `sme_deadline_at` always wins, at any percentage. Silence at the deadline: committed ≥ 50% of target counts as `AUTO_ACCEPTED`, below 50% as `AUTO_DECLINED`. An explicit `DECLINE` before the deadline always wins. After the deadline the automatic result stands.
 5. **At acceptance** the system creates one tranche per lender with PLEDGED commitments: amount = their sum, a unique reference code, `hold_expires_at = pay_deadline_at`, state `RESERVED`; the commitments become FOLDED; every lender is notified (`CONTRACT_SIGNING_OPEN`). `s`, the rate and the term stay as in the offer even if the round is not full (A4).
 6. **Day-14 contract (A1b, A7).** One loan contract per lender for its total; signed with an OTP code plus a logged click; the VietQR appears only after signing. The Lender Service Agreement is not re-signed.
 7. **No-show (A6).** At `pay_deadline_at` every tranche still `RESERVED`, or `SIGNED` with no receipt, becomes `EXPIRED` (`NO_SHOW`); its commitments become VOID; the lender is `LOCKED` and `no_show_count` increases. At the second counted no-show the lender is `CLOSED` permanently. A staff waiver (force majeure or bank outage) lifts the lock without counting the miss. Shortfall reopening and top-up are Phase 3.
 8. **SME receipt check (A5).** The SME has 24 calendar hours from the moment a lender's receipt is checked to confirm (by uploading its own receipt), dispute, or stay silent (counts as received). A 30-day dispute with a bank statement stays open after any confirmation by silence; staff decide under Finance's interim policy, then the bank's trace decides.
-9. **Loan formation.** At `CLOSING`, once no tranche is pending (or `close_wait_until`, default 2 calendar days after `pay_deadline_at`; open question 6), one pooled facility forms from the CONFIRMED tranches: same rate, start date, end date and payment day for every lender; each lender keeps its own tranche, holding and contract. Start date = the first working day after formation (Monday to Friday). **No stub interest.** The loan still forms if the confirmed total is below 50% after no-shows (A4; open question 5). If no tranche is CONFIRMED the window is `FAILED`, no fee.
+9. **Loan formation.** At `CLOSING`, once no tranche is pending (or `close_wait_until`, default 2 calendar days after `pay_deadline_at`; open question 6), one pooled facility forms from the CONFIRMED tranches: same rate, start date, end date and payment day for every lender; each lender keeps its own tranche, holding and contract. Start date = the first working day after formation (Monday to Friday). **No stub interest.** The loan still forms if the confirmed total is below 50% after no-shows (A4, confirmed by Loc 16 Nov); the gap is refilled by the shortfall reopening (AM-E8, Phase 3). If no tranche is CONFIRMED the window is `FAILED`, no fee.
 10. **Fees.** SME 3% activation invoice is issued at formation on the confirmed total (unchanged, `fees.py`); never on a window that failed. Investor fee formula unchanged.
 11. **Ledger.** Unchanged. Claim legs post when a tranche becomes ACTIVE, from `tranche.amount_vnd` (final at that point). No cash account, no leg before ACTIVE.
 12. **Jobs are idempotent and time-driven.** One function, `advance_window(window_id, now)`, performs every due transition for a window: end of the commit phase, the SME auto-decision, the no-show cut-off, the 24-hour silence lapse, the `CLOSING` finalize. The Cloud Scheduler endpoints (D-049) and the staff Advance button both call it; running it twice changes nothing. The 2-hour `expire_holds_job` does not apply to this flow.
-13. **Reminders (D-056).** 3 days and 1 day before `sme_deadline_at`, the SME is reminded by in-app, Zalo and email (SMS only through the mock sender), each logged in `acceptance_reminders`. A reminder is skipped, and logged as such, if the window is already decided.
+13. **Reminders (D-056).** 3 days and 1 day before `sme_deadline_at`, the SME is reminded by in-app, Zalo and email (no SMS at launch: D-056, confirmed by Loc 16 Nov), each logged in `acceptance_reminders`. A reminder is skipped, and logged as such, if the window is already decided.
 14. **Notifications** to lenders: commitment received, window accepted or declined, signing open, locked, confirmed, loan formed. Each channel send is logged.
 15. **Audit.** Every commitment, decision, signature, lock, unlock and waiver writes `evidence_log` and an audit row with the actor and time.
 16. **Idempotency.** Commit, decision, contract signing and unlock accept `Idempotency-Key`; a replay returns the first result.
@@ -330,7 +338,12 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 - [ ] `test_a_lender_can_commit_several_times_to_one_window`
 - [ ] `test_commitment_below_min_ticket_refused_unless_exact_remainder`
 - [ ] `test_commitments_above_capacity_refused`
-- [ ] `test_window_moves_to_awaiting_sme_when_commitments_reach_target`
+- [ ] `test_window_becomes_full_but_stays_open_when_pledges_reach_target`
+- [ ] `test_deadlines_do_not_move_when_the_round_fills_early`
+- [ ] `test_pledge_requires_a_valid_otp_bound_to_investor_window_and_amount`
+- [ ] `test_pledge_withdrawal_frees_capacity_and_reopens_a_full_window`
+- [ ] `test_pledge_withdrawal_refused_after_commit_closes_or_when_folded`
+- [ ] `test_unlock_sentence_matches_after_nfc_normalisation_and_trim_only`
 - [ ] `test_window_moves_to_awaiting_sme_at_commit_closes_at`
 - [ ] `test_commitment_requires_signed_lender_service_agreement` (`tests/market/`)
 - [ ] `test_locked_lender_cannot_commit`
@@ -374,11 +387,11 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 
 | # | Question | Owner | Default used in this spec |
 |---|---|---|---|
-| 1 | If commitments reach the target before Day 12, do the Day-13 and Day-14 deadlines stay fixed or move earlier? | Loc | Move earlier: SME deadline 15:00 the next calendar day, payment deadline 15:00 the day after |
-| 2 | May a lender withdraw a pledge before the SME decides? | Loc | No: a commitment is a pledge |
-| 3 | The exact acknowledgement sentence for unlocking (Vietnamese and English), and its version | Loc | Placeholder text in config, `sentence_version = "draft"` |
-| 4 | How is each pledge signed: the acceptance document through the signer as today, or an OTP per commitment? | Loc, Edward | As today (no OTP per commitment); OTP only for the service agreement and the Day-14 contract |
-| 5 | If no-shows leave the confirmed total below 50%, does the loan still form? | Loc | Yes (A4) |
+| 1 | If commitments reach the target before Day 12, do the Day-13 and Day-14 deadlines move earlier? | Loc | **Resolved 16 Nov: no.** No advancements; deadlines are fixed |
+| 2 | May a lender withdraw a pledge before the SME decides? | Loc | **Resolved 16 Nov: yes, before Day 13** (until `commit_closes_at`) |
+| 3 | The exact acknowledgement sentence for unlocking | Loc | **Resolved 16 Nov (Vietnamese):** "Tôi hiểu việc không có mặt giải ngân ảnh hưởng rất nhiều đến doanh nghiệp, tôi cam kết sẽ đầu tư chuẩn mực". English text and legal sign-off remain AM-L6 |
+| 4 | How is each pledge signed? | Loc | **Resolved 16 Nov: by OTP at each commitment** (reverses the default) |
+| 5 | If no-shows leave the confirmed total below 50%, does the loan still form? | Loc | **Resolved 16 Nov: yes**; the shortfall is refilled by finding investors (AM-E8) |
 | 6 | How long does `CLOSING` wait for disputes after `pay_deadline_at`? | Edward, Loc | `close_wait_days = 2` calendar days |
 | 7 | Is Day 0 the day the window opens, or the day staff publish it? | Loc | The ICT date `window_start` falls on |
 | 8 | When is the `LEGACY` flow removed? | Edward | After dev data is cleared; the `flow` column and legacy branches are then dropped (technical debt) |
@@ -392,3 +405,4 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 |---|---|---|---|
 | 1.0 | 2026-11-15 | Edward / Claude | First draft, from D-036 to D-057 and the code inventory of 2026-11-15 |
 | 1.0 | 2026-11-16 | Edward | Status DRAFT to ACCEPTED (provisional until handbook v3.2). Build slices are in HANDOFF-06 |
+| 1.1 | 2026-11-16 | Edward | Loc's answers (D-060): no early advancement (OPEN and FULL until `commit_closes_at`), pledge withdrawal until Day 13, OTP per pledge (new `PLEDGE` purpose, small migration), the unlock sentence, no SMS. Resolves open questions 1 to 5 |

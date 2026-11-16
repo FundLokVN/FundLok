@@ -96,7 +96,7 @@ LATE ──[SME marks paid with receipt]─────────────�
 4. **Never paid.** A LATE day is shown as overdue to SME, lender and staff, in the schedule and projection. It is never shown or counted as paid, never settles, and posts no ledger leg.
 5. **Staff decision.** `NOT_PAID` on a reported day makes it LATE (it was previously unresolved); `RECEIVED` makes it MATCHED.
 6. **Fees.** Investor fee accrual counts only gross received on `MATCHED` and `PRESUMED_PAID` days. A LATE day contributes nothing until it is settled. The accrual month that a late day finally settles in picks it up; no back-dated invoice is re-issued.
-7. **Extension filing.** A tranche (and its facility) with any day in `LATE` or `REPORTED_MISSED` is not eligible for extension filing. Helper `has_late_day(facility_id)` is the single check (open question 1).
+7. **Extension filing (Loc, 16 Nov).** A day with no SME proof (`LATE`) blocks filing, as in D-041. A day in dispute (`REPORTED_MISSED`) counts as late and is shown as overdue, **but the SME can still file**: the filing is accepted and held, and is not processed until the dispute is decided. Helpers: `has_late_day(facility_id)` (LATE only) and `has_disputed_day(facility_id)`; the extension work (Phase 3) reads both.
 8. **Order.** Payments apply to the oldest unsettled day first; marking a newer day while an older one is `DUE` or `LATE` without proof is refused (`OLDER_DAYS_UNPAID`).
 9. **Deployment.** `mark_late_days` and the changed `presume_paid_days` are exposed to Cloud Scheduler (D-049) only after this spec is implemented. Until then they run in the worker or by staff action, as today.
 10. **Audit.** Every LATE marking and clearing writes `evidence_log`.
@@ -127,7 +127,9 @@ LATE ──[SME marks paid with receipt]─────────────�
 - [ ] `test_marking_a_newer_day_while_an_older_day_is_unpaid_is_refused`
 - [ ] `test_staff_not_paid_decision_makes_the_day_late`
 - [ ] `test_staff_received_decision_matches_the_day`
-- [ ] `test_has_late_day_blocks_extension_filing_check`
+- [ ] `test_extension_filing_refused_while_a_day_is_late_without_proof`
+- [ ] `test_extension_filing_accepted_but_held_while_a_day_is_in_dispute`
+- [ ] `test_disputed_day_is_shown_as_overdue_and_counts_as_late`
 - [ ] `test_todays_payments_lists_late_days_first_oldest_first`
 - [ ] `test_response_exposes_is_overdue_late_since_and_days_late`
 - [ ] `test_mark_late_days_is_idempotent`
@@ -139,7 +141,7 @@ LATE ──[SME marks paid with receipt]─────────────�
 
 | # | Question | Owner | Default used |
 |---|---|---|---|
-| 1 | Does a day under staff review (`REPORTED_MISSED`) block extension filing like a Late day? | Loc | Yes, until staff decide |
+| 1 | Does a day under staff review (`REPORTED_MISSED`) block extension filing like a Late day? | Loc | **Resolved 16 Nov:** it counts as late, but filing is allowed and held until the dispute is decided |
 | 2 | Is "end of due date" 00:00 ICT of the next calendar day, or a cut-off such as 18:00 ICT on the due date (banks stop crediting)? | Loc | 00:00 ICT of the next calendar day |
 | 3 | When a LATE day is paid late and confirmed, is the original ledger date the due date or the settlement date? | Edward | Settlement date; late interest (Phase 3) covers the gap |
 
@@ -151,3 +153,4 @@ LATE ──[SME marks paid with receipt]─────────────�
 |---|---|---|---|
 | 1.0 | 2026-11-15 | Edward / Claude | First draft, from D-041, D-055 and the Appendix M findings 7.3, 7.4, 7.6, 8.1 |
 | 1.0 | 2026-11-16 | Edward | Status DRAFT to ACCEPTED; implementer is Phat (D-058) |
+| 1.1 | 2026-11-16 | Edward | Loc's answer on disputed days and extension filing (D-060); open question 1 resolved |
