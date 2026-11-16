@@ -8,6 +8,10 @@
 | **Decisions** | D-036 to D-057 and TD-01 to TD-04 in `docs/outstanding-issues.md`; flow in `docs/adr/011-commit-then-accept-flow.md` |
 | **Source** | Loc's Appendix M test run, 14 Nov 2026, backend `main` @ `ece64a4`; plan: https://claude.ai/artifact/278iMYJYz1MaNVtBJiw2Gb |
 
+## Handover (D-058, 2026-11-16)
+
+Loc assigned the repayment engine (Jira AM-P6 to AM-P11) to Phat. Agreed: **Phat implements** `app/repayment_schedule/` and the repayment code in `app/direct_transfer/` (Late status, oldest-first payments, late interest, automatic extension) from Edward's specs; **Edward keeps** the specs, ledger claim legs, tranche state machine, fees and migrations and approves every PR that touches money. T3 (rounding) and T4 (holidays) were built by Edward before the handover and are done. Where this file says a Sonnet implementer builds Late status, late interest or extension, read: Phat, or an implementer working for Phat under that rule. Jira: https://fundlok.atlassian.net/issues?jql=project%20%3D%20SCRUM%20AND%20labels%20%3D%20appendix-m
+
 ## Read first
 
 1. `CLAUDE.md` (conventions, module ownership, Alembic rules) and the `fundlok-domain` skill. Pull context with `search_fl_docs` instead of reading whole specs.

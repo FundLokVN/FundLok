@@ -57,10 +57,10 @@ Key carry-forwards:
 - `app/verification/` — legacy KYC/KYB (Didit client, session state, signed webhook); still mounted but not the live path. Live KYC/KYB runs on `app/gverify/` (TPV Datatrust, Phat's, Edward reviews)
 - `app/underwriting/` — ML grading engine (async)
 - `app/contracts/` — loan contract creation from a locked score run (final terms, funding target)
-- `app/repayment_schedule/` — amortization engine, early repayment tracking
+- `app/repayment_schedule/` — **handed to Phat for implementation (D-058, 2026-11-16)**; Edward keeps the specs, the ledger legs and migrations (see Phat's list)
 - Decree 94 reporting and the borrower cap: there is no `app/compliance/` module. The cap lives in `app/direct_transfer/windows.py` (target is 100M per legal entity per D-040; the code still carries a provisional `cross_platform_cap_vnd` of 400M until it is changed)
 - `app/ledger/` — double-entry ledger, custodial/ledger accounts, balance-by-sum (see ADR-003, docs/specs/ledger/ledger-foundation.md)
-- `app/direct_transfer/` — funding window, tranches, transfers and evidence, disputes, repayment collection, fees, CIC event log (ADR-009). Phat's routers call its service functions.
+- `app/direct_transfer/` — funding window, tranches, transfers and evidence, disputes, fees, CIC event log (ADR-009, ADR-011). Phat's routers call its service functions. The repayment code in it (`repayment.py` and the repayment jobs) is Phat's to implement (D-058); the ledger posting, tranche state machine, fees and migrations stay Edward's.
 - `app/payments/` — legacy omnibus disbursement/repayment shim over `app/ledger/` (deprecated behind a flag once `app/direct_transfer/` is wired)
 - `app/system/` — platform/ops settings (e.g. maintenance mode)
 - `app/core/` — database session, config, async migration
@@ -71,6 +71,7 @@ Key carry-forwards:
 
 ### Phat — Full Stack + Sole Frontend Owner
 - All React frontend (Edward does not touch UI under any circumstances)
+- The **repayment engine** (D-058, Loc's decision of 2026-11-15): `app/repayment_schedule/`, `app/direct_transfer/repayment.py` and the repayment jobs. Rounding, oldest-first payments, Late status, late interest, holidays ignored and automatic extension are implemented by Phat from Edward's specs. Edward keeps the specs and approves, in writing, every PR that touches money: the ledger claim legs (`ledger_posting.py`), the tranche state machine, fees, or a migration. No ledger leg is built on a spec Edward has not confirmed.
 - `app/gverify/` — live eKYC/eKYB via TPV Datatrust (Edward reviews the verification domain)
 - `app/consent/` — sign-up terms and consent records
 - `app/phone_verification/` — phone OTP and Zalo
