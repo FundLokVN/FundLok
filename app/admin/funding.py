@@ -40,6 +40,7 @@ from app.direct_transfer.calendar_utils import default_calendar, ict_date
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.evidence import log_event
 from app.direct_transfer.models import (
+    WINDOW_LIVE_STATES,
     Dispute,
     DisputeEvidence,
     EvidenceFile,
@@ -68,7 +69,8 @@ from app.utils import r2
 from app.utils.audit import append_audit
 
 # Rounds still taking or settling investment: the ones the tab opens on.
-OPEN_ROUND_STATUSES = ("OPEN", "FULL", "CLOSING")
+# Every live state except REPAYING (the loan has formed), so it now includes AWAITING_SME and AWAITING_PAYMENT.
+OPEN_ROUND_STATUSES = tuple(s for s in WINDOW_LIVE_STATES if s != "REPAYING")
 
 # How the transfer list is filtered. NEEDS_ACTION is the queue: a receipt waiting to be read, or a ticket under
 # review waiting for a decision. The others group the ticket states.

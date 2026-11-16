@@ -12,7 +12,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.direct_transfer import fees
+from app.direct_transfer import commit_flow, fees
 from app.direct_transfer.calendar_utils import (
     calendar_deadline,
     count_business_days,
@@ -89,6 +89,8 @@ async def request_early_close(
     window = await lock_window(db, window_id)
     if window.sme_user_id != sme_user_id:
         raise not_found("Window not found")
+    if window.flow == commit_flow.COMMIT_THEN_ACCEPT:
+        raise conflict("USE_DECISION", "This round takes the business's decision instead of an early close")
     if window.status not in ("OPEN", "FULL"):
         raise conflict("WINDOW_NOT_OPEN", "The window is not open")
     if await confirmed_total(db, window.id) < window.min_raise_vnd:
@@ -152,6 +154,10 @@ async def advance_window(
     p = resolve(params)
     cal = calendar or default_calendar()
     window = await lock_window(db, window_id)
+    if window.flow == commit_flow.COMMIT_THEN_ACCEPT and window.status in ("OPEN", "AWAITING_SME", "AWAITING_PAYMENT"):
+        # Commit-then-accept windows (ADR-011) have their own time-driven transitions; nothing after AWAITING_PAYMENT
+        # is built yet (HANDOFF-06 Phase 2, slices S3 to S5).
+        return await commit_flow.advance_window(db, window_id=window_id, now=now, params=p)
     if window.status not in ("OPEN", "FULL", "CLOSING"):
         return window
 
@@ -182,7 +188,17 @@ async def advance_window(
 
 
 async def advance_all_windows(db: AsyncSession, *, now: dt.datetime, params: DirectTransferParams | None = None) -> int:
-    ids = (await db.execute(select(FundingWindow.id).where(FundingWindow.status.in_(("OPEN", "FULL", "CLOSING"))))).scalars().all()
+    ids = (
+        await db.execute(
+            select(FundingWindow.id).where(
+                FundingWindow.status.in_(("OPEN", "FULL", "CLOSING"))
+                | (
+                    (FundingWindow.flow == commit_flow.COMMIT_THEN_ACCEPT)
+                    & FundingWindow.status.in_(("AWAITING_SME", "AWAITING_PAYMENT"))
+                )
+            )
+        )
+    ).scalars().all()
     for window_id in ids:
         await advance_window(db, window_id=window_id, now=now, params=params)
     return len(ids)

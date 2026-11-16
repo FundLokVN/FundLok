@@ -16,6 +16,9 @@ class DirectTransferParams:
     # --- funding window (docs/specs/direct_transfer/funding-window.md) ---
     hold_hours: int = 2
     window_days: int = 14
+    # Which flow new windows use: "LEGACY" (reserve, sign and pay within 2 hours) or "COMMIT_THEN_ACCEPT" (ADR-011).
+    # Stays LEGACY until the whole commit-then-accept flow is built (HANDOFF-06 Phase 2).
+    default_window_flow: str = "LEGACY"
     min_raise_pct: int = 50
     min_ticket_vnd: int = 10_000_000  # Q-021 (config, Lok may revisit)
     max_target_vnd: int = 100_000_000

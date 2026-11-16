@@ -38,6 +38,7 @@ from app.admin.schemas import (
 )
 from app.direct_transfer.calendar_utils import count_business_days, ict_date
 from app.direct_transfer.models import (
+    WINDOW_LIVE_STATES,
     Dispute,
     EvidenceFile,
     FundingWindow,
@@ -60,7 +61,7 @@ RECEIPT_FILTERS = ("NEEDS_ACTION", "DECIDED", "ALL")
 
 # The rounds whose days the business is asked to pay: the ones its dashboard and the daily reminder read
 # (app/direct_transfer/repayment.py `todays_payments`); with repay_from_approval a round repays while still open.
-_REPAYING_ROUNDS = ("OPEN", "FULL", "CLOSING", "REPAYING")
+_REPAYING_ROUNDS = WINDOW_LIVE_STATES
 
 
 class _Day(Protocol):
