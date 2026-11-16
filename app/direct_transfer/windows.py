@@ -22,7 +22,7 @@ from app.direct_transfer.accounts import get_usable_account
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event, store_evidence_file
-from app.direct_transfer.models import FundingWindow, StandingOffer, Tranche
+from app.direct_transfer.models import WINDOW_LIVE_STATES, FundingWindow, StandingOffer, Tranche
 from app.direct_transfer.signing import Signer, SignerIdentity, render_offer_document
 from app.direct_transfer.storage import EvidenceStorage
 from app.lending.models import Contract, Listing, LoanApplication, Order, ProjectOwnership, ScoreRun
@@ -185,7 +185,7 @@ async def open_funding_window(
         await db.execute(
             select(FundingWindow.id).where(
                 FundingWindow.project_id == application.project_id,
-                FundingWindow.status.in_(("OPEN", "FULL", "CLOSING", "REPAYING")),
+                FundingWindow.status.in_(WINDOW_LIVE_STATES),
             )
         )
     ).first()
