@@ -125,7 +125,7 @@ The Lender Service Agreement is now signed at the **first commitment**, when no 
 + window_id    UUID   nullable → funding_windows(id)
 + purpose      TEXT   NOT NULL, default 'SERVICE_AGREEMENT', CHECK IN ('SERVICE_AGREEMENT','LOAN_CONTRACT')
 ```
-`purpose = 'LOAN_CONTRACT'` requires `tranche_id`. **v1.1 (Loc, 16 Nov):** each pledge is signed with an OTP, so `purpose` gains a third value, `'PLEDGE'`, which requires `window_id` and no tranche; a pledge code is bound to the investor, the window and the exact amount. This is a small new migration (the S1 CHECK allows only the first two). `commitments.void_reason` gains the value `WITHDRAWN` (it is free text, no CHECK). `_check_can_sign` (`investor_agreement/service.py:275`) drops its RESERVED/SIGNED and hold-expiry test for `SERVICE_AGREEMENT`.
+`purpose = 'LOAN_CONTRACT'` requires `tranche_id`. **v1.1 (Loc, 16 Nov):** a pledge needs only a press to confirm, **no OTP** (OTP is for the Day-14 contract and the service agreement), so `purpose` is unchanged and there is no new migration. `commitments.void_reason` gains the value `WITHDRAWN` (free text, no CHECK). `_check_can_sign` (`investor_agreement/service.py:275`) drops its RESERVED/SIGNED and hold-expiry test for `SERVICE_AGREEMENT`.
 
 ### Notifications (`notifications/models.py` `NOTIFICATION_EVENTS`)
 Add: `COMMITMENT_RECEIVED`, `ACCEPTANCE_DUE_3D`, `ACCEPTANCE_DUE_1D`, `WINDOW_ACCEPTED`, `WINDOW_DECLINED`, `CONTRACT_SIGNING_OPEN`, `LENDER_LOCKED`, `TRANCHE_CONFIRMED`, `LOAN_FORMED`. A new event not in the frozenset raises `ValueError`.
@@ -148,7 +148,7 @@ All routes are under `/funding` (`app/market/funding_router.py`). Investor route
   "ack_risk_disclosure": true,       // required, must be true
   "terms_version": "string",         // required, the current INVESTOR_TERMS_VERSION
   "payment_account_id": "uuid",      // required, an APPROVED account of the lender
-  "code": "123456"                   // required (v1.1): the OTP sent for this exact amount, see 4.1a
+  "confirm_pledge": true             // required (v1.1): the lender pressed Confirm; logged with time, IP and device
 }
 // response 201
 {
@@ -173,11 +173,10 @@ All routes are under `/funding` (`app/market/funding_router.py`). Investor route
 | 400 | `RISK_ACK_REQUIRED`, `TERMS_OUTDATED`, `ACCOUNT_NOT_APPROVED` | as today |
 | 409 | `IDEMPOTENCY_CONFLICT` | same key, different request |
 
-Added in v1.1: `CODE_INVALID`, `CODE_EXPIRED` (409/400 as the agreement code), `PHONE_REQUIRED`, `PHONE_NO_ZALO`. Removed for this flow: `ALREADY_HAS_LIVE_TRANCHE`, `HOLD_EXPIRED`. When the pledges reach the target the window becomes `FULL`, **but nothing advances early** (Loc, 16 Nov): it stays open until `commit_closes_at`, because a pledge can be withdrawn and free capacity.
+Added in v1.1: `CONFIRMATION_REQUIRED` (422, `confirm_pledge` missing or false). Removed for this flow: `ALREADY_HAS_LIVE_TRANCHE`, `HOLD_EXPIRED`. When the pledges reach the target the window becomes `FULL`, **but nothing advances early** (Loc, 16 Nov): it stays open until `commit_closes_at`, because a pledge can be withdrawn and free capacity.
 
-### 4.1a Lender: pledge OTP and withdrawal (v1.1)
+### 4.1a Lender: pledge withdrawal (v1.1)
 
-- `POST /funding/windows/{window_id}/commitments/code` · INVESTOR · `{ "amount_vnd": 20000000 }` → `200 { "sent_to_masked": "090***1234", "expires_in_seconds": 300, "resend_after_seconds": 60 }`. Sends a Zalo OTP bound to the investor, the window and the amount (purpose `PLEDGE`). Same OTP rules as the other codes (5 min, 60 s cooldown, 5 per day, 5 attempts, single use). Errors: `CODE_COOLDOWN`, `CODE_DAILY_LIMIT`, `PHONE_REQUIRED`, `PHONE_NO_ZALO`, `CODE_NOT_SENT`, `WINDOW_NOT_OPEN`.
 - `POST /funding/commitments/{commitment_id}/withdraw` · INVESTOR (the pledge's owner) · `200 CommitmentOut` with `status: "VOID"`. Allowed while the window is `OPEN` or `FULL` and before `commit_closes_at` (the start of Day 13). It frees the capacity, and a `FULL` window returns to `OPEN`. Errors: `WITHDRAWAL_CLOSED` (409, the commit phase has ended or the pledge is already folded or void), `403`/`404` for another lender's pledge.
 
 `GET /funding/me/commitments?window_id=<uuid>` · INVESTOR · `200 list[CommitmentOut]` (the object above, newest first).
@@ -293,7 +292,7 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 ## 6. Business Rules
 
 1. **Timeline.** Day 0 is the ICT date the window opens. The commitment phase ends at the end of Day 12 (`commit_closes_at`), `sme_deadline_at` is 15:00 on Day 13, `pay_deadline_at` is 15:00 on Day 14. All three are calendar days (D-046). A2: weekends do not move them. **The deadlines never move** (Loc, 16 Nov: no advancements, for consistency on every loan): a round that fills early waits for Day 13, and the phase stays open because pledges may be withdrawn.
-2. **Commit (A6).** Minimum 10M per commitment, or exactly the remaining capacity. Total of PLEDGED commitments ≤ target. Several commitments per lender are allowed. No money moves, no payment details are shown. Each commitment is signed with an OTP at the moment of commitment and stores the signed pledge (the OTP is the signature; D-060). A lender may withdraw a pledge until `commit_closes_at`, which frees its capacity. The Lender Service Agreement is signed once, before the first commitment, with the existing OTP flow.
+2. **Commit (A6).** Minimum 10M per commitment, or exactly the remaining capacity. Total of PLEDGED commitments ≤ target. Several commitments per lender are allowed. No money moves, no payment details are shown. Each commitment is confirmed by a press (`confirm_pledge`, logged with time, IP and device) and stores the signed pledge through the signer as today; **no OTP at pledge** (Loc, 16 Nov; OTP only at the Day-14 contract, D-060). A lender may withdraw a pledge until `commit_closes_at`, which frees its capacity. The Lender Service Agreement is signed once, before the first commitment, with the existing OTP flow.
 3. **Gates at commit.** Eligible investor, approved payment account, risk acknowledgement, current terms, `lender_standing.status = GOOD`, no investor fee invoice more than 7 days past issue (D-047), the SME is not the investor.
 4. **Accept (A3).** An explicit SME `ACCEPT` before `sme_deadline_at` always wins, at any percentage. Silence at the deadline: committed ≥ 50% of target counts as `AUTO_ACCEPTED`, below 50% as `AUTO_DECLINED`. An explicit `DECLINE` before the deadline always wins. After the deadline the automatic result stands.
 5. **At acceptance** the system creates one tranche per lender with PLEDGED commitments: amount = their sum, a unique reference code, `hold_expires_at = pay_deadline_at`, state `RESERVED`; the commitments become FOLDED; every lender is notified (`CONTRACT_SIGNING_OPEN`). `s`, the rate and the term stay as in the offer even if the round is not full (A4).
@@ -340,7 +339,7 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 - [ ] `test_commitments_above_capacity_refused`
 - [ ] `test_window_becomes_full_but_stays_open_when_pledges_reach_target`
 - [ ] `test_deadlines_do_not_move_when_the_round_fills_early`
-- [ ] `test_pledge_requires_a_valid_otp_bound_to_investor_window_and_amount`
+- [ ] `test_pledge_requires_explicit_confirmation_and_logs_time_ip_and_device`
 - [ ] `test_pledge_withdrawal_frees_capacity_and_reopens_a_full_window`
 - [ ] `test_pledge_withdrawal_refused_after_commit_closes_or_when_folded`
 - [ ] `test_unlock_sentence_matches_after_nfc_normalisation_and_trim_only`
@@ -390,7 +389,7 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 | 1 | If commitments reach the target before Day 12, do the Day-13 and Day-14 deadlines move earlier? | Loc | **Resolved 16 Nov: no.** No advancements; deadlines are fixed |
 | 2 | May a lender withdraw a pledge before the SME decides? | Loc | **Resolved 16 Nov: yes, before Day 13** (until `commit_closes_at`) |
 | 3 | The exact acknowledgement sentence for unlocking | Loc | **Resolved 16 Nov (Vietnamese):** "Tôi hiểu việc không có mặt giải ngân ảnh hưởng rất nhiều đến doanh nghiệp, tôi cam kết sẽ đầu tư chuẩn mực". English text and legal sign-off remain AM-L6 |
-| 4 | How is each pledge signed? | Loc | **Resolved 16 Nov: by OTP at each commitment** (reverses the default) |
+| 4 | How is each pledge signed? | Loc | **Resolved 16 Nov (revised the same day): a press to confirm, no OTP.** OTP only when signing on disbursement day |
 | 5 | If no-shows leave the confirmed total below 50%, does the loan still form? | Loc | **Resolved 16 Nov: yes**; the shortfall is refilled by finding investors (AM-E8) |
 | 6 | How long does `CLOSING` wait for disputes after `pay_deadline_at`? | Edward, Loc | `close_wait_days = 2` calendar days |
 | 7 | Is Day 0 the day the window opens, or the day staff publish it? | Loc | The ICT date `window_start` falls on |
@@ -405,4 +404,4 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 |---|---|---|---|
 | 1.0 | 2026-11-15 | Edward / Claude | First draft, from D-036 to D-057 and the code inventory of 2026-11-15 |
 | 1.0 | 2026-11-16 | Edward | Status DRAFT to ACCEPTED (provisional until handbook v3.2). Build slices are in HANDOFF-06 |
-| 1.1 | 2026-11-16 | Edward | Loc's answers (D-060): no early advancement (OPEN and FULL until `commit_closes_at`), pledge withdrawal until Day 13, OTP per pledge (new `PLEDGE` purpose, small migration), the unlock sentence, no SMS. Resolves open questions 1 to 5 |
+| 1.1 | 2026-11-16 | Edward | Loc's answers (D-060): no early advancement (OPEN and FULL until `commit_closes_at`), pledge withdrawal until Day 13, a press to confirm each pledge (no OTP; OTP only on Day 14), the unlock sentence, no SMS. Resolves open questions 1 to 5 |
