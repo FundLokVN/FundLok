@@ -20,9 +20,10 @@ class DirectTransferParams:
     min_ticket_vnd: int = 10_000_000  # Q-021 (config, Lok may revisit)
     max_target_vnd: int = 100_000_000
     cross_platform_cap_vnd: int = 400_000_000  # PROVISIONAL(Q-D12)
-    dispute_working_days: int = 2  # SME dispute window on disbursement (placeholder, D-021)
-    close_wait_working_days: int = 2  # PROVISIONAL(Q-D4)
-    refund_working_days: int = 2  # Q-020
+    # Deadlines count calendar time, never working days (AM-E20, Loc 15 Nov 2026; holidays ignored, D-046).
+    sme_confirm_hours: int = 24  # SME checks a receipt within 24 hours (was dispute_working_days = 2, D-021)
+    close_wait_days: int = 2  # PROVISIONAL(Q-D4)
+    refund_days: int = 2  # Q-020
     working_days_per_month: int = 21  # Q-011 resolved A
     stub_basis_days: int = 252  # PROVISIONAL(Q-D5): business days per year
     rate_cap_pct: int = 20  # INV-5 / Dieu 468
@@ -31,10 +32,10 @@ class DirectTransferParams:
     # Each investment starts repaying as soon as staff approve it, as its own loan (Phat, 2026-11-02), instead of
     # one pooled loan when the round closes. The round's minimum raise then no longer refunds anyone.
     repay_from_approval: bool = True
-    missed_day_report_working_days: int = 2  # Q-026
-    late_report_cap_working_days: int = 5  # PROVISIONAL(Q-D14)
+    lender_report_hours: int = 24  # Q-026: lender reports a missed day within 24 hours of the due date ending
+    late_report_cap_days: int = 30  # PROVISIONAL(Q-D14): the 30-day dispute window after report_deadline
     # --- disputes ---
-    dispute_response_working_days: int = 2  # placeholder
+    dispute_response_days: int = 2  # placeholder
     # --- fees (docs/specs/direct_transfer/fees.md); LIVE by default, E1 / D-023 ---
     fees_enabled: bool = True
     sme_fee_bps: int = 300

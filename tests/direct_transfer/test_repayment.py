@@ -137,12 +137,10 @@ async def test_presume_paid_job_is_idempotent_and_clock_injected(loan):
     assert await repayment.presume_paid_days(world.db, now=ict(2026, 11, 4, 12)) == 0
 
 
-async def test_report_deadline_is_two_working_days(loan):
+async def test_report_deadline_is_24_hours_after_the_due_date_ends(loan):
     world, _, _ = loan
     day = (await day_rows(world.db, kind="INSTALMENT", day_index=1))[0]
-    assert day.report_deadline == ict(2026, 11, 7)  # end of Fri 6 Nov (2nd working day after Wed 4 Nov)
-    friday = (await day_rows(world.db, kind="INSTALMENT", day_index=3))[0]  # due Fri 6 Nov
-    assert friday.report_deadline == ict(2026, 11, 11)  # Mon 9, Tue 10 -> end of Tue
+    assert day.report_deadline == ict(2026, 11, 6)  # due Wed 4 Nov; the day ends Thu 00:00, plus 24 hours
 
 
 async def test_report_missing_before_deadline_marks_reported_missed_and_opens_dispute(loan):
@@ -181,9 +179,9 @@ async def test_late_report_within_cap_goes_to_reconciliation_without_changing_st
 async def test_late_report_beyond_cap_refused(loan):
     world, _, tr = loan
     day = (await day_rows(world.db, tranche_id=tr[0].id, kind="INSTALMENT", day_index=1))[0]
-    # deadline end Fri 6 Nov; +5 working days = end of Fri 13 Nov (Sat 14 Nov 00:00 ICT)
+    # report_deadline Fri 6 Nov 00:00; +30 calendar days = Sun 6 Dec 00:00 ICT
     with pytest.raises(DirectTransferError) as info:
-        await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="too late", file_id=None, now=ict(2026, 11, 14), params=world.params)
+        await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="too late", file_id=None, now=ict(2026, 12, 6), params=world.params)
     assert info.value.code == "REPORT_WINDOW_CLOSED" and info.value.persist is True
 
 
@@ -191,7 +189,7 @@ async def test_settle_days_posts_principal_ledger_legs_once(loan):
     world, window, tr = loan
     await repayment.presume_paid_days(world.db, now=ict(2026, 11, 9, 0, 5))
     assert await repayment.settle_days(world.db, now=ict(2026, 11, 5)) == 0  # deadline not reached
-    n = await repayment.settle_days(world.db, now=ict(2026, 11, 9))
+    n = await repayment.settle_days(world.db, now=ict(2026, 11, 6))
     assert n == 20  # Wed 4 Nov rows (10 instalments + 10 stubs) have passed their deadline
     summary = await contract_claim_summary(world.db, contract_id=world.contract.id)
     day1_principal = sum(
@@ -199,7 +197,7 @@ async def test_settle_days_posts_principal_ledger_legs_once(loan):
     )
     assert summary.borrower_obligation_vnd == 100 * M - day1_principal
     assert summary.lender_total_vnd == summary.borrower_obligation_vnd
-    assert await repayment.settle_days(world.db, now=ict(2026, 11, 9)) == 0
+    assert await repayment.settle_days(world.db, now=ict(2026, 11, 6)) == 0
     facility = await world.db.get(Facility, window.facility_id)
     assert int(facility.collected_to_date_vnd) == 1_253_968  # instalment gross only; the stub sits outside T0
 
@@ -247,7 +245,7 @@ async def test_daily_balance_counts_presumed_paid_and_excludes_reported_missed(l
     world, _, tr = loan
     await repayment.presume_paid_days(world.db, now=ict(2026, 11, 6, 0, 5))
     day = (await day_rows(world.db, tranche_id=tr[0].id, kind="INSTALMENT", day_index=1))[0]
-    await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="missing", file_id=None, now=ict(2026, 11, 6, 9), params=world.params)
+    await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="missing", file_id=None, now=ict(2026, 11, 5, 23, 59), params=world.params)  # inside the 24-hour window
     created = await cic.emit_daily_balances(world.db, on_date=dt.date(2026, 11, 5), now=ict(2026, 11, 6, 1))
     assert created == 10
     ev0 = (await world.db.execute(select(CicEvent).where(CicEvent.emit_key == f"daily:{tr[0].id}:2026-11-05"))).scalar_one()

@@ -60,7 +60,7 @@ async def test_repayment_day_job_presumes_and_settles(loan, db_session):
     world, window, _ = loan
     await db_session.commit()
     out = await jobs.repayment_day_job(ctx_at(ict(2026, 11, 9, 0, 10)))
-    assert out == {"presumed": 40, "settled": 20}  # 4 working days of rows are past; the first day passed its deadline
+    assert out == {"presumed": 40, "settled": 40}  # 4 working days of rows are past; Wed, Thu and Fri passed their 24-hour report deadline
     again = await jobs.repayment_day_job(ctx_at(ict(2026, 11, 9, 0, 10)))
     assert again == {"presumed": 0, "settled": 0}
 

@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.direct_transfer import cic
-from app.direct_transfer.calendar_utils import ict_date, start_of_day_ict, working_deadline
+from app.direct_transfer.calendar_utils import calendar_deadline, ict_date, start_of_day_ict
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.disputes import open_missed_day_dispute
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
@@ -76,7 +76,9 @@ def principal_for_day(principal_total: int, day_index: int, day_count: int) -> i
 
 
 def report_deadline_for(due_date: dt.date, params: DirectTransferParams, calendar: BusinessDayCalendar | None = None) -> dt.datetime:
-    return working_deadline(start_of_day_ict(due_date), params.missed_day_report_working_days, calendar)
+    # 24 calendar hours after the due date ends. The Late-status spec (docs/specs/repayment_schedule/late-status.md,
+    # PR #108, draft) will re-anchor this on the SME's proof time later.
+    return calendar_deadline(start_of_day_ict(due_date + dt.timedelta(days=1)), hours=params.lender_report_hours)
 
 
 async def generate_repayment_days(
@@ -391,7 +393,7 @@ async def report_missing_day(
         return day
 
     # Late (PROVISIONAL(Q-D14)): accepted into reconciliation without changing history, up to the cap.
-    late_limit = working_deadline(day.report_deadline - dt.timedelta(seconds=1), p.late_report_cap_working_days)
+    late_limit = calendar_deadline(day.report_deadline, days=p.late_report_cap_days)
     if now >= late_limit:
         await log_event(
             db, entity_type="REPAYMENT_DAY", entity_id=day.id, event_type="REPAYMENT_DAY_REPORTED", now=now,

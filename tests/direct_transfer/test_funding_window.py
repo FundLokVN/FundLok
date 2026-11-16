@@ -363,20 +363,18 @@ async def test_sme_confirm_attested_tranche(world):
     assert transfer.confirmation_level == "CONFIRMED"
 
 
-async def test_confirm_deadline_is_two_working_days(world):
+async def test_confirm_deadline_is_24_hours_after_the_receipt_is_checked(world):
     await open_window(world)
     inv = await make_investor(world)
-    friday = at(days=4)  # Fri 6 Nov 2026 10:00 ICT
-    t = await attested_tranche(world, inv, 10 * M, now=friday)
-    # 2nd working day after Friday = Tuesday 10 Nov; the window ends at the end of that day
-    assert t.confirm_deadline == dt.datetime(2026, 11, 11, 0, 0, tzinfo=ICT)
+    t = await attested_tranche(world, inv, 10 * M, now=at(days=4))  # Fri 6 Nov 2026 10:00 ICT
+    assert t.confirm_deadline == t.attested_at + dt.timedelta(hours=24)  # Saturday (AM-E20; weekend case in test_calendar_days.py)
 
 
 async def test_lapsed_dispute_window_auto_confirms(world):
     await open_window(world)
     inv = await make_investor(world)
-    t = await attested_tranche(world, inv, 10 * M)  # Monday: deadline end of Wednesday
-    assert t.confirm_deadline == dt.datetime(2026, 11, 5, 0, 0, tzinfo=ICT)
+    t = await attested_tranche(world, inv, 10 * M)  # Monday: deadline 24 hours later
+    assert t.confirm_deadline == t.attested_at + dt.timedelta(hours=24)
     assert await tranches.confirm_lapsed_tranches(world.db, now=t.confirm_deadline - dt.timedelta(seconds=1)) == 0
     assert await tranches.confirm_lapsed_tranches(world.db, now=t.confirm_deadline) == 1
     assert t.status == "CONFIRMED"
@@ -458,17 +456,17 @@ async def test_window_closes_on_day_14_and_expires_unsigned(world):
     assert window.confirmed_total_vnd == 60 * M
 
 
-async def test_close_waits_up_to_two_working_days_for_open_review(world):
+async def test_close_waits_up_to_two_days_for_open_review(world):
     await fund_window(world, [60 * M])
     inv = await make_investor(world)
     late_now = at(days=14, hours=-1)  # Mon 16 Nov 09:00 ICT
     t = await attested_tranche(world, inv, 10 * M, now=late_now)
     window = await close_now(world, now=at(days=14))
     assert window.status == "CLOSING"
-    assert window.close_wait_until == dt.datetime(2026, 11, 19, 0, 0, tzinfo=ICT)  # end of Wed 18 Nov
-    window = await close_now(world, now=at(days=15, hours=5))
+    assert window.close_wait_until == at(days=16)  # Wed 18 Nov 10:00 ICT, two calendar days after the close began
+    window = await close_now(world, now=at(days=14, hours=5))  # before the receipt's 24 hours are up
     assert window.status == "CLOSING"
-    window = await close_now(world, now=dt.datetime(2026, 11, 19, 0, 0, tzinfo=ICT))
+    window = await close_now(world, now=at(days=16))
     assert window.status == "REPAYING"  # the attested tranche lapsed into CONFIRMED and joined
     await world.db.refresh(t)
     assert t.status == "ACTIVE" and window.confirmed_total_vnd == 70 * M
@@ -580,7 +578,7 @@ async def test_under_review_at_close_is_excluded_and_never_joins(world):
     await tranches.sme_dispute_tranche(world.db, tranche_id=t.id, sme_user_id=world.sme.id, statement="not received", file_id=None, now=at(days=14, hours=-1, minutes=-30) + dt.timedelta(minutes=45), params=world.params)
     window = await close_now(world, now=at(days=14))
     assert window.status == "CLOSING"
-    window = await close_now(world, now=dt.datetime(2026, 11, 19, 0, 0, tzinfo=ICT))
+    window = await close_now(world, now=at(days=16))
     assert window.status == "REPAYING" and window.confirmed_total_vnd == 60 * M
     await world.db.refresh(t)
     assert t.status == "UNDER_REVIEW" and t.excluded_at_close is True and t.holding_id is None

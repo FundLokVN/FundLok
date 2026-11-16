@@ -85,7 +85,7 @@ async def test_daily_balance_counts_presumed_paid_excludes_reported_missed(loan)
     world, _, tr = loan
     await repayment.presume_paid_days(world.db, now=ict(2026, 11, 6, 0))
     day = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.tranche_id == tr[0].id, RepaymentDay.day_index == 1, RepaymentDay.kind == "INSTALMENT"))).scalar_one()
-    await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="x", file_id=None, now=ict(2026, 11, 6, 9), params=world.params)
+    await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="x", file_id=None, now=ict(2026, 11, 5, 23), params=world.params)  # inside the 24-hour window
     await cic.emit_daily_balances(world.db, on_date=dt.date(2026, 11, 5), now=ict(2026, 11, 6, 10))
     e0 = (await world.db.execute(select(CicEvent).where(CicEvent.emit_key == f"daily:{tr[0].id}:2026-11-05"))).scalar_one()
     e1 = (await world.db.execute(select(CicEvent).where(CicEvent.emit_key == f"daily:{tr[1].id}:2026-11-05"))).scalar_one()

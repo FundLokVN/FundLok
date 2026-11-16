@@ -14,11 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.direct_transfer import fees
 from app.direct_transfer.calendar_utils import (
+    calendar_deadline,
     count_business_days,
     default_calendar,
     first_working_day_after,
     ict_date,
-    working_deadline,
 )
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.disputes import open_tranche_dispute
@@ -68,7 +68,7 @@ async def begin_close(
     window.status = "CLOSING"
     window.close_reason = reason
     window.closing_started_at = now
-    window.close_wait_until = working_deadline(now, params.close_wait_working_days, calendar)
+    window.close_wait_until = calendar_deadline(now, days=params.close_wait_days)
     # Tickets that never reached a receipt cannot be accepted after the window (Civil Code Art. 394.1).
     for tranche in await _tranches(db, window.id):
         if tranche.status in ("RESERVED", "SIGNED") and tranche.receipt_submitted_at is None:
