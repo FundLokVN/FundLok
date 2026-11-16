@@ -76,7 +76,22 @@ Corrected 2026-11-15 (Edward chose the stated rule): the first version of this t
 ### T7. Grading params: confirm one fact before T1 merges
 `pricing.py` reads `working_days_per_month` from the params, while `pricing.py`'s docstring says 21. Confirm that only the YAML value is wrong and nothing else hardcodes 22.
 
-## Phase 2: flow redesign (BLOCKED on spec `docs/specs/direct_transfer/commit-then-accept-flow.md`)
+## Phase 2: flow redesign (spec ACCEPTED 2026-11-16: `docs/specs/direct_transfer/commit-then-accept-flow.md`)
+
+**Build slices.** The slices touch the same files (`windows.py`, `tranches.py`, `close.py`), so they are built **one at a time, each merged before the next starts**, except where the table says they can run together. One PR per slice, test first, named after section 8 of the spec. Jira in brackets.
+
+| Slice | What | Jira | Depends on |
+|---|---|---|---|
+| **S1 Foundation** | The one migration: `commitments`, the `funding_windows` columns and `flow`, the two new window states, **recreate both live-window partial indexes**, `lender_standing`, `lender_unlock_acknowledgements`, `acceptance_reminders`, `investor_agreement_codes` changes, new notification events, model and constant updates. No behaviour change: all existing windows are `LEGACY` | AM-E1 to E8 | none |
+| **S2 Commit and decide** | `POST /windows/{id}/commitments`, the commit phase ending (target reached or `commit_closes_at`), `AWAITING_SME`, the SME decision route, auto-accept and auto-decline, acceptance folding commitments into tranches, `advance_window` skeleton | AM-E1, AM-E2 | S1 |
+| **S3 Sign, pay, no-show** | Day-14 contract code and sign routes, payment gated on signing, `pay_deadline_at` cut-off, no-show expiry, `lender_standing` lock and unlock, staff waiver | AM-E4 (signing), AM-E7 | S2 |
+| **S4 Formation** | Pooled loan from CONFIRMED tranches at `CLOSING`, no stub interest, SME fee at formation, window failed with no fee when nothing confirmed | AM-E4 | S3 |
+| **S5 Receipt check and disputes** | SME receipt route, 24-hour silence, 30-day dispute route and `dispute_until`, staff decision on "Not received" | AM-E5, AM-E6 | S3 (can run with S4) |
+| **S6 Reminders** | `acceptance_reminders` job, in-app, Zalo and email, SMS mock interface, each send logged | AM-E3 | S2 (can run with S4 and S5) |
+| **Later** | Cloud Scheduler endpoints (AM-E10, after Phat's Late status AM-P8); shortfall reopening and top-up (AM-E8) | AM-E10, AM-E8 | S4; AM-P8 |
+
+Phat builds the screens (AM-P1 to P5) against the API contract (section 4 of the spec) in parallel with S2 to S6. The Late status (`late-status.md`, AM-P8) is **Phat's** (D-058), not part of these slices.
+
 
 Edward writes the API contract section first; Phat reviews it and builds screens in parallel. Scope:
 - Commitments with no payment hold (a lender may commit several times; no `hold_expires_at`).

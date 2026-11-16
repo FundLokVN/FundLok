@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT (Edward, 2026-11-15). Provisional until handbook v3.2 (D-052); Loc's open points are in section 9 |
+| **Status** | **ACCEPTED** by Edward, 2026-11-16 (merged as PR #108). Provisional until handbook v3.2 (D-052): Loc's open points in section 9 are built on the stated defaults and change only by amendment. Phat's review of sections 4 and 5 is still welcome; the API contract is what he builds screens against |
 | **Owner** | Edward |
 | **Implementer(s)** | Edward's modules: a Claude Sonnet implementer (HANDOFF-06 Phase 2). Phat: routers in `app/market`, all UI, notification wording (D-051) |
 | **Module** | `app/direct_transfer/` (backend), `app/market/funding_router.py` and `app/market/funding.py` (Phat's routers, calling the service functions here), `app/market/investor_agreement/` (shared, section 3) |
@@ -391,3 +391,4 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 1.0 | 2026-11-15 | Edward / Claude | First draft, from D-036 to D-057 and the code inventory of 2026-11-15 |
+| 1.0 | 2026-11-16 | Edward | Status DRAFT to ACCEPTED (provisional until handbook v3.2). Build slices are in HANDOFF-06 |
