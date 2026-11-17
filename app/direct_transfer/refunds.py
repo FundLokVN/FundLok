@@ -40,6 +40,9 @@ async def create_refund_transfer(
         confirmation_level="REPORTED",
         check_status="DUE",
         due_by=calendar_deadline(now, days=p.refund_days),
+        # Injected clock, not the server's now(): the refund receipt check treats this as the earliest
+        # valid transfer time (tranches._apply_refund_fields), so it must agree with every other timer here.
+        created_at=now,
     )
     db.add(refund)
     await db.flush()
