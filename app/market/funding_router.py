@@ -14,6 +14,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     File,
+    Form,
     Header,
     HTTPException,
     Query,
@@ -40,7 +41,9 @@ from app.direct_transfer.tranches import (
     list_window_tranches,
     mask_name,
     payment_instructions,
+    sme_dispute_after_confirmation,
     sme_dispute_tranche,
+    sme_receipt_check,
     submit_receipt,
 )
 from app.direct_transfer.windows import get_window_progress
@@ -657,6 +660,20 @@ async def read_my_tranches(
     return out
 
 
+async def _read_evidence(file: UploadFile) -> tuple[bytes, str]:
+    """A PDF, PNG, JPEG or WEBP of at most 10 MB, typed by its bytes."""
+    limit = DEFAULT_PARAMS.max_evidence_bytes
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
+    content_type = funding.sniff_receipt_type(content)
+    if content_type is None:
+        raise HTTPException(
+            status_code=415, detail="Upload a PDF, PNG, JPEG or WEBP", headers={"X-Error-Code": "UNSUPPORTED_TYPE"}
+        )
+    return content, content_type
+
+
 @router.post("/tranches/{tranche_id}/receipt", response_model=ReceiptResultOut, status_code=202)
 async def upload_receipt(
     tranche_id: UUID,
@@ -676,15 +693,7 @@ async def upload_receipt(
     taken, for staff to review (LATE_RECEIPT), since the money may already have moved. The business is emailed to
     look for the money under the memo (once, not on a replay, not for a rejected receipt); its bell rings when the
     transfer is approved."""
-    limit = DEFAULT_PARAMS.max_evidence_bytes
-    content = await file.read(limit + 1)
-    if len(content) > limit:
-        raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
-    content_type = funding.sniff_receipt_type(content)
-    if content_type is None:
-        raise HTTPException(
-            status_code=415, detail="Upload a PDF, PNG, JPEG or WEBP", headers={"X-Error-Code": "UNSUPPORTED_TYPE"}
-        )
+    content, content_type = await _read_evidence(file)
     replay = idempotency_key is not None and (
         await db.execute(select(Transfer.id).where(Transfer.idempotency_key == idempotency_key))
     ).first() is not None
@@ -797,6 +806,10 @@ async def report_missing_transfer(
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
+    return await _sme_ticket(db, tranche)
+
+
+async def _sme_ticket(db: AsyncSession, tranche: Tranche) -> SmeTicketOut:
     investor = await db.get(User, tranche.investor_id)
     return SmeTicketOut(
         id=tranche.id,
@@ -808,7 +821,93 @@ async def report_missing_transfer(
         attested_at=tranche.attested_at,
         confirm_deadline=tranche.confirm_deadline,
         review_cause=tranche.review_cause,
+        dispute_until=tranche.dispute_until,
     )
+
+
+@router.post("/tranches/{tranche_id}/sme-receipt", response_model=SmeTicketOut, status_code=202)
+async def upload_sme_receipt(
+    tranche_id: UUID,
+    request: Request,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+    ocr: ReceiptOcr | None = Depends(receipt_ocr),
+):
+    """The business confirms an investor's transfer with its own screenshot of the money arriving, within 24 hours
+    of the investor's receipt being checked (commit-then-accept-flow.md 4.6). Same amount, reference and bank
+    transaction id as the investor's: CONFIRMED. A difference: UNDER_REVIEW (RECEIPT_MISMATCH) for staff. With
+    RECEIPT_OCR_ENABLED off nothing is read, and the upload confirms on the business's word."""
+    content, content_type = await _read_evidence(file)
+    reading = await ocr.reader.read(content=content, content_type=content_type) if ocr else None
+    try:
+        tranche = await sme_receipt_check(
+            db,
+            tranche_id=tranche_id,
+            sme_user_id=current_user.id,
+            content=content,
+            content_type=content_type,
+            filename=(file.filename or "")[:255] or None,
+            fields=reading.fields if reading is not None and reading.confident else None,
+            storage=funding.evidence_storage(),
+            now=_now(),
+        )
+    except DirectTransferError as exc:
+        await _raise_mapped(db, exc)
+    append_audit(
+        db,
+        entity_type="TRANCHE",
+        entity_id=tranche.id,
+        action="INVESTMENT_RECEIPT_CHECKED_BY_SME",
+        actor_id=current_user.id,
+        after_state={"tranche_status": tranche.status, "review_cause": tranche.review_cause},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return await _sme_ticket(db, tranche)
+
+
+@router.post("/tranches/{tranche_id}/dispute", response_model=SmeTicketOut, status_code=202)
+async def dispute_confirmed_transfer(
+    tranche_id: UUID,
+    request: Request,
+    statement: str = Form(..., min_length=1, max_length=2000),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The business disputes a transfer that was confirmed by its silence, with its bank statement, until
+    `dispute_until` (30 days after the confirmation; commit-then-accept-flow.md 4.6). Opens a dispute for staff; the
+    ticket keeps its state. After the 30 days: 409 DISPUTE_WINDOW_CLOSED. Multipart (`statement`, `file`): the
+    statement is uploaded here, as there is no separate evidence upload for the business."""
+    content, content_type = await _read_evidence(file)
+    try:
+        dispute = await sme_dispute_after_confirmation(
+            db,
+            tranche_id=tranche_id,
+            sme_user_id=current_user.id,
+            statement=statement,
+            content=content,
+            content_type=content_type,
+            filename=(file.filename or "")[:255] or None,
+            storage=funding.evidence_storage(),
+            now=_now(),
+        )
+    except DirectTransferError as exc:
+        await _raise_mapped(db, exc)
+    append_audit(
+        db,
+        entity_type="TRANCHE",
+        entity_id=tranche_id,
+        action="INVESTMENT_DISPUTED_AFTER_CONFIRMATION",
+        actor_id=current_user.id,
+        after_state={"dispute_id": str(dispute.id), "reason": statement.strip()},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return await _sme_ticket(db, await db.get(Tranche, tranche_id))
+
+
 @router.get("/me/rounds", response_model=list[SmeRoundOut])
 async def read_my_rounds(
     db: AsyncSession = Depends(get_db),

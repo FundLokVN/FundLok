@@ -333,6 +333,7 @@ class Tranche(Base):
     attested_at = _ts(nullable=True)
     confirm_deadline = _ts(nullable=True)
     confirmed_at = _ts(nullable=True)
+    dispute_until = _ts(nullable=True)  # confirmed by silence: the SME may still dispute until then (A5)
     activated_at = _ts(nullable=True)
     expired_at = _ts(nullable=True)
     voided_at = _ts(nullable=True)

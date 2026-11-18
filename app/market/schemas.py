@@ -161,6 +161,8 @@ class InvestorTrancheOut(TrancheOut):
     # its fields are not read yet. Null: no receipt, or the ticket never had a QR code.
     payment_timing: Literal["ON_TIME", "LATE", "PENDING_CHECK"] | None = None
     late_reason: Literal["EXPIRED_CODE", "NO_QR_CODE", "AFTER_CUTOFF"] | None = None
+    # Confirmed automatically (the SME's 24 hours of silence): the SME may still dispute it until then (A5).
+    dispute_until: dt.datetime | None = None
 
 
 class TopUpPledgeOut(BaseModel):
@@ -204,6 +206,8 @@ class SmeTicketOut(BaseModel):
     attested_at: dt.datetime | None = None
     confirm_deadline: dt.datetime | None = None
     review_cause: str | None = None
+    # Confirmed automatically (silence for 24 hours): a dispute with a bank statement stays open until then (A5).
+    dispute_until: dt.datetime | None = None
 
 
 class SmeRoundOut(FundingWindowOut):

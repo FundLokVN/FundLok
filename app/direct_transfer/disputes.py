@@ -80,7 +80,7 @@ async def open_tranche_dispute(
     )
     if claim_statement or claim_file_id:
         await _add_evidence(
-            db, dispute, party="SME" if cause == "SME_DISPUTE" else "STAFF", kind="CLAIM", statement=claim_statement,
+            db, dispute, party="SME" if raised_by == window.sme_user_id else "STAFF", kind="CLAIM", statement=claim_statement,
             file_id=claim_file_id, submitted_by=raised_by or window.sme_user_id, now=now,
         )
     return dispute
@@ -293,6 +293,11 @@ async def _apply_tranche_outcome(
     transfer = (
         await db.execute(select(Transfer).where(Transfer.tranche_id == tranche.id, Transfer.kind == "DISBURSEMENT"))
     ).scalars().first()
+    if tranche.status == "ACTIVE" or (tranche.status == "CONFIRMED" and outcome == "RECEIVED"):
+        # A 30-day dispute after an automatic confirmation (A5): RECEIVED leaves the ticket as it is.
+        # shortcut: NOT_RECEIVED on a ticket already in a loan is only recorded (there is no ACTIVE -> VOID); Finance
+        # unwinds it under its interim policy until that unwind is specified.
+        return
     if outcome == "NOT_RECEIVED":
         await transition_tranche(
             db, tranche, "VOID", now=now, actor_id=staff_id, actor_role="ADMIN", reason=reason, void_reason="NOT_RECEIVED"
