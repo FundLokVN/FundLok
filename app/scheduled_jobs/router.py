@@ -57,6 +57,8 @@ class Day14CutoffResult(BaseModel):
     job: str
     locked: int  # lenders newly locked by this run
     pledges: int  # late-money top-up pledges recorded by this run
+    released: int = 0  # lenders unlocked: their receipt proved them in time
+    failed: int = 0  # rounds that failed this run (rolled back, retried by the next run)
 
 
 class Day14ReminderIn(BaseModel):

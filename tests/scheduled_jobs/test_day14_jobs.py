@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.timezone import ICT
 from app.direct_transfer import tranches
+from app.direct_transfer.config import DirectTransferParams
 from app.direct_transfer.day14_times import set_day14_cutoffs
 from app.direct_transfer.models import TransferReminder
 from app.notifications.models import Notification
@@ -40,7 +41,8 @@ def zalo_outbox(monkeypatch):
 
 async def _day14_round(db, *, day14=True):
     """A round paying out today with one lender who has not paid and one who has."""
-    world = await make_world(db)
+    # On a commit-then-accept round the hold runs to the pay deadline; a long hold stands in for that here.
+    world = await make_world(db, params=DirectTransferParams(repay_from_approval=False, hold_hours=8))
     await open_window(world, now=T0 - dt.timedelta(days=13))
     if day14:
         set_day14_cutoffs(world.window, DAY, world.params)
@@ -68,9 +70,9 @@ def test_the_zalo_template_gets_every_parameter_as_text():
         tranche_id=__import__("uuid").uuid4(), investor_id=__import__("uuid").uuid4(), listing_title="Cong Ty ABC",
         reference_code="FLAB12CD34", amount_vnd=20_000_000, pay_deadline_at=ict(14, 45), project_id=None,
     )
+    # No reference code: on Day 14 the investor must pay with a QR's own code, from FundLok.
     assert jobs.zalo_template_data(due) == {
-        "company_name": "Cong Ty ABC", "reference_code": "FLAB12CD34", "amount": "20000000",
-        "deadline": "14:45 02/11/2026",
+        "company_name": "Cong Ty ABC", "amount": "20000000", "deadline": "14:45 02/11/2026",
     }
     content = jobs.compose_email(due)
     assert "14:45" in content.subject and "20.000.000 ₫" in content.body
@@ -86,7 +88,8 @@ async def test_day14_reminder_targets_unpaid_lenders_on_disbursement_day(db_sess
     assert dt.datetime.fromisoformat(note.data["pay_deadline_at"]) == ict(14, 45)
     assert [m["to"] for m in outbox] == [unpaid.user.email]
     assert "14:45" in outbox[0]["subject"]
-    assert zalo_outbox[0]["template_id"] == TEMPLATE and zalo_outbox[0]["data"]["reference_code"] == ticket.reference_code
+    assert zalo_outbox[0]["template_id"] == TEMPLATE and "reference_code" not in zalo_outbox[0]["data"]
+    assert note.data["project_id"] == str(world.project.id)
     assert len(zalo_outbox[0]["tracking_id"]) == 32
     assert await _notifications(db_session, paid.user.id, "TRANSFER_DUE_TODAY") == []
 
@@ -154,14 +157,22 @@ async def test_the_cutoff_job_locks_no_shows_and_late_money_and_tells_them(db_se
     await db_session.commit()
 
     result = await jobs.run_day14_cutoff(db_session, now=ict(15, 0))
-    assert result == {"locked": 2, "pledges": 1}
+    assert result == {"locked": 2, "pledges": 0, "released": 0, "failed": 0}
     [locked] = await _notifications(db_session, no_show.user.id, "LENDER_LOCKED")
     assert locked.data["reason"] == "NO_SHOW" and locked.data["listing_title"] == world.project.legal_name
-    [pledged] = await _notifications(db_session, late.user.id, "TOP_UP_PLEDGE_RECORDED")
-    assert pledged.data["amount_vnd"] == 10_000_000
     assert [n.data["reason"] for n in await _notifications(db_session, late.user.id, "LENDER_LOCKED")] == ["LATE_MONEY"]
 
-    assert await jobs.run_day14_cutoff(db_session, now=ict(15, 35)) == {"locked": 0, "pledges": 0}
+    # After the 15:30 receipt cut-off: the late money becomes the lender's top-up; nobody is told twice.
+    assert await jobs.run_day14_cutoff(db_session, now=ict(15, 35)) == {
+        "locked": 0, "pledges": 1, "released": 0, "failed": 0,
+    }
+    [pledged] = await _notifications(db_session, late.user.id, "TOP_UP_PLEDGE_RECORDED")
+    assert pledged.data["amount_vnd"] == 10_000_000
+    assert len(await _notifications(db_session, no_show.user.id, "LENDER_LOCKED")) == 1
+
+    assert await jobs.run_day14_cutoff(db_session, now=ict(15, 40)) == {
+        "locked": 0, "pledges": 0, "released": 0, "failed": 0,
+    }
 
 
 async def test_the_day14_endpoints_answer_only_the_scheduler(client, scheduler, outbox):

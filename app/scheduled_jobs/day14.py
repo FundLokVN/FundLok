@@ -2,9 +2,10 @@
 
 Two Cloud Scheduler jobs on prod-api (app/scheduled_jobs/router.py):
 
-* `day14-cutoff`, 15:00 and 15:35 ICT: runs Edward's `direct_transfer.day14.process_day14_no_shows` (no-shows and
-  late money are locked; late money becomes a top-up pledge) and tells each lender in the app. The second run picks up
-  receipts uploaded between 15:00 and the 15:30 receipt cut-off. Idempotent per ticket.
+* `day14-cutoff`, 15:00 and 15:35 ICT: runs Edward's `direct_transfer.day14.process_day14_window` per round. At
+  15:00 unpaid and late lenders are locked; the 15:35 run, after the 15:30 receipt cut-off, decides: no-show, a top-up
+  pledge for clean late money, or unlocking a lender whose receipt proved them in time. Tells each lender in the app.
+  Idempotent per ticket.
 * `day14-transfer-reminders`, 08:00 (DAY14_MORNING) and 14:00 (DAY14_AFTERNOON) ICT: every lender whose ticket on a
   round paying out today is still unpaid gets "sign and pay by 14:45" in the app, by email and (once the ZBS template
   is approved and ZALO_ZBS_DAY14_TEMPLATE_ID is set) on Zalo.
@@ -65,11 +66,31 @@ async def _titles(db: AsyncSession, window_ids: set[UUID]) -> dict[UUID, str | N
 
 
 async def run_day14_cutoff(db: AsyncSession, *, now: dt.datetime | None = None) -> dict:
-    """Lock no-shows and late money, record late money as top-up pledges, and tell each lender. Returns
-    {"locked", "pledges"}: the lenders newly locked and the pledges recorded by this run."""
+    """Lock no-shows and late money at 15:00; after the 15:30 receipt cut-off, decide (no-show, top-up pledge, or
+    unlock). One window per transaction: a window that fails is rolled back, logged and left for the next run, and
+    does not stop the others. Tells each lender in the app. Returns {"locked", "pledges", "released", "failed"} for
+    this run (lenders newly locked, pledges recorded, lenders unlocked, windows that failed)."""
     now = now or dt.datetime.now(dt.timezone.utc)
-    outcome = await day14.process_day14_no_shows(db, now=now)
-    titles = await _titles(db, {lock.window_id for lock in outcome.locked} | {p.window_id for p in outcome.pledges})
+    totals = {"locked": 0, "pledges": 0, "released": 0, "failed": 0}
+    for window_id in await day14.day14_windows_due(db, now=now):
+        try:
+            outcome = await day14.process_day14_window(db, window_id=window_id, now=now)
+            titles = await _titles(db, {window_id})
+            told = _notify(db, outcome, titles)
+            await db.commit()
+        except Exception:  # noqa: BLE001 - one window must not stop the others; the next run retries it
+            await db.rollback()
+            logger.exception("Day-14 cut-off: window %s failed", window_id)
+            totals["failed"] += 1
+            continue
+        await realtime.publish(told)
+        totals["locked"] += sum(1 for lock in outcome.locked if lock.newly_locked)
+        totals["pledges"] += len(outcome.pledges)
+        totals["released"] += len(outcome.released)
+    return totals
+
+
+def _notify(db: AsyncSession, outcome: day14.Day14Outcome, titles: dict[UUID, str | None]) -> set[UUID]:
     told: set[UUID] = set()
     for lock in outcome.locked:
         if not lock.newly_locked:
@@ -89,9 +110,7 @@ async def run_day14_cutoff(db: AsyncSession, *, now: dt.datetime | None = None) 
             },
         )
         told.add(pledge.investor_id)
-    await db.commit()
-    await realtime.publish(told)
-    return {"locked": sum(1 for lock in outcome.locked if lock.newly_locked), "pledges": len(outcome.pledges)}
+    return told
 
 
 # --------------------------------------------------------------------------- #
@@ -121,6 +140,7 @@ async def due_today(db: AsyncSession, now: dt.datetime) -> list[DueTransfer]:
                 FundingWindow.pay_deadline_at > now,
                 Tranche.status.in_(("RESERVED", "SIGNED")),
                 Tranche.receipt_submitted_at.is_(None),
+                Tranche.hold_expires_at > now,  # a lapsed hold can no longer get a QR
             )
             .order_by(Tranche.reserved_at, Tranche.id)
         )
@@ -175,10 +195,11 @@ def compose_email(due: DueTransfer) -> EmailContent:
 
 
 def zalo_template_data(due: DueTransfer) -> dict[str, str]:
-    """Parameters of the investor Day-14 ZBS template (to register): every value a string, as Zalo takes them."""
+    """Parameters of the investor Day-14 ZBS template (to register): every value a string, as Zalo takes them. No
+    reference code on purpose: on Day 14 a transfer must carry a QR's own code (reference + 4 digits, valid 15
+    minutes), so the message sends the investor to FundLok for the QR rather than handing them a memo."""
     return {
         "company_name": due.listing_title[:_COMPANY_MAX],
-        "reference_code": due.reference_code,
         "amount": str(due.amount_vnd),
         "deadline": due.pay_deadline_at.astimezone(ICT).strftime("%H:%M %d/%m/%Y"),
     }
@@ -273,6 +294,7 @@ async def send_day14_reminders(db: AsyncSession, *, kind: str, now: dt.datetime 
                 data={
                     "tranche_id": str(due.tranche_id), "listing_title": due.listing_title,
                     "amount_vnd": due.amount_vnd, "pay_deadline_at": due.pay_deadline_at.isoformat(),
+                    "project_id": str(due.project_id) if due.project_id else None,
                 },
             )
             await _finish(db, due, kind, "IN_APP", status=STATUS_SENT, sent_at=now)

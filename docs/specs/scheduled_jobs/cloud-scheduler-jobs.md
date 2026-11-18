@@ -207,12 +207,14 @@ gcloud scheduler jobs create http fee-invoice-emails --location $REGION --projec
 
 ### Day-14 transfer rule jobs (docs/specs/direct_transfer/day14-transfer-rule.md rules 9-10)
 
-`POST /internal/jobs/day14-cutoff` (no body) locks no-shows and late money and records late money as top-up pledges
-on rounds paying out today; run at 15:00 and again at 15:35, after the 15:30 receipt cut-off. `POST
+`POST /internal/jobs/day14-cutoff` (no body) locks unpaid and late lenders at 15:00 on rounds paying out today; the
+15:35 run, after the 15:30 receipt cut-off, decides (no-show, a top-up pledge for clean late money, or unlocking a
+lender whose receipt proved them in time). `POST
 /internal/jobs/day14-transfer-reminders` with `{"kind": "DAY14_MORNING" | "DAY14_AFTERNOON"}` sends "sign and pay by
 14:45" in the app, by email and (with `ZALO_ZBS_DAY14_TEMPLATE_ID`) on Zalo. Both are idempotent and touch only rounds
 with Day-14 cut-offs. The Zalo template is registered in the ZBS console with the parameters `company_name`,
-`reference_code`, `amount`, `deadline` (app/scheduled_jobs/day14.py `zalo_template_data`).
+`amount`, `deadline` and a button to FundLok (app/scheduled_jobs/day14.py `zalo_template_data`). It deliberately
+carries no reference code: a Day-14 transfer must use a QR's own code.
 
 ```bash
 gcloud scheduler jobs create http day14-cutoff --location $REGION --project $PROJECT \
