@@ -31,6 +31,7 @@ from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.models import FundingWindow, RepaymentDay, Tranche, Transfer
 from app.direct_transfer import day14
+from app.direct_transfer.day14_times import window_cutoffs
 from app.direct_transfer import standing as lender_standing
 from app.direct_transfer.receipts import ManualEntryExtractor
 from app.direct_transfer.schemas import FundingWindowOut, PaymentOut, ReceiptResultOut
@@ -613,10 +614,10 @@ async def read_my_tranches(
     """The caller's tickets, newest first, each with the project it is in."""
     tranches = await list_investor_tranches(db, investor_id=current_user.id)
     windows = {
-        window_id: (project, term_months)
-        for window_id, project, term_months in (
+        window.id: (project, window.term_months, window_cutoffs(window) is not None)
+        for window, project in (
             await db.execute(
-                select(FundingWindow.id, Project, FundingWindow.term_months)
+                select(FundingWindow, Project)
                 .join(Project, Project.id == FundingWindow.project_id)
                 .where(FundingWindow.id.in_({t.window_id for t in tranches}))
             )
@@ -635,8 +636,10 @@ async def read_my_tranches(
     } if tranches else {}
     out = []
     for tranche in tranches:
-        project, term_months = windows.get(tranche.window_id, (None, None))
-        receipt = receipts.get(tranche.id)
+        project, term_months, day14 = windows.get(tranche.window_id, (None, None, False))
+        # The Day-14 timing only means something on a round with Day-14 cut-offs; on LEGACY rounds it is a staff
+        # note (a code past its 15 minutes inside the 2-hour hold is fine there).
+        receipt = receipts.get(tranche.id) if day14 else None
         timing = receipt.payment_timing if receipt else None
         if receipt is not None and timing is None and receipt.check_status == "AWAITING_FIELDS":
             timing = "PENDING_CHECK"

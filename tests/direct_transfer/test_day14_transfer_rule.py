@@ -56,6 +56,11 @@ def test_code_in_memo_reads_the_four_digits_after_the_reference():
     assert day14.code_in_memo("FLAB12CD34 cho vay", "FLAB12CD34") is None
     assert day14.code_in_memo("FLAB12CD3448", "FLAB12CD34") is None
     assert day14.code_in_memo(None, "FLAB12CD34") is None
+    # Every occurrence is read; an issued code wins over an unknown one.
+    assert day14.code_in_memo("FLAB12CD34 / FLAB12CD344821", "FLAB12CD34") == "FLAB12CD344821"
+    assert (
+        day14.code_in_memo("FLAB12CD341111 FLAB12CD344821", "FLAB12CD34", {"FLAB12CD344821"}) == "FLAB12CD344821"
+    )
 
 
 async def test_qr_code_is_reference_plus_4_digits_and_unique(world):
@@ -195,7 +200,11 @@ async def test_late_money_is_held_for_review_then_becomes_a_top_up_pledge_at_150
     before = await day14.process_day14_no_shows(world.db, now=ict(14, 59), params=world.params)
     assert before.locked == [] and before.pledges == []
 
-    outcome = await day14.process_day14_no_shows(world.db, now=ict(15, 0), params=world.params)
+    at_three = await day14.process_day14_no_shows(world.db, now=ict(15, 0), params=world.params)
+    assert at_three.pledges == [] and [lock.reason for lock in at_three.locked] == ["LATE_MONEY"]
+    assert tranche.status == "UNDER_REVIEW"  # receipts are still taken until 15:30
+
+    outcome = await day14.process_day14_no_shows(world.db, now=ict(15, 35), params=world.params)
     assert [p.tranche_id for p in outcome.pledges] == [tranche.id]
     pledge = (await world.db.execute(select(TopUpPledge).where(TopUpPledge.tranche_id == tranche.id))).scalar_one()
     assert (pledge.amount_vnd, pledge.reason, pledge.status) == (10_000_000, "EXPIRED_CODE", "PLEDGED")
@@ -203,7 +212,7 @@ async def test_late_money_is_held_for_review_then_becomes_a_top_up_pledge_at_150
     lender = await world.db.get(LenderStanding, investor.user.id)
     assert (lender.status, lender.no_show_count) == ("LOCKED", 0)
 
-    again = await day14.process_day14_no_shows(world.db, now=ict(15, 35), params=world.params)
+    again = await day14.process_day14_no_shows(world.db, now=ict(15, 40), params=world.params)
     assert again.pledges == [] and again.locked == []  # idempotent
 
 
@@ -215,12 +224,16 @@ async def test_a_lender_who_sent_nothing_is_locked_as_a_no_show_without_a_pledge
     assert [(lock.investor_id, lock.reason, lock.newly_locked) for lock in outcome.locked] == [
         (investor.user.id, "NO_SHOW", True)
     ]
-    assert tranche.status == "EXPIRED"
+    assert tranche.status == "SIGNED"  # a receipt may still come before 15:30
     lender = await world.db.get(LenderStanding, investor.user.id)
-    assert (lender.status, lender.no_show_count, lender.locked_at) == ("LOCKED", 1, ict(15, 0))
+    assert (lender.status, lender.no_show_count, lender.locked_at) == ("LOCKED", 0, ict(15, 0))
+
+    await day14.process_day14_no_shows(world.db, now=ict(15, 35), params=world.params)
+    assert tranche.status == "EXPIRED"
+    assert (await world.db.get(LenderStanding, investor.user.id)).no_show_count == 1
     assert (await world.db.execute(select(TopUpPledge))).first() is None
 
-    await day14.process_day14_no_shows(world.db, now=ict(15, 30), params=world.params)
+    await day14.process_day14_no_shows(world.db, now=ict(15, 40), params=world.params)
     assert (await world.db.get(LenderStanding, investor.user.id)).no_show_count == 1
 
 
@@ -256,6 +269,7 @@ async def _locked_with_pledge(world):
     fields = good_fields(world, tranche, investor, when=ict(10, 40), memo=pay.qr_code)
     await upload_receipt(world, investor, tranche, now=ict(10, 41), fields=fields)
     await day14.process_day14_no_shows(world.db, now=ict(15, 0), params=world.params)
+    await day14.process_day14_no_shows(world.db, now=ict(15, 35), params=world.params)
     return investor
 
 
@@ -292,3 +306,74 @@ async def test_unlocking_needs_a_new_ekyc_and_the_sentence(world):
     with pytest.raises(DirectTransferError) as not_locked:
         await standing.unlock(world.db, investor_id=investor.user.id, acknowledgement=typed, now=ict(16, 5))
     assert not_locked.value.code == "NOT_LOCKED"
+
+
+# --------------------------------------------------------------------------- #
+# review fixes
+# --------------------------------------------------------------------------- #
+async def test_a_receipt_time_with_seconds_gets_no_extra_minute(world):
+    await open_window(world)
+    investor, tranche = await _signed(world)
+    pay = await _pay(world, investor, tranche, now=at(minutes=1) + dt.timedelta(seconds=20))  # expires 10:16:20
+    fields = good_fields(world, tranche, investor, when=at(minutes=16) + dt.timedelta(seconds=50), memo=pay.qr_code)
+    await upload_receipt(world, investor, tranche, now=at(minutes=18), fields=fields)
+    receipt = await _receipt(world, tranche)
+    assert (receipt.payment_timing, receipt.late_reason) == ("LATE", "EXPIRED_CODE")
+
+
+async def test_on_disbursement_day_paying_without_a_qr_is_late_money(world):
+    await open_window(world)
+    _day14(world)
+    investor, tranche = await _signed(world, now=ict(10, 0))
+    # Never opened the payment page: paid with the bare reference.
+    await upload_receipt(world, investor, tranche, now=ict(10, 31))
+    receipt = await _receipt(world, tranche)
+    assert (receipt.payment_timing, receipt.late_reason) == ("LATE", "NO_QR_CODE")
+    assert tranche.status == "UNDER_REVIEW" and tranche.review_cause == "LATE_MONEY"
+
+
+async def test_a_receipt_uploaded_after_1500_for_money_sent_in_time_unlocks_at_1535(world):
+    await open_window(world)
+    _day14(world)
+    investor, tranche = await _signed(world, now=ict(14, 0))
+    pay = await _pay(world, investor, tranche, now=ict(14, 25))
+    await day14.process_day14_no_shows(world.db, now=ict(15, 0), params=world.params)
+    assert (await world.db.get(LenderStanding, investor.user.id)).status == "LOCKED"
+
+    fields = good_fields(world, tranche, investor, when=ict(14, 30), memo=pay.qr_code)
+    await upload_receipt(world, investor, tranche, now=ict(15, 10), fields=fields)
+    assert tranche.status == "ATTESTED"
+    outcome = await day14.process_day14_no_shows(world.db, now=ict(15, 35), params=world.params)
+    assert outcome.released == [investor.user.id]
+    lender = await world.db.get(LenderStanding, investor.user.id)
+    assert (lender.status, lender.no_show_count) == ("GOOD", 0)
+
+
+async def test_late_money_that_also_fails_a_check_is_left_to_staff(world):
+    await open_window(world)
+    _day14(world)
+    investor, tranche = await _signed(world, now=ict(10, 0))
+    pay = await _pay(world, investor, tranche, now=ict(10, 1))
+    fields = good_fields(world, tranche, investor, when=ict(10, 30), memo=pay.qr_code, payer_name="SOMEONE ELSE")
+    await upload_receipt(world, investor, tranche, now=ict(10, 31), fields=fields)
+    assert tranche.review_cause == "RECEIPT_MISMATCH"
+
+    outcome = await day14.process_day14_no_shows(world.db, now=ict(15, 35), params=world.params)
+    assert outcome.pledges == []
+    assert tranche.status == "UNDER_REVIEW"  # staff decide; the open dispute stays theirs
+    assert (await world.db.get(LenderStanding, investor.user.id)).status == "LOCKED"
+
+
+async def test_a_locked_lender_needs_a_fresh_ekyc_until_they_redo_it(world):
+    investor = await _locked_with_pledge(world)
+    assert await standing.needs_fresh_ekyc(world.db, investor.user.id)
+    world.db.add(GVerifyVerification(user_id=investor.user.id, verification_type="KYC", status=STATUS_APPROVED))
+    await world.db.flush()
+    assert not await standing.needs_fresh_ekyc(world.db, investor.user.id)
+
+
+async def test_payment_instructions_carry_the_server_clock(world):
+    await open_window(world)
+    investor, tranche = await _signed(world)
+    pay = await _pay(world, investor, tranche, now=at(minutes=3))
+    assert pay.server_time == at(minutes=3)

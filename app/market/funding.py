@@ -333,8 +333,10 @@ async def reserve_and_accept(
     """
     if terms_version != INVESTOR_TERMS_VERSION:
         raise conflict("TERMS_OUTDATED", "The investing terms have changed; read them again before investing")
-    # Day-14 no-show or late money (Contract 4 Art. 5.4): no new commitment until the lender unlocks.
-    if await standing.is_locked(db, investor_id):
+    # Day-14 no-show or late money (Contract 4 Art. 5.4): no new commitment until the lender unlocks. A replay of a
+    # reservation made before the lock still returns that ticket.
+    replay = (await db.execute(select(Tranche.id).where(Tranche.idempotency_key == idempotency_key))).first()
+    if replay is None and await standing.is_locked(db, investor_id):
         raise conflict("LENDER_LOCKED", "Your account is locked. Unlock it before investing again")
     agreement = await investor_agreement.current_signature(db, investor_id)
     account_id = payment_account_id or await _investor_payout_account(db, investor_id)

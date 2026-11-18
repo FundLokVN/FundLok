@@ -7,6 +7,8 @@ import uuid
 
 from sqlalchemy import update
 
+from app.core.timezone import ICT
+from app.direct_transfer.day14_times import set_day14_cutoffs
 from app.direct_transfer.models import LenderStanding, PaymentQr
 from tests.market.test_funding_flow import _open_project, _reserve
 
@@ -96,18 +98,56 @@ async def test_a_locked_lender_cannot_reserve_and_sees_how_to_unlock(
     assert unlock.status_code == 409 and unlock.headers["X-Error-Code"] == "EKYC_REQUIRED"
 
 
-async def test_my_tickets_show_a_receipt_waiting_to_be_read_as_pending_check(
-    client, db_session, make_admin, make_user, make_eligible_investor
-):
-    _, investor, tranche = await _signed_ticket(client, db_session, make_admin, make_user, make_eligible_investor)
-    mine = (await client.get("/funding/me/tranches", headers=investor["headers"])).json()
-    assert mine[0]["payment_timing"] is None and mine[0]["late_reason"] is None
-
-    upload = await client.post(
-        f"/funding/tranches/{tranche['id']}/receipt",
+async def _upload(client, investor, tranche_id):
+    return await client.post(
+        f"/funding/tranches/{tranche_id}/receipt",
         files={"file": ("r.pdf", b"%PDF-1.4 " + uuid.uuid4().bytes, "application/pdf")},
         headers=investor["headers"],
     )
-    assert upload.status_code == 202, upload.text
+
+
+async def test_my_tickets_show_no_day14_timing_on_a_legacy_round(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    _, investor, tranche = await _signed_ticket(client, db_session, make_admin, make_user, make_eligible_investor)
+    assert (await _upload(client, investor, tranche["id"])).status_code == 202
+    mine = (await client.get("/funding/me/tranches", headers=investor["headers"])).json()
+    assert mine[0]["payment_timing"] is None and mine[0]["late_reason"] is None
+
+
+async def test_my_tickets_show_a_receipt_waiting_to_be_read_as_pending_check(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    tomorrow = (dt.datetime.now(ICT) + dt.timedelta(days=1)).date()
+    set_day14_cutoffs(setup["window"], tomorrow)
+    await db_session.commit()
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    resp = await _reserve(client, investor, setup["window"].id, 10_000_000)
+    assert resp.status_code == 201, resp.text
+    tranche = resp.json()
+    mine = (await client.get("/funding/me/tranches", headers=investor["headers"])).json()
+    assert mine[0]["payment_timing"] is None
+
+    assert (await _upload(client, investor, tranche["id"])).status_code == 202
     mine = (await client.get("/funding/me/tranches", headers=investor["headers"])).json()
     assert mine[0]["payment_timing"] == "PENDING_CHECK"
+
+
+async def test_a_locked_investor_with_an_approved_ekyc_is_asked_to_verify_again(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    before = (await client.get("/gverify/kyc/status", headers=investor["headers"])).json()
+    assert before["is_approved"] is True and before["reverify_required"] is False
+
+    db_session.add(
+        LenderStanding(
+            investor_id=uuid.UUID(investor["id"]), status="LOCKED", no_show_count=1,
+            locked_at=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=1), locked_window_id=setup["window"].id,
+        )
+    )
+    await db_session.commit()
+    after = (await client.get("/gverify/kyc/status", headers=investor["headers"])).json()
+    assert after["is_approved"] is True and after["reverify_required"] is True

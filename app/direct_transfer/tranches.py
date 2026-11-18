@@ -150,6 +150,8 @@ class PaymentInstructions:
     qr_expires_at: dt.datetime | None = None
     pay_deadline_at: dt.datetime | None = None
     receipt_deadline_at: dt.datetime | None = None
+    # The server's clock: the app counts the QR down on it, not on the device's.
+    server_time: dt.datetime | None = None
 
 
 async def payment_instructions(
@@ -185,6 +187,7 @@ async def payment_instructions(
         qr_expires_at=qr.expires_at if qr else None,
         pay_deadline_at=cutoffs.pay_deadline_at if cutoffs else None,
         receipt_deadline_at=cutoffs.receipt_deadline_at if cutoffs else None,
+        server_time=now,
     )
 
 
@@ -248,7 +251,7 @@ async def submit_receipt(
     if tranche.status in ("RESERVED", "SIGNED") and tranche.receipt_submitted_at is None and now > tranche.hold_expires_at:
         await _expire_now(db, tranche, now)
     late = tranche.status == "EXPIRED"
-    if late and window.status not in ("OPEN", "FULL", "CLOSING"):
+    if late and window.status not in ("OPEN", "FULL", "CLOSING", "AWAITING_PAYMENT"):
         raise conflict("TRANCHE_NOT_SIGNED", "The window has closed for this ticket")
     if not late and tranche.status != "SIGNED":
         raise conflict("TRANCHE_NOT_SIGNED", "The ticket is not awaiting a receipt")

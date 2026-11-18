@@ -47,6 +47,15 @@ class StandingView:
     top_up_pledges: list[PledgeView]
 
 
+async def needs_fresh_ekyc(db: AsyncSession, investor_id: UUID) -> bool:
+    """Locked, with no approved eKYC since the lock: the investor must verify again to unlock (Art. 5.4). The KYC
+    endpoints let an already-approved investor submit again exactly while this holds."""
+    standing = await db.get(LenderStanding, investor_id)
+    if standing is None or standing.status != "LOCKED":
+        return False
+    return await _fresh_ekyc(db, investor_id, standing.locked_at) is None
+
+
 async def is_locked(db: AsyncSession, investor_id: UUID) -> bool:
     standing = await db.get(LenderStanding, investor_id)
     return standing is not None and standing.status in ("LOCKED", "CLOSED")

@@ -108,6 +108,7 @@ class PaymentOut(_Out):
     qr_expires_at: dt.datetime | None = None
     pay_deadline_at: dt.datetime | None = None
     receipt_deadline_at: dt.datetime | None = None
+    server_time: dt.datetime | None = None  # the server's clock, for the app's countdown
 
 
 class ReceiptResultOut(_Out):
