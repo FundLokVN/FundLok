@@ -51,6 +51,7 @@ from app.gverify.tokens import (
 from app.users.models import USER_STATUS_SUSPENDED, Role, User
 from app.utils.audit import append_audit
 from app.utils.rbac import require_roles
+from app.direct_transfer import standing as lender_standing
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,8 @@ async def _run_verification(
     # cannot both find it unspent.
     if handoff is not None and handoff.previous_attempt_id != (str(latest.id) if latest else ""):
         raise HTTPException(status_code=401, detail=INVALID_HANDOFF_DETAIL)
-    if latest is not None and latest.is_approved:
+    # An approved investor verifies again only to unlock after a Day-14 lock (Contract 4 Art. 5.4).
+    if latest is not None and latest.is_approved and not await lender_standing.needs_fresh_ekyc(db, user.id):
         raise HTTPException(status_code=409, detail="KYC is already approved")
     # A parked attempt waits for a person. Resubmitting would only park again,
     # and every attempt is two billable provider calls.
@@ -280,6 +282,7 @@ async def get_status(
         person_number=attempt.person_number,
         full_name=attempt.full_name,
         updated_at=attempt.updated_at,
+        reverify_required=attempt.is_approved and await lender_standing.needs_fresh_ekyc(db, current_user.id),
     )
 
 

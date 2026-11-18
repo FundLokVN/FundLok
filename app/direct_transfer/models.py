@@ -168,6 +168,9 @@ class FundingWindow(Base):
     commit_closes_at = _ts(nullable=True)
     sme_deadline_at = _ts(nullable=True)
     pay_deadline_at = _ts(nullable=True)
+    # Day-14 transfer rule: 15:00 lock and 15:30 last receipt. Null means "derive from pay_deadline_at" (day14.py).
+    no_show_at = _ts(nullable=True)
+    receipt_deadline_at = _ts(nullable=True)
     sme_decision = Column(Text, nullable=True)
     sme_decided_at = _ts(nullable=True)
     sme_decided_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True)
@@ -391,11 +394,20 @@ class Transfer(Base):
     reported_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     idempotency_key = Column(Text, nullable=True, unique=True)
     due_by = _ts(nullable=True)  # REFUND: contract refund deadline
+    # Day-14 transfer rule: which QR code the receipt carried and whether it was paid inside that QR's 15 minutes.
+    # Null until the receipt's fields are read, and for tickets that never had a QR code issued.
+    qr_code = Column(Text, nullable=True)
+    payment_timing = Column(Text, nullable=True)
+    late_reason = Column(Text, nullable=True)
     created_at = _ts(server_default=func.now())
     updated_at = _ts(server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
         CheckConstraint("amount_vnd > 0", name="ck_transfers_amount"),
+        CheckConstraint("payment_timing IN ('ON_TIME','LATE')", name="ck_transfers_payment_timing"),
+        CheckConstraint(
+            "late_reason IN ('EXPIRED_CODE','NO_QR_CODE','AFTER_CUTOFF')", name="ck_transfers_late_reason"
+        ),
         CheckConstraint("kind IN ('DISBURSEMENT','REFUND','REPAYMENT','FEE_PAYMENT')", name="ck_transfers_kind"),
         CheckConstraint("rail IN ('VIETQR','STANDING_ORDER','BATCH_UPLOAD','MANUAL')", name="ck_transfers_rail"),
         CheckConstraint(
@@ -411,6 +423,77 @@ class Transfer(Base):
             unique=True,
             postgresql_where=text("bank_txn_id IS NOT NULL AND kind IN ('DISBURSEMENT','REFUND')"),
         ),
+    )
+
+
+class PaymentQr(Base):
+    """One QR shown to a lender (Day-14 transfer rule). Append-only by convention: a new QR supersedes the last."""
+
+    __tablename__ = "payment_qrs"
+
+    id = _uuid_pk()
+    tranche_id = Column(UUID(as_uuid=True), ForeignKey("tranches.id", ondelete="RESTRICT"), nullable=False)
+    code = Column(Text, nullable=False, unique=True)  # tranche.reference_code + 4 digits; the transfer memo
+    issued_at = _ts(nullable=False)
+    expires_at = _ts(nullable=False)
+    superseded_at = _ts(nullable=True)
+    created_at = _ts(server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("expires_at > issued_at", name="ck_payment_qrs_window"),
+        Index("ix_payment_qrs_tranche_issued", "tranche_id", "issued_at"),
+    )
+
+
+class TopUpPledge(Base):
+    """Late money on Day 14 (an expired code, no code, or after 14:45) becomes the lender's top-up: the SME keeps
+    it, and the lender signs the top-up after unlocking (Day-14 transfer rule). One per late ticket."""
+
+    __tablename__ = "top_up_pledges"
+
+    id = _uuid_pk()
+    window_id = Column(UUID(as_uuid=True), ForeignKey("funding_windows.id", ondelete="RESTRICT"), nullable=False)
+    investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    tranche_id = Column(UUID(as_uuid=True), ForeignKey("tranches.id", ondelete="RESTRICT"), nullable=False, unique=True)
+    transfer_id = Column(UUID(as_uuid=True), ForeignKey("transfers.id", ondelete="RESTRICT"), nullable=True)
+    amount_vnd = Column(BigInteger, nullable=False)
+    reason = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, server_default="PLEDGED")
+    recorded_at = _ts(nullable=False)
+    signed_at = _ts(nullable=True)
+    confirmed_at = _ts(nullable=True)
+    void_reason = Column(Text, nullable=True)
+    created_at = _ts(server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("amount_vnd > 0", name="ck_top_up_pledges_amount"),
+        CheckConstraint("reason IN ('EXPIRED_CODE','NO_QR_CODE','AFTER_CUTOFF')", name="ck_top_up_pledges_reason"),
+        CheckConstraint("status IN ('PLEDGED','SIGNED','CONFIRMED','VOID')", name="ck_top_up_pledges_status"),
+        Index("ix_top_up_pledges_investor", "investor_id"),
+    )
+
+
+class TransferReminder(Base):
+    """One Day-14 "sign and pay by 14:45" reminder per ticket, kind and channel (so a retry never double-sends)."""
+
+    __tablename__ = "transfer_reminders"
+
+    tranche_id = Column(UUID(as_uuid=True), ForeignKey("tranches.id", ondelete="RESTRICT"), primary_key=True)
+    kind = Column(Text, primary_key=True)
+    channel = Column(Text, primary_key=True)
+    # SENDING is claimed and committed before the send (a doubled scheduler call never sends twice); a FAILED row
+    # is retried by a later run until `attempts` reaches the job's limit (the repayment reminders' pattern).
+    status = Column(Text, nullable=False)
+    attempts = Column(Integer, nullable=False, server_default="1")
+    sent_to = Column(Text, nullable=True)
+    last_error = Column(Text, nullable=True)
+    claimed_at = _ts(nullable=False)
+    sent_at = _ts(nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('DAY14_MORNING','DAY14_AFTERNOON')", name="ck_transfer_reminders_kind"),
+        CheckConstraint("channel IN ('IN_APP','EMAIL','ZALO')", name="ck_transfer_reminders_channel"),
+        CheckConstraint("status IN ('SENDING','SENT','FAILED','SKIPPED')", name="ck_transfer_reminders_status"),
     )
 
 

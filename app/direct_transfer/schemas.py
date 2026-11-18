@@ -41,6 +41,11 @@ class FundingWindowOut(_Out):
     closing_started_at: dt.datetime | None = None
     close_wait_until: dt.datetime | None = None
     repayment_start_date: dt.date | None = None
+    # Day-14 transfer rule (day14-transfer-rule.md 4.3): null on LEGACY windows.
+    disbursement_date: dt.date | None = None
+    pay_deadline_at: dt.datetime | None = None
+    no_show_at: dt.datetime | None = None
+    receipt_deadline_at: dt.datetime | None = None
 
 
 class TrancheOut(_Out):
@@ -97,6 +102,13 @@ class PaymentOut(_Out):
     vietqr_payload: str
     hold_expires_at: dt.datetime
     warning: str
+    # Day-14 transfer rule (day14-transfer-rule.md 4.1). qr_code is the memo the VietQR carries.
+    qr_code: str | None = None
+    qr_issued_at: dt.datetime | None = None
+    qr_expires_at: dt.datetime | None = None
+    pay_deadline_at: dt.datetime | None = None
+    receipt_deadline_at: dt.datetime | None = None
+    server_time: dt.datetime | None = None  # the server's clock, for the app's countdown
 
 
 class ReceiptResultOut(_Out):

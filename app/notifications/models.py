@@ -68,6 +68,13 @@ EVENT_LENDER_LOCKED = "LENDER_LOCKED"
 EVENT_TRANCHE_CONFIRMED = "TRANCHE_CONFIRMED"
 EVENT_LOAN_FORMED = "LOAN_FORMED"
 
+# Day-14 transfer rule (docs/specs/direct_transfer/day14-transfer-rule.md 4.7). To the investor.
+# TRANSFER_DUE_TODAY: "sign and pay by 14:45"; `data`: tranche_id, listing_title, amount_vnd, pay_deadline_at.
+# TOP_UP_PLEDGE_RECORDED: late money became their top-up; `data`: pledge_id, window_id, listing_title, amount_vnd.
+# LENDER_LOCKED (above) carries `data`: window_id, listing_title, reason (NO_SHOW or LATE_MONEY).
+EVENT_TRANSFER_DUE_TODAY = "TRANSFER_DUE_TODAY"
+EVENT_TOP_UP_PLEDGE_RECORDED = "TOP_UP_PLEDGE_RECORDED"
+
 NOTIFICATION_EVENTS = frozenset(
     {
         EVENT_APPLICATION_APPROVED,
@@ -87,6 +94,8 @@ NOTIFICATION_EVENTS = frozenset(
         EVENT_LENDER_LOCKED,
         EVENT_TRANCHE_CONFIRMED,
         EVENT_LOAN_FORMED,
+        EVENT_TRANSFER_DUE_TODAY,
+        EVENT_TOP_UP_PLEDGE_RECORDED,
     }
 )
 

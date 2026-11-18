@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.direct_transfer import fees
 from app.direct_transfer.accounts import get_usable_account
 from app.direct_transfer.config import DirectTransferParams, resolve
+from app.direct_transfer.day14_times import window_cutoffs
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event, store_evidence_file
 from app.direct_transfer.models import WINDOW_LIVE_STATES, FundingWindow, StandingOffer, Tranche
@@ -296,6 +297,11 @@ class WindowProgress:
     closing_started_at: dt.datetime | None
     close_wait_until: dt.datetime | None
     repayment_start_date: dt.date | None
+    # Day-14 transfer rule (day14_times): None on LEGACY windows.
+    disbursement_date: dt.date | None = None
+    pay_deadline_at: dt.datetime | None = None
+    no_show_at: dt.datetime | None = None
+    receipt_deadline_at: dt.datetime | None = None
 
 
 async def get_window_progress(db: AsyncSession, *, listing_id: UUID, now: dt.datetime) -> WindowProgress:
@@ -311,7 +317,12 @@ async def get_window_progress(db: AsyncSession, *, listing_id: UUID, now: dt.dat
     ).scalar_one()
     remaining = window.window_end - now
     days_left = max(0, -(-int(remaining.total_seconds()) // 86400)) if window.status in ("OPEN", "FULL") else 0
+    cutoffs = window_cutoffs(window)
     return WindowProgress(
+        disbursement_date=cutoffs.disbursement_date if cutoffs else None,
+        pay_deadline_at=cutoffs.pay_deadline_at if cutoffs else None,
+        no_show_at=cutoffs.no_show_at if cutoffs else None,
+        receipt_deadline_at=cutoffs.receipt_deadline_at if cutoffs else None,
         id=window.id,
         listing_id=window.listing_id,
         status=window.status,

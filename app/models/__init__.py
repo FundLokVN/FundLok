@@ -57,10 +57,13 @@ from app.direct_transfer.models import (  # noqa: F401
     LenderStanding,
     LenderUnlockAcknowledgement,
     PaymentAccount,
+    PaymentQr,
     RepaymentDay,
     StandingOffer,
+    TopUpPledge,
     Tranche,
     Transfer,
+    TransferReminder,
 )
 # FKs to users and tranches.
 from app.market.investor_agreement.models import (  # noqa: F401

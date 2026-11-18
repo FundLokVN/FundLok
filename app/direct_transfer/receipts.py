@@ -103,6 +103,9 @@ def _normalize_memo(memo: str) -> str:
     return re.sub(r"[^0-9A-Z]", "", unicodedata.normalize("NFKD", memo).upper())
 
 
+normalize_memo = _normalize_memo  # public: the Day-14 QR-code match (day14.code_in_memo) reads memos the same way
+
+
 def _normalize_account(account: str) -> str:
     return re.sub(r"[\s\-.]", "", account).upper()
 
