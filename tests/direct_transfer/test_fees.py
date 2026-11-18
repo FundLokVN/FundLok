@@ -70,6 +70,18 @@ def test_investor_fee_for_whole_loan_golden_833_333():
     assert fees.investor_fee_total(100 * M, 4) == 833_333
 
 
+def test_investor_fee_worked_example_rounds_to_nearest_dong():
+    # A 100M, 2-month loan at 15%: 41,000,000 owed, 976,190 a day for 21 days in month 1. F = P x 2.5% x M / 12,
+    # to the nearest dong (it was floored: 166,666 for 40M).
+    totals = [fees.investor_fee_total(p * M, 2) for p in (40, 30, 20, 10)]  # investors A, B, C, D
+    assert totals == [166_667, 125_000, 83_333, 41_667] and sum(totals) == 416_667
+    # Month 1 for A: (F - charged) x received / balance owed at the start = 166,667 x 20,499,990 / 41,000,000.
+    month1 = fees.investor_fee_for_month(166_667, 0, 20_499_990, 41_000_000)
+    assert month1 == 83_333
+    # Month 2 collects the remaining balance, so it charges exactly what is left of F.
+    assert fees.investor_fee_for_month(166_667, month1, 20_500_010, 41_000_000 - 20_499_990) == 83_334
+
+
 async def settle_through(world, now):
     await repayment.presume_paid_days(world.db, now=now)
     await repayment.settle_days(world.db, now=now)
@@ -85,7 +97,8 @@ async def test_monthly_accrual_pro_rata_to_received_and_sums_to_total(loan):
     rows = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.tranche_id == tr[0].id))).scalars().all()
     scheduled = sum(r.gross_vnd for r in rows)
     received = sum(r.gross_vnd for r in rows if r.due_date.month == 11)
-    assert nov.received_gross_vnd == received and nov.fee_vnd == 83_333 * received // scheduled
+    # month 1: nothing charged yet and the whole schedule owed; nearest dong
+    assert nov.received_gross_vnd == received and nov.fee_vnd == (2 * 83_333 * received + scheduled) // (2 * scheduled)
     assert 0 < nov.fee_vnd < 83_333
     assert await fees.accrue_investor_fees(world.db, now=now) == 0  # idempotent
     # collect everything: the accruals then sum exactly to the fixed fee (remainder lands on the last month)
