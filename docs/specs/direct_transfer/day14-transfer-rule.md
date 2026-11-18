@@ -6,7 +6,7 @@
 | **Owner** | Phat (this spec, the UI, the reminder job) |
 | **Implementer(s)** | Edward: SCRUM-612 (`app/direct_transfer/`, migrations). Phat: SCRUM-630 (all UI, `app/market` routers, `app/scheduled_jobs` reminder) |
 | **Module** | `app/direct_transfer/` (QR codes, cut-offs, lock, top-up pledge), `app/market/funding_router.py` (routes), `app/scheduled_jobs/` (reminder) |
-| **Version** | 0.1 |
+| **Version** | 0.2 (review fixes: decision after 15:30, no-QR is late, server clock, re-verify) |
 | **Date** | 2026-11-18 |
 | **Related ADR** | ADR-009, ADR-011 |
 | **Depends on** | `commit-then-accept-flow.md` (Day-14 contract, `pay_deadline_at`, lender lock 4.7), `receipt-ocr.md`, `transfer-and-evidence.md` |
@@ -102,6 +102,7 @@ Returns the **current** QR. The first GET after signing issues the first QR. Lat
   "pay_deadline_at": "2026-12-02T14:45:00+07:00",
   "receipt_deadline_at": "2026-12-02T15:30:00+07:00",
   "hold_expires_at": "2026-12-02T14:45:00+07:00",
+  "server_time": "2026-12-02T13:12:05+07:00",
   "warning": "…"
 }
 ```
@@ -135,7 +136,7 @@ All are null for `LEGACY` windows (see question 2).
   "top_up_pledges": [
     { "id": "uuid", "window_id": "uuid", "listing_title": "…", "amount_vnd": 20000000,
       "recorded_at": "…15:00…", "reopening_ends_at": "…",
-      "status": "AWAITING_UNLOCK | SIGNABLE | SIGNED | SME_CONFIRMED | VOID" } ] }
+      "status": "AWAITING_UNLOCK | AWAITING_SIGNING | SIGNED | SME_CONFIRMED | VOID" } ] }
 ```
 
 ### 4.6 Top-up signing (new; mirrors `commit-then-accept-flow.md` 4.4)
@@ -165,7 +166,8 @@ Cloud Scheduler, Google OIDC, the same pattern as `/internal/jobs/repayment-remi
 |---|---|---|---|---|
 | before 14:45 | yes | yes, each valid 15 min | yes | QR, code, countdown, "Get a new QR" |
 | 14:45 – 15:00 | no | no | yes | "Disbursement closed. Unlock your account to join the top-up" (once locked); receipt upload until 15:30 |
-| 15:00 | — | — | yes | no-show and late money: lock + top-up pledge |
+| 15:00 | — | — | yes | unpaid and late lenders are locked (nothing else yet) |
+| after 15:30 (15:35 run) | — | — | no | decision: no receipt → no-show (counted); clean late money → top-up pledge; receipt proved in time → unlocked |
 | after 15:30 | — | — | no | closed; pledge and unlock steps in the investments area |
 
 ## 6. Business Rules
@@ -174,14 +176,17 @@ Cloud Scheduler, Google OIDC, the same pattern as `/internal/jobs/repayment-remi
 2. A new QR supersedes the previous one. Whether a superseded code still counts is open question 1.
 3. **On time** = the receipt's memo, normalised (uppercase, spaces and punctuation removed), **equals** a valid QR code for that tranche, **and** the transaction time falls inside that QR's `[issued_at, expires_at]`. Today's check is a substring match (`receipts.py:134`), so `FLAB12CD34` + any 4 digits would pass; it must become an exact match.
 4. OCR reads a time shown without seconds as the end of that minute (`bank_receipt.py:191-202`, `:59`). For rule 3, treat such a time as the whole minute `[hh:mm:00, hh:mm:59]` and count it on time if that minute overlaps the QR window.
-5. Late money = a receipt that fails rule 3 (an expired or superseded code, no code, or paid after 14:45). It is never refunded by the SME. At 15:00 (`no_show_at`) the lender is locked and a top-up pledge is recorded for the amount received.
-6. A lender with no transfer at all by 15:00 is locked as a no-show (`commit-then-accept-flow.md` rule 7). There is no pledge, because there is no money.
+5. Late money = a receipt that fails rule 3 (an expired or superseded code, no code, a ticket that never showed a QR, or paid after 14:45). It is never refunded by the SME. At 15:00 (`no_show_at`) the lender is locked. After the 15:30 receipt cut-off, a late receipt that matched in every other way (under review as `LATE_MONEY`, no open dispute) becomes a top-up pledge for the amount received; anything messier stays with staff (D-16).
+6. A lender with no receipt at 15:00 is locked; if there is still none after 15:30 the ticket expires as a no-show (`commit-then-accept-flow.md` rule 7), counted once, with no pledge. A lender whose receipt, uploaded between 15:00 and 15:30, proves they paid in time is unlocked again.
 7. A top-up pledge can be signed only after unlocking, on any day of the 7-day reopening, before 15:00 ICT. The SME then confirms the money already arrived, through the existing SME receipt/confirm path.
 8. Receipts upload until 15:30 (`receipt_deadline_at`). After that the upload is refused, and the lender contacts support.
 9. The ARQ worker isn't deployed, so the 15:00 lock and pledge need a trigger: a Cloud Scheduler endpoint in `app/scheduled_jobs` (Phat) calling Edward's service function, or a lazy check on each request. Pick one (question 6).
 10. Reminders: on Day 14, at 08:00 (`DAY14_MORNING`) and 14:00 ICT (`DAY14_AFTERNOON`), to lenders whose tranche is `RESERVED`/`SIGNED` with no receipt, on windows whose `disbursement_date` is today.
-    - **Channels:** in-app (`create_notification` + realtime), email, and Zalo. Zalo needs a new ZBS template: the SME template 666161's button points to `/dashboard/repayments`. Sending is off until `ZALO_ZBS_DAY14_TEMPLATE_ID` is set.
+    - **Channels:** in-app (`create_notification` + realtime), email, and Zalo. Zalo needs a new ZBS template (`company_name`, `amount`, `deadline` and a button to FundLok; deliberately no reference code, since a Day-14 transfer must use a QR's own code). Sending is off until `ZALO_ZBS_DAY14_TEMPLATE_ID` is set.
     - **Copy:** vi "Hôm nay là ngày giải ngân. Hãy ký và chuyển khoản trước 14:45." / en "Today is disbursement day: sign and pay by 14:45."
+
+11. The app counts QR time on the server's clock (`server_time` in 4.1), not the device's.
+12. Unlocking needs an eKYC approved after the lock. `GET /gverify/kyc/status` returns `reverify_required: true` while that is missing, and `POST /gverify/kyc/verify` accepts a new attempt from an approved investor exactly then.
 
 ## 7. Error Cases
 
