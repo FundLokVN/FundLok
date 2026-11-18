@@ -1,8 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin import fees as admin_fees
@@ -425,6 +426,41 @@ async def list_funding_rounds(
     """The Transactions tab's rounds: by default the ones taking or settling investment (OPEN, FULL, CLOSING),
     closing soonest first, with their totals and how many tickets wait on staff."""
     return await admin_funding.list_rounds(db, open_only=status == "OPEN")
+
+
+class WaiveLockRequest(BaseModel):
+    window_id: UUID
+    reason: Literal["FORCE_MAJEURE", "BANK_OUTAGE"]
+    note: str
+
+
+class LenderStandingAdminOut(BaseModel):
+    investor_id: UUID
+    status: str
+    no_show_count: int
+
+
+@router.post("/funding/lenders/{investor_id}/waive-lock", response_model=LenderStandingAdminOut)
+async def waive_lender_lock(
+    investor_id: UUID,
+    body: WaiveLockRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Lift a Day-14 lock on the investor's proof of force majeure or a bank outage (loan contract Art. 5.3, Money
+    flow FINAL v1.0): the lender is GOOD again and the miss is not counted. Audited with the staff member."""
+    from app.direct_transfer import standing as lender_standing
+    from app.direct_transfer.errors import DirectTransferError
+
+    try:
+        view = await lender_standing.waive_lock(
+            db, investor_id=investor_id, window_id=body.window_id, reason=body.reason, note=body.note,
+            staff_id=current_user.id, now=datetime.now(timezone.utc),
+        )
+    except DirectTransferError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail, headers={"X-Error-Code": exc.code}) from exc
+    await db.commit()
+    return LenderStandingAdminOut(investor_id=investor_id, status=view.status, no_show_count=view.no_show_count)
 
 
 @router.post("/funding/rounds/{window_id}/advance", response_model=AdminFundingRoundOut)

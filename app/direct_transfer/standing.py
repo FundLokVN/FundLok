@@ -147,3 +147,58 @@ async def unlock(
     standing.unlocked_at = now
     await db.flush()
     return await get_standing(db, investor_id)
+
+
+
+WAIVER_REASONS = ("FORCE_MAJEURE", "BANK_OUTAGE")
+
+
+async def waive_lock(
+    db: AsyncSession,
+    *,
+    investor_id: UUID,
+    window_id: UUID,
+    reason: str,
+    note: str,
+    staff_id: UUID,
+    now: dt.datetime,
+) -> StandingView:
+    """Staff lift a Day-14 lock on the investor's proof of force majeure or a bank outage (loan contract Art. 5.3,
+    Money flow FINAL v1.0 ops rule): the lender is GOOD again and the miss on `window_id` is not counted, so a
+    closure it caused is undone too. 400 WAIVER_REASON / NOTE_REQUIRED; 409 NOT_LOCKED when the lender is not held
+    by that round."""
+    from app.direct_transfer.evidence import log_event
+    from app.direct_transfer.models import Tranche
+    from app.utils.audit import append_audit
+
+    if reason not in WAIVER_REASONS:
+        raise DirectTransferError(400, "Reason must be FORCE_MAJEURE or BANK_OUTAGE", "WAIVER_REASON")
+    if not (note or "").strip():
+        raise DirectTransferError(400, "Write what the investor's proof shows", "NOTE_REQUIRED")
+    standing = await db.get(LenderStanding, investor_id, with_for_update=True)
+    if standing is None or standing.status == "GOOD" or standing.locked_window_id != window_id:
+        raise conflict("NOT_LOCKED", "This investor is not locked by that round")
+    counted = (
+        await db.execute(
+            select(Tranche.id).where(
+                Tranche.window_id == window_id, Tranche.investor_id == investor_id, Tranche.status == "EXPIRED"
+            )
+        )
+    ).first() is not None
+    before = {"status": standing.status, "no_show_count": standing.no_show_count}
+    if counted and standing.no_show_count:
+        standing.no_show_count -= 1
+    standing.status = "GOOD"
+    standing.unlocked_at = now
+    standing.closed_at = None
+    await db.flush()
+    after = {"status": "GOOD", "no_show_count": standing.no_show_count, "reason": reason, "note": note.strip()}
+    await log_event(
+        db, entity_type="LENDER", entity_id=investor_id, event_type="LOCK_WAIVED", now=now, actor_id=staff_id,
+        actor_role="ADMIN", reason=reason, payload={"window_id": str(window_id), **after},
+    )
+    append_audit(
+        db, entity_type="LENDER_STANDING", entity_id=investor_id, action="LOCK_WAIVED", actor_id=staff_id,
+        before_state=before, after_state={**after, "window_id": str(window_id)},
+    )
+    return await get_standing(db, investor_id)

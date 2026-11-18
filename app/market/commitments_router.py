@@ -22,8 +22,9 @@ from app.direct_transfer.schemas import CommitmentOut, FundingWindowOut
 from app.direct_transfer.models import FundingWindow, WindowLoanContract
 from app.direct_transfer.windows import get_window_progress
 from app.loans import guarantor_otp
-from app.market import day13_contracts, funding
-from app.market.funding_router import _raise_mapped
+from app.market import day13_contracts, day14_signing, funding
+from app.market.schemas import InvestorTrancheOut
+from app.market.funding_router import _own_tranche, _raise_mapped
 from app.market.service import _require_eligible_investor
 from app.users.models import Role, User
 from app.utils.rbac import require_roles
@@ -321,3 +322,94 @@ async def sme_guarantor_sign(
         raise
     await db.commit()
     return await _contracts_out(db, window, current_user)
+
+
+
+# --------------------------------------------------------------------------- #
+# Day 14: the Investor signs their loan contract with a Zalo code, then pays
+# --------------------------------------------------------------------------- #
+class ContractCodeOut(BaseModel):
+    sent_to_masked: str
+    channel: str
+    expires_in_seconds: int
+    resend_after_seconds: int
+
+
+class ContractSignIn(BaseModel):
+    code: str
+    click_to_sign: bool
+
+
+@router.get(
+    "/tranches/{tranche_id}/contract",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def investor_loan_contract(
+    tranche_id: UUID,
+    download: bool = Query(False, description="true: as an attachment, to save"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """The Investor's own loan contract for their total (made on Day 13; the SME's signed copy once on file)."""
+    tranche = await _own_tranche(db, tranche_id, current_user.id)
+    try:
+        content, filename = await day14_signing.contract_document(db, tranche, funding.evidence_storage())
+    except DirectTransferError as exc:
+        await _raise_mapped(db, exc)
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=content, media_type="application/pdf",
+        headers={"Content-Disposition": f'{disposition}; filename="{filename}"', "Cache-Control": "no-store"},
+    )
+
+
+@router.post("/tranches/{tranche_id}/contract/code", response_model=ContractCodeOut)
+async def investor_loan_contract_code(
+    tranche_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """Send the Zalo one-time code that signs this ticket's loan contract (and, on the first Day 14, the Investor
+    Service Agreement). Until 14:45 on Day 14. One a minute, five a day, good for five minutes."""
+    await _require_eligible_investor(db, current_user.id)
+    tranche = await _own_tranche(db, tranche_id, current_user.id)
+    try:
+        row = await day14_signing.send_code(db, investor_id=current_user.id, tranche=tranche, now=_now())
+    except DirectTransferError as exc:
+        await _raise_mapped(db, exc)
+    from app.market.investor_agreement import service as agreement
+
+    out = ContractCodeOut(
+        sent_to_masked=agreement.masked_phone(row.phone), channel=row.channel,
+        expires_in_seconds=int(agreement.CODE_TTL.total_seconds()),
+        resend_after_seconds=int(agreement.RESEND_COOLDOWN.total_seconds()),
+    )
+    await db.commit()
+    return out
+
+
+@router.post("/tranches/{tranche_id}/contract", response_model=InvestorTrancheOut, status_code=201)
+async def investor_sign_loan_contract(
+    tranche_id: UUID,
+    body: ContractSignIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """Sign the loan contract with the code and the logged click. The ticket goes SIGNED and its VietQR opens
+    (GET /funding/tranches/{id}/payment)."""
+    await _require_eligible_investor(db, current_user.id)
+    tranche = await _own_tranche(db, tranche_id, current_user.id)
+    try:
+        tranche = await day14_signing.sign_contract(
+            db, investor_id=current_user.id, tranche=tranche, code=body.code, click_to_sign=body.click_to_sign,
+            storage=funding.evidence_storage(), now=_now(),
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    except DirectTransferError as exc:
+        await _raise_mapped(db, exc)
+    await db.commit()
+    await db.refresh(tranche)
+    return InvestorTrancheOut.model_validate(tranche)

@@ -279,3 +279,27 @@ async def test_day13_loan_contract_routes_are_the_owning_smes(
     assert early.status_code == 409 and early.headers["X-Error-Code"] == "CONTRACT_SIGNING_NOT_OPEN"
     missing = await client.get(f"{path}/{uuid.uuid4()}/document", headers=setup["sme"]["headers"])
     assert missing.status_code == 404
+
+
+async def test_day14_contract_routes_and_the_staff_waiver_check_roles(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    ticket = uuid.uuid4()
+    for path, method in (
+        (f"/funding/tranches/{ticket}/contract", "get"),
+        (f"/funding/tranches/{ticket}/contract/code", "post"),
+    ):
+        assert (await getattr(client, method)(path, headers=setup["sme"]["headers"])).status_code == 403
+        assert (await getattr(client, method)(path, headers=investor["headers"])).status_code == 404
+    signed = await client.post(
+        f"/funding/tranches/{ticket}/contract", json={"code": "123456", "click_to_sign": True}, headers=investor["headers"]
+    )
+    assert signed.status_code == 404
+
+    waive = f"/admin/funding/lenders/{investor['id']}/waive-lock"
+    body = {"window_id": str(setup["window"].id), "reason": "FORCE_MAJEURE", "note": "flood"}
+    assert (await client.post(waive, json=body, headers=investor["headers"])).status_code == 403
+    not_locked = await client.post(waive, json=body, headers=setup["admin"]["headers"])
+    assert not_locked.status_code == 409 and not_locked.headers["X-Error-Code"] == "NOT_LOCKED"
