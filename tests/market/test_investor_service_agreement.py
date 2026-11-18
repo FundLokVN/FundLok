@@ -238,7 +238,7 @@ async def test_the_agreement_pdf_is_filled_in_with_the_investor_and_the_commitme
         sme_name,
         "20.000.000 VND",
         "16%/năm, 4 tháng",
-        "P × 2,5% × M / 12 = 166.666 VND + VAT",
+        "P × 2,5% × M / 12 = 166.667 VND + VAT",  # 166,666.67 to the nearest dong
         ict_date(dt.datetime.fromisoformat(tranche["hold_expires_at"])).strftime("%d/%m/%Y"),
     ):
         assert expected in body, expected
@@ -734,7 +734,7 @@ async def test_the_investment_confirmation_preview_is_filled_in_from_the_window(
     assert body["sme_name"] == project.legal_name
     assert body["amount_vnd"] == 10_000_000
     assert body["annual_rate_pct"] == "16.000" and body["term_months"] == 4
-    assert body["service_fee_vnd"] == 83_333  # 10,000,000 × 2.5% × 4 / 12, floored (fees.md golden)
+    assert body["service_fee_vnd"] == 83_333  # 10,000,000 × 2.5% × 4 / 12, nearest dong (fees.md golden)
     assert body["service_fee_bps_per_year"] == 250
     # Investors pay as soon as they commit, within the 2-hour hold.
     today = ict_date(dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=2))
