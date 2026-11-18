@@ -1,8 +1,10 @@
 """Commit-then-accept funding flow over HTTP (HANDOFF-06 Phase 2, slice S2).
 
 Thin handlers over Edward's service functions in app/direct_transfer/commit_flow.py: auth, the investor eligibility
-gate, the market-side checks (investing-terms version, Lender Service Agreement) and the HTTP error mapping, in the
-style of funding_router. Spec: docs/specs/direct_transfer/commit-then-accept-flow.md sections 4.1 to 4.3.
+gate, the market-side check of the investing-terms version and the HTTP error mapping, in the style of
+funding_router. Spec: docs/specs/direct_transfer/commit-then-accept-flow.md sections 4.1 to 4.3, as amended by
+Money flow FINAL v1.0: a pledge signs nothing (the Lender Service Agreement is signed with the Day-14 loan
+contract) and can be withdrawn until the end of Day 12.
 Phat may move or merge this file into funding_router.py.
 """
 import datetime as dt
@@ -20,7 +22,6 @@ from app.direct_transfer.schemas import CommitmentOut, FundingWindowOut
 from app.direct_transfer.windows import get_window_progress
 from app.market import funding
 from app.market.funding_router import _raise_mapped
-from app.market.investor_agreement import service as investor_agreement
 from app.market.service import _require_eligible_investor
 from app.users.models import Role, User
 from app.utils.rbac import require_roles
@@ -54,10 +55,10 @@ async def commit(
     current_user: User = Depends(require_investor),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    """Pledge an amount to the window. No money moves; the pledge is signed and kept as evidence."""
+    """Pledge an amount to the window by pressing Confirm. No money moves and nothing is signed; the pledge is kept
+    as a record. 409 WINDOW_FULL while the round is fully pledged."""
     await _require_eligible_investor(db, current_user.id)
     try:
-        agreement_signed = await investor_agreement.current_signature(db, current_user.id) is not None
         commitment = await commit_flow.commit_to_window(
             db,
             window_id=window_id,
@@ -66,12 +67,30 @@ async def commit(
             ack_risk_disclosure=body.ack_risk_disclosure,
             terms_version=body.terms_version,
             current_terms_version=funding.INVESTOR_TERMS_VERSION,
-            agreement_signed=agreement_signed,
             payment_account_id=body.payment_account_id,
             idempotency_key=idempotency_key or "",
             now=_now(),
             signer=funding._signer(),
             storage=funding.evidence_storage(),
+        )
+        view = await commit_flow.commitment_view(db, commitment)
+    except DirectTransferError as exc:
+        await _raise_mapped(db, exc)
+    await db.commit()
+    return CommitmentOut.model_validate(view)
+
+
+@router.post("/commitments/{commitment_id}/withdraw", response_model=CommitmentOut)
+async def withdraw(
+    commitment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """Withdraw one of the caller's pledges, until the end of Day 12. The amount is free again for other lenders.
+    409 WITHDRAW_CLOSED once the pledge list is final."""
+    try:
+        commitment = await commit_flow.withdraw_commitment(
+            db, commitment_id=commitment_id, investor_id=current_user.id, now=_now()
         )
         view = await commit_flow.commitment_view(db, commitment)
     except DirectTransferError as exc:

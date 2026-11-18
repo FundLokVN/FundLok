@@ -1,10 +1,14 @@
-"""Commit-then-accept funding flow, slice S2: commit, SME decision, time-driven advance (ADR-011).
+"""Commit-then-accept funding flow, slice S2: commit, withdraw, SME decision, time-driven advance (ADR-011).
 
-Spec: docs/specs/direct_transfer/commit-then-accept-flow.md sections 4.1, 4.3, 5 and 6 (rules 1 to 5, 12, 15, 16).
-
-A lender's commitment is a signed pledge: it moves no money and creates no tranche. At acceptance one tranche per
-lender is created from the lender's pledges (state RESERVED, hold until `pay_deadline_at`). Everything after
-AWAITING_PAYMENT (Day-14 signing, no-show, formation, receipts) belongs to later slices.
+Spec: docs/specs/direct_transfer/commit-then-accept-flow.md sections 4.1, 4.3, 5 and 6 (rules 1 to 5, 12, 15, 16),
+as amended by Money flow FINAL v1.0 (Loc, locked 17 Nov 2026), which prevails:
+  - Days 0 to 12: a lender pledges by pressing Confirm; nothing is signed and no money moves, so the Lender Service
+    Agreement is not a gate here (it is signed with the loan contract on the lender's first Day 14).
+  - A lender may withdraw a pledge until the end of Day 12. Pledges close early when the target is reached and a
+    withdrawal reopens them ("Pledge window after a withdrawal"). Day 13 and Day 14 never move.
+A pledge is still kept as a signed record through the platform signer (evidence of the Confirm, not a contract).
+At acceptance one tranche per lender is created from the lender's pledges (state RESERVED, hold until the Day-14
+`pay_deadline_at`, 14:45).
 
 Every function takes `now`; none reads the wall clock. `advance_window` is idempotent and time-driven: running it
 twice, or from the scheduler and the staff button at once, changes nothing the second time.
@@ -19,7 +23,6 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.timezone import ICT
 from app.direct_transfer import fees
 from app.direct_transfer.accounts import get_usable_account
 from app.direct_transfer.config import DirectTransferParams, resolve
@@ -143,7 +146,6 @@ async def commit_to_window(
     ack_risk_disclosure: bool,
     terms_version: str,
     current_terms_version: str,
-    agreement_signed: bool,
     payment_account_id: UUID,
     idempotency_key: str,
     now: dt.datetime,
@@ -151,11 +153,12 @@ async def commit_to_window(
     storage: EvidenceStorage,
     params: DirectTransferParams | None = None,
 ) -> Commitment:
-    """Pledge `amount_vnd` to a COMMIT_THEN_ACCEPT window. No money moves and no tranche is created.
+    """Pledge `amount_vnd` to a COMMIT_THEN_ACCEPT window. No money moves, nothing is signed by the lender and no
+    tranche is created.
 
-    `current_terms_version` and `agreement_signed` are decided by the caller (the investing terms and the Lender
-    Service Agreement live in app/market, which this module does not import). When the pledges reach the target the
-    window moves OPEN -> AWAITING_SME in the same transaction."""
+    `current_terms_version` is decided by the caller (the investing terms live in app/market, which this module does
+    not import). When the pledges reach the target the window stays OPEN but takes no more pledges (409
+    WINDOW_FULL) until a withdrawal frees capacity; the commitment phase still ends at `commit_closes_at`."""
     p = resolve(params)
     if not idempotency_key:
         raise bad_request("Idempotency-Key is required", "IDEMPOTENCY_KEY_REQUIRED")
@@ -192,12 +195,14 @@ async def commit_to_window(
         raise conflict("LENDER_CLOSED", "Your account was closed after repeated missed payments")
     if await fees.investor_has_unpaid_invoice(db, investor_id, p, now=now):
         raise conflict("INVESTOR_FEE_UNPAID", "A FundLok invoice is unpaid")
-    if not agreement_signed:
-        raise conflict("INVESTOR_AGREEMENT_REQUIRED", "Sign the Lender Service Agreement before committing")
     account = await get_usable_account(db, account_id=payment_account_id, user_id=investor_id, holder_role="INVESTOR")
 
     capacity = window.target_vnd - await pledged_total(db, window.id)
-    if capacity <= 0 or amount_vnd > capacity:
+    if capacity <= 0:
+        raise conflict(
+            "WINDOW_FULL", "The round is fully pledged; it reopens if a lender withdraws before the end of Day 12"
+        )
+    if amount_vnd > capacity:
         raise conflict("CAPACITY_EXCEEDED", "The amount exceeds the remaining capacity")
     if amount_vnd < window.min_ticket_vnd and amount_vnd != capacity:
         raise conflict("BELOW_MIN_TICKET", "The amount is below the minimum ticket")
@@ -262,26 +267,60 @@ async def commit_to_window(
     )
     await db.flush()
     if capacity - amount_vnd == 0:
-        await _end_commit_phase(db, window, now=now, early=True, reason="TARGET_REACHED")
+        await log_event(
+            db, entity_type="WINDOW", entity_id=window.id, event_type="TARGET_REACHED", now=now,
+            payload={"pledged_vnd": window.target_vnd},
+        )
+    return commitment
+
+
+# --------------------------------------------------------------------------- #
+# withdraw (Money flow FINAL v1.0 section 1, Days 0 to 12; ops rule "Pledge window after a withdrawal")
+# --------------------------------------------------------------------------- #
+async def withdraw_commitment(
+    db: AsyncSession, *, commitment_id: UUID, investor_id: UUID, now: dt.datetime
+) -> Commitment:
+    """The lender withdraws one of its pledges, until the end of Day 12 (`commit_closes_at`). The pledge becomes
+    VOID (WITHDRAWN) and its amount is free again, which reopens a round that had reached its target. A replay on
+    an already-withdrawn pledge returns it unchanged. 404 for someone else's pledge; 409 WITHDRAW_CLOSED once the
+    commitment phase has ended (the pledge list is final from then); 409 COMMITMENT_NOT_PLEDGED for a pledge that
+    is no longer live for another reason."""
+    commitment = await db.get(Commitment, commitment_id)
+    if commitment is None or commitment.investor_id != investor_id:
+        raise not_found("Commitment not found")
+    window = await lock_window(db, commitment.window_id)
+    commitment = (
+        await db.execute(select(Commitment).where(Commitment.id == commitment_id).with_for_update())
+    ).scalar_one()
+    if commitment.status == "VOID" and commitment.void_reason == "WITHDRAWN":
+        return commitment
+    if window.status != "OPEN" or now >= window.commit_closes_at:
+        raise conflict("WITHDRAW_CLOSED", "Pledges are final from the end of Day 12")
+    if commitment.status != "PLEDGED":
+        raise conflict("COMMITMENT_NOT_PLEDGED", "This pledge is no longer live")
+    commitment.status = "VOID"
+    commitment.void_reason = "WITHDRAWN"
+    await db.flush()
+    await log_event(
+        db, entity_type="COMMITMENT", entity_id=commitment.id, event_type="COMMITMENT_WITHDRAWN", now=now,
+        actor_id=investor_id, actor_role="INVESTOR",
+        payload={"window_id": str(window.id), "amount_vnd": commitment.amount_vnd},
+    )
+    append_audit(
+        db, entity_type="COMMITMENT", entity_id=commitment.id, action="COMMITMENT_WITHDRAWN", actor_id=investor_id,
+        before_state={"status": "PLEDGED"}, after_state={"status": "VOID", "void_reason": "WITHDRAWN"},
+    )
+    await db.flush()
     return commitment
 
 
 # --------------------------------------------------------------------------- #
 # end of the commit phase
 # --------------------------------------------------------------------------- #
-async def _end_commit_phase(db: AsyncSession, window: FundingWindow, *, now: dt.datetime, early: bool, reason: str) -> None:
-    """OPEN -> AWAITING_SME. When it ends early (target reached before `commit_closes_at`) the deadlines move to
-    15:00 the next calendar day (SME) and the day after (lenders); open question 1's default."""
+async def _end_commit_phase(db: AsyncSession, window: FundingWindow, *, now: dt.datetime, reason: str) -> None:
+    """OPEN -> AWAITING_SME at `commit_closes_at` (00:00 on Day 13). The pledge list is final from here. The
+    deadlines never move (Money flow FINAL v1.0: "Day 13 and Day 14 do not move")."""
     window.status = "AWAITING_SME"
-    if early and now < window.commit_closes_at:
-        day = now.astimezone(ICT).date()
-        window.commit_closes_at = now
-        window.window_end = now
-        window.sme_deadline_at = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(15), tzinfo=ICT)
-        window.pay_deadline_at = dt.datetime.combine(day + dt.timedelta(days=2), dt.time(15), tzinfo=ICT)
-        listing = await db.get(Listing, window.listing_id)
-        if listing is not None:
-            listing.close_at = now
     await db.flush()
     await log_event(
         db, entity_type="WINDOW", entity_id=window.id, event_type="COMMIT_PHASE_ENDED", now=now,
@@ -464,11 +503,8 @@ async def advance_window(
     if window.flow != COMMIT_THEN_ACCEPT:
         return window
 
-    if window.status == "OPEN":
-        if await pledged_total(db, window.id) >= window.target_vnd:
-            await _end_commit_phase(db, window, now=now, early=True, reason="TARGET_REACHED")
-        elif now >= window.commit_closes_at:
-            await _end_commit_phase(db, window, now=now, early=False, reason="COMMIT_CLOSES_AT")
+    if window.status == "OPEN" and now >= window.commit_closes_at:
+        await _end_commit_phase(db, window, now=now, reason="COMMIT_CLOSES_AT")
 
     if window.status == "AWAITING_SME" and window.sme_decision is None and now >= window.sme_deadline_at:
         pledged = await pledged_total(db, window.id)

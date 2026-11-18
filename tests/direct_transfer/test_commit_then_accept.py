@@ -1,6 +1,7 @@
 """Phase 2 slice S2: commit and decide (commit-then-accept flow).
 
-Spec: docs/specs/direct_transfer/commit-then-accept-flow.md sections 3 to 8 and ADR-011.
+Spec: docs/specs/direct_transfer/commit-then-accept-flow.md sections 3 to 8 and ADR-011, as amended by Money flow
+FINAL v1.0 (pledges sign nothing and can be withdrawn until the end of Day 12; Day 13 and Day 14 never move).
 Day 0 below is Mon 2 Nov 2026 (T0). Day 13 is Sun 15 Nov, Day 14 is Mon 16 Nov; weekends do not move them.
 """
 import datetime as dt
@@ -26,7 +27,9 @@ COMMIT = "COMMIT_THEN_ACCEPT"
 
 COMMIT_CLOSES = dt.datetime(2026, 11, 15, 0, 0, tzinfo=ICT)  # 00:00 of Day 13
 SME_DEADLINE = dt.datetime(2026, 11, 15, 15, 0, tzinfo=ICT)  # 15:00 of Day 13
-PAY_DEADLINE = dt.datetime(2026, 11, 16, 15, 0, tzinfo=ICT)  # 15:00 of Day 14
+PAY_DEADLINE = dt.datetime(2026, 11, 16, 14, 45, tzinfo=ICT)  # 14:45 of Day 14: signing and new QRs close
+NO_SHOW_AT = dt.datetime(2026, 11, 16, 15, 0, tzinfo=ICT)  # 15:00 of Day 14
+RECEIPT_DEADLINE = dt.datetime(2026, 11, 16, 15, 30, tzinfo=ICT)  # 15:30 of Day 14
 
 
 @pytest.fixture
@@ -44,10 +47,10 @@ async def _open(world, *, now=T0, flow=COMMIT):
     return window
 
 
-async def _commit(world, inv, amount, *, now=T0 + dt.timedelta(hours=1), key=None, agreement=True, window_id=None):
+async def _commit(world, inv, amount, *, now=T0 + dt.timedelta(hours=1), key=None, window_id=None):
     return await commit_flow.commit_to_window(
         world.db, window_id=window_id or world.window.id, investor_id=inv.user.id, amount_vnd=amount,
-        ack_risk_disclosure=True, terms_version=TERMS, current_terms_version=TERMS, agreement_signed=agreement,
+        ack_risk_disclosure=True, terms_version=TERMS, current_terms_version=TERMS,
         payment_account_id=inv.account_id, idempotency_key=key or f"c-{uuid.uuid4().hex}", now=now,
         signer=world.signer, storage=world.storage, params=world.params,
     )
@@ -91,26 +94,31 @@ async def _awaiting_sme(world, amounts):
 # --------------------------------------------------------------------------- #
 # deadlines
 # --------------------------------------------------------------------------- #
-async def test_new_windows_get_the_three_deadlines(world):
+async def test_new_windows_get_fixed_deadlines_that_an_early_fill_does_not_move(world):
     window = await _open(world)
     assert window.flow == COMMIT and window.status == "OPEN"
     assert window.commit_closes_at == COMMIT_CLOSES
     assert window.sme_deadline_at == SME_DEADLINE
     assert window.pay_deadline_at == PAY_DEADLINE
+    assert window.no_show_at == NO_SHOW_AT and window.receipt_deadline_at == RECEIPT_DEADLINE
     assert window.window_end == window.commit_closes_at
 
-    # Early fill (open question 1 default): the phase ends at once, the deadlines move to the next two days at 15:00.
+    # Early fill (Money flow FINAL v1.0: "Day 13 and Day 14 do not move"): pledges close, nothing else changes.
     filled_at = dt.datetime(2026, 11, 3, 20, 30, tzinfo=ICT)
     await _fill(world, [40 * M, 30 * M, 20 * M, 10 * M], now=filled_at)
     await _reload(world)
-    assert world.window.status == "AWAITING_SME"
-    assert world.window.sme_deadline_at == dt.datetime(2026, 11, 4, 15, 0, tzinfo=ICT)
-    assert world.window.pay_deadline_at == dt.datetime(2026, 11, 5, 15, 0, tzinfo=ICT)
-    assert world.window.commit_closes_at == filled_at and world.window.window_end == filled_at
+    assert world.window.status == "OPEN"
+    assert world.window.commit_closes_at == COMMIT_CLOSES and world.window.window_end == COMMIT_CLOSES
+    assert world.window.sme_deadline_at == SME_DEADLINE and world.window.pay_deadline_at == PAY_DEADLINE
+    await _refused(_commit(world, await make_investor(world), 10 * M, now=filled_at), "WINDOW_FULL")
 
 
-async def test_default_window_flow_param_picks_the_flow(db_session):
+async def test_default_window_flow_param_picks_the_flow(db_session, monkeypatch):
+    monkeypatch.delenv("FUNDING_WINDOW_FLOW", raising=False)
     assert DirectTransferParams().default_window_flow == "LEGACY"
+    monkeypatch.setenv("FUNDING_WINDOW_FLOW", "commit_then_accept")
+    assert DirectTransferParams().default_window_flow == COMMIT  # the deployment switches it on
+    monkeypatch.delenv("FUNDING_WINDOW_FLOW")
     w = await make_world(db_session, params=DirectTransferParams(repay_from_approval=False, default_window_flow=COMMIT))
     window = await open_window(w)
     assert window.flow == COMMIT and window.sme_deadline_at == SME_DEADLINE
@@ -164,14 +172,60 @@ async def test_commitments_above_capacity_refused(world):
     await _commit(world, inv, 10 * M)  # exactly what is left still fits
 
 
-async def test_window_moves_to_awaiting_sme_when_commitments_reach_target(world):
+async def test_a_full_round_takes_no_more_pledges_until_a_withdrawal_reopens_it(world):
     await _open(world)
     await _fill(world, [50 * M, 40 * M])
-    assert (await _reload(world)).status == "OPEN"
     inv = await make_investor(world)
-    await _commit(world, inv, 10 * M)
-    assert (await _reload(world)).status == "AWAITING_SME"
-    await _refused(_commit(world, await make_investor(world), 10 * M), "WINDOW_NOT_OPEN")
+    last = await _commit(world, inv, 10 * M)
+    assert (await _reload(world)).status == "OPEN"  # full, but the phase runs to the end of Day 12
+    late = await make_investor(world)
+    await _refused(_commit(world, late, 10 * M), "WINDOW_FULL")
+    await commit_flow.withdraw_commitment(world.db, commitment_id=last.id, investor_id=inv.user.id, now=T0 + dt.timedelta(days=3))
+    reopened = await _commit(world, late, 10 * M, now=T0 + dt.timedelta(days=3, hours=1))
+    assert reopened.status == "PLEDGED"
+    assert await commit_flow.pledged_total(world.db, world.window.id) == 100 * M
+
+
+async def test_lender_can_withdraw_a_pledge_until_the_end_of_day_12(world):
+    await _open(world)
+    inv = await make_investor(world)
+    keep = await _commit(world, inv, 20 * M)
+    drop = await _commit(world, inv, 10 * M)
+    out = await commit_flow.withdraw_commitment(
+        world.db, commitment_id=drop.id, investor_id=inv.user.id, now=COMMIT_CLOSES - dt.timedelta(seconds=1)
+    )
+    assert out.status == "VOID" and out.void_reason == "WITHDRAWN"
+    again = await commit_flow.withdraw_commitment(world.db, commitment_id=drop.id, investor_id=inv.user.id, now=COMMIT_CLOSES)
+    assert again.status == "VOID"  # a replay returns it unchanged
+    view = await commit_flow.commitment_view(world.db, keep)
+    assert view.my_committed_total_vnd == 20 * M and view.window_committed_total_vnd == 20 * M
+    events = (
+        await world.db.execute(
+            select(EvidenceLog.event_type).where(EvidenceLog.entity_id == drop.id, EvidenceLog.event_type == "COMMITMENT_WITHDRAWN")
+        )
+    ).scalars().all()
+    assert events == ["COMMITMENT_WITHDRAWN"]
+
+
+async def test_withdraw_is_refused_after_the_pledge_list_is_final_and_for_someone_elses_pledge(world):
+    await _open(world)
+    inv, other = await make_investor(world), await make_investor(world)
+    pledge = await _commit(world, inv, 30 * M)
+    err = await _refused(
+        commit_flow.withdraw_commitment(world.db, commitment_id=pledge.id, investor_id=other.user.id, now=T0 + dt.timedelta(days=1)),
+        "NOT_FOUND",
+    )
+    assert err.status_code == 404
+    await _refused(
+        commit_flow.withdraw_commitment(world.db, commitment_id=pledge.id, investor_id=inv.user.id, now=COMMIT_CLOSES),
+        "WITHDRAW_CLOSED",
+    )
+    await commit_flow.advance_window(world.db, window_id=world.window.id, now=COMMIT_CLOSES, params=world.params)
+    await _refused(
+        commit_flow.withdraw_commitment(world.db, commitment_id=pledge.id, investor_id=inv.user.id, now=COMMIT_CLOSES),
+        "WITHDRAW_CLOSED",
+    )
+    assert (await world.db.get(Commitment, pledge.id)).status == "PLEDGED"
 
 
 async def test_window_moves_to_awaiting_sme_at_commit_closes_at(world):
@@ -215,14 +269,15 @@ async def test_lender_with_fee_invoice_unpaid_after_seven_days_cannot_commit(wor
     await _refused(_commit(world, inv, 10 * M, now=T0 + dt.timedelta(days=7, seconds=1)), "INVESTOR_FEE_UNPAID")
 
 
-async def test_commitment_needs_agreement_flag_and_other_gates(world):
+async def test_commitment_needs_no_service_agreement_but_keeps_the_other_gates(world):
     await _open(world)
     inv = await make_investor(world)
-    await _refused(_commit(world, inv, 10 * M, agreement=False), "INVESTOR_AGREEMENT_REQUIRED")
+    # Money flow FINAL v1.0: pressing Confirm signs nothing; the Lender Service Agreement comes with the Day-14 contract.
+    assert (await _commit(world, inv, 10 * M)).status == "PLEDGED"
     await _refused(
         commit_flow.commit_to_window(
             world.db, window_id=world.window.id, investor_id=inv.user.id, amount_vnd=10 * M, ack_risk_disclosure=False,
-            terms_version=TERMS, current_terms_version=TERMS, agreement_signed=True, payment_account_id=inv.account_id,
+            terms_version=TERMS, current_terms_version=TERMS, payment_account_id=inv.account_id,
             idempotency_key="k-risk", now=T0, signer=world.signer, storage=world.storage, params=world.params,
         ),
         "RISK_ACK_REQUIRED",
@@ -230,7 +285,7 @@ async def test_commitment_needs_agreement_flag_and_other_gates(world):
     await _refused(
         commit_flow.commit_to_window(
             world.db, window_id=world.window.id, investor_id=inv.user.id, amount_vnd=10 * M, ack_risk_disclosure=True,
-            terms_version="old", current_terms_version=TERMS, agreement_signed=True, payment_account_id=inv.account_id,
+            terms_version="old", current_terms_version=TERMS, payment_account_id=inv.account_id,
             idempotency_key="k-terms", now=T0, signer=world.signer, storage=world.storage, params=world.params,
         ),
         "TERMS_OUTDATED",
@@ -239,7 +294,7 @@ async def test_commitment_needs_agreement_flag_and_other_gates(world):
     err = await _refused(
         commit_flow.commit_to_window(
             world.db, window_id=world.window.id, investor_id=world.sme.id, amount_vnd=10 * M, ack_risk_disclosure=True,
-            terms_version=TERMS, current_terms_version=TERMS, agreement_signed=True, payment_account_id=inv.account_id,
+            terms_version=TERMS, current_terms_version=TERMS, payment_account_id=inv.account_id,
             idempotency_key="k-sme", now=T0, signer=world.signer, storage=world.storage, params=world.params,
         ),
         "NOT_FOUND",
@@ -258,7 +313,7 @@ async def test_commitment_idempotency_key_replays_first_result(world):
     await _refused(
         commit_flow.commit_to_window(
             world.db, window_id=world.window.id, investor_id=inv.user.id, amount_vnd=10 * M, ack_risk_disclosure=True,
-            terms_version=TERMS, current_terms_version=TERMS, agreement_signed=True, payment_account_id=inv.account_id,
+            terms_version=TERMS, current_terms_version=TERMS, payment_account_id=inv.account_id,
             idempotency_key="", now=T0, signer=world.signer, storage=world.storage, params=world.params,
         ),
         "IDEMPOTENCY_KEY_REQUIRED",

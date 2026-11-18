@@ -21,7 +21,7 @@ from app.direct_transfer import fees
 from app.core.timezone import ICT
 from app.direct_transfer.accounts import get_usable_account
 from app.direct_transfer.config import DirectTransferParams, resolve
-from app.direct_transfer.day14_times import window_cutoffs
+from app.direct_transfer.day14_times import cutoffs_for_date, window_cutoffs
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event, store_evidence_file
 from app.direct_transfer.models import WINDOW_LIVE_STATES, Commitment, FundingWindow, StandingOffer, Tranche
@@ -110,15 +110,30 @@ async def check_borrower_cap(
     return basis
 
 
-def commit_deadlines(window_start: dt.datetime) -> dict[str, dt.datetime]:
-    """The three deadlines of a commit-then-accept window (spec rule 1). Day 0 is the ICT date the window opens; all
-    counts are calendar days (D-046), weekends and holidays move nothing."""
+def commit_deadlines(window_start: dt.datetime, params: DirectTransferParams | None = None) -> dict[str, dt.datetime]:
+    """The deadlines of a commit-then-accept window (spec rule 1, Money flow FINAL v1.0 section 1). Day 0 is the ICT
+    date the window opens; all counts are calendar days (D-046), weekends and holidays move nothing, and none of
+    them moves when the target is reached early.
+
+    commit_closes_at     00:00 on Day 13: pledges and withdrawals end, the pledge list is final
+    sme_deadline_at      15:00 on Day 13: the SME accepts or declines (silence: the 50% rule)
+    pay_deadline_at      14:45 on Day 14: signing and new QRs close (Day-14 transfer rule)
+    no_show_at           15:00 on Day 14: lenders with no on-time transfer are locked
+    receipt_deadline_at  15:30 on Day 14: the last receipt upload
+    """
     day0 = window_start.astimezone(ICT).date()
 
     def at(day: int, hour: int) -> dt.datetime:
         return dt.datetime.combine(day0 + dt.timedelta(days=day), dt.time(hour), tzinfo=ICT)
 
-    return {"commit_closes_at": at(13, 0), "sme_deadline_at": at(13, 15), "pay_deadline_at": at(14, 15)}
+    day14 = cutoffs_for_date(day0 + dt.timedelta(days=14), params)
+    return {
+        "commit_closes_at": at(13, 0),
+        "sme_deadline_at": at(13, 15),
+        "pay_deadline_at": day14.pay_deadline_at,
+        "no_show_at": day14.no_show_at,
+        "receipt_deadline_at": day14.receipt_deadline_at,
+    }
 
 
 async def open_funding_window(
@@ -214,7 +229,7 @@ async def open_funding_window(
         declared_outside_debt_vnd=declared_outside_debt_vnd, now=now, params=p,
     )
     min_ticket = max(p.min_ticket_vnd, int(listing.min_ticket or 0))
-    deadlines = commit_deadlines(now) if flow == "COMMIT_THEN_ACCEPT" else None
+    deadlines = commit_deadlines(now, p) if flow == "COMMIT_THEN_ACCEPT" else None
     window_end = deadlines["commit_closes_at"] if deadlines else now + dt.timedelta(days=days)
     offer_terms = {
         "listing_id": str(listing.id),

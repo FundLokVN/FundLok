@@ -1,6 +1,7 @@
 """Commit-then-accept flow (slice S2) over the API: commit, my commitments, SME decision, window progress.
 
-Spec: docs/specs/direct_transfer/commit-then-accept-flow.md section 4.1 to 4.3.
+Spec: docs/specs/direct_transfer/commit-then-accept-flow.md section 4.1 to 4.3, as amended by Money flow FINAL v1.0
+(no service agreement at pledge time, withdrawal until the end of Day 12).
 """
 import datetime as dt
 import uuid
@@ -49,21 +50,38 @@ async def _make_commit_window(db_session, window_id, *, status="OPEN", sme_deadl
     db_session.expire_all()
 
 
-async def test_commitment_requires_signed_lender_service_agreement(
+async def test_commitment_needs_no_signed_service_agreement(
     client, db_session, make_admin, make_user, make_eligible_investor
 ):
+    """Money flow FINAL v1.0: a pledge is pressing Confirm. The Lender Service Agreement is signed with the Day-14
+    loan contract, so a lender without one can still pledge."""
     setup = await _open_project(client, db_session, make_admin, make_user)
     window_id = setup["window"].id
     await _make_commit_window(db_session, window_id)
     investor = await make_eligible_investor(await make_user(role="INVESTOR"), signed_agreement=False)
 
-    refused = await _commit(client, db_session, investor, window_id)
-    assert refused.status_code == 409 and refused.headers["X-Error-Code"] == "INVESTOR_AGREEMENT_REQUIRED"
-    assert (await db_session.execute(select(Commitment))).first() is None
-
-    await make_eligible_investor(investor)  # now signs the current agreement
     ok = await _commit(client, db_session, investor, window_id)
     assert ok.status_code == 201, ok.text
+    assert ok.json()["status"] == "PLEDGED"
+
+
+async def test_withdraw_a_pledge_over_the_api(client, db_session, make_admin, make_user, make_eligible_investor):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id = setup["window"].id
+    await _make_commit_window(db_session, window_id)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    other = await make_eligible_investor(await make_user(role="INVESTOR"))
+    pledge = (await _commit(client, db_session, investor, window_id, 20_000_000)).json()
+
+    r = await client.post(f"/funding/commitments/{pledge['id']}/withdraw", headers=other["headers"])
+    assert r.status_code == 404, r.text
+    r = await client.post(f"/funding/commitments/{pledge['id']}/withdraw", headers=investor["headers"])
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "VOID" and r.json()["my_committed_total_vnd"] == 0
+
+    await _make_commit_window(db_session, window_id, status="AWAITING_SME")
+    again = (await _commit(client, db_session, other, window_id, 10_000_000))
+    assert again.status_code == 409 and again.headers["X-Error-Code"] == "WINDOW_NOT_OPEN"
 
 
 async def test_commit_decide_and_progress_over_the_api(client, db_session, make_admin, make_user, make_eligible_investor):
@@ -160,6 +178,8 @@ async def test_rejects_wrong_role_on_every_new_route(client, db_session, make_ad
         assert r.status_code == 403, (who["role"] if "role" in who else "", r.text)
         r = await client.get(f"/funding/me/commitments?window_id={window_id}", headers=who["headers"])
         assert r.status_code == 403
+        r = await client.post(f"/funding/commitments/{uuid.uuid4()}/withdraw", headers=who["headers"])
+        assert r.status_code == 403
     for who in (investor, admin):
         r = await client.post(
             f"/funding/windows/{window_id}/decision", json={"decision": "ACCEPT"}, headers=who["headers"] | key
@@ -168,6 +188,7 @@ async def test_rejects_wrong_role_on_every_new_route(client, db_session, make_ad
     client.cookies.clear()  # the login cookies would otherwise authenticate these calls
     assert (await client.post(f"/funding/windows/{window_id}/commitments", json=commit_body, headers=key)).status_code == 401
     assert (await client.get(f"/funding/me/commitments?window_id={window_id}")).status_code == 401
+    assert (await client.post(f"/funding/commitments/{uuid.uuid4()}/withdraw")).status_code == 401
     assert (await client.post(f"/funding/windows/{window_id}/decision", json={"decision": "ACCEPT"}, headers=key)).status_code == 401
 
     # An SME that does not own the window gets 403 on the decision.
