@@ -58,7 +58,7 @@ Key carry-forwards:
 - `app/underwriting/` — ML grading engine (async)
 - `app/contracts/` — loan contract creation from a locked score run (final terms, funding target)
 - `app/repayment_schedule/` — **handed to Phat for implementation (D-058, 2026-11-16)**; Edward keeps the specs, the ledger legs and migrations (see Phat's list)
-- Decree 94 reporting and the borrower cap: there is no `app/compliance/` module. The cap lives in `app/direct_transfer/windows.py` (target is 100M per legal entity per D-040; the code still carries a provisional `cross_platform_cap_vnd` of 400M until it is changed)
+- Decree 94 reporting and the borrower cap: there is no `app/compliance/` module. The cap lives in `app/direct_transfer/windows.py` (`cross_platform_cap_vnd` is 100M per legal entity, target plus declared outside debt: D-040, D-054)
 - `app/ledger/` — double-entry ledger, custodial/ledger accounts, balance-by-sum (see ADR-003, docs/specs/ledger/ledger-foundation.md)
 - `app/direct_transfer/` — funding window, tranches, transfers and evidence, disputes, fees, CIC event log (ADR-009, ADR-011). Phat's routers call its service functions. The repayment code in it (`repayment.py` and the repayment jobs) is Phat's to implement (D-058); the ledger posting, tranche state machine, fees and migrations stay Edward's.
 - `app/payments/` — legacy omnibus disbursement/repayment shim over `app/ledger/` (deprecated behind a flag once `app/direct_transfer/` is wired)

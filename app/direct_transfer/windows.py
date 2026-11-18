@@ -95,7 +95,7 @@ async def check_borrower_cap(
     """Own records plus the SME's signed declaration (I-25, D-022); CIC replaces the source once connected.
 
     Raises BORROWER_CAP_EXCEEDED when target + declared outside debt would exceed the cross-platform cap
-    (PROVISIONAL(Q-D12)) or the per-platform cap. Returns the evidence payload."""
+    (100M, D-054) or the per-platform cap. Returns the evidence payload."""
     total = target_vnd + declared_outside_debt_vnd
     basis = {
         "basis": "OWN_RECORDS_PLUS_DECLARATION",
