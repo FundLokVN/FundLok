@@ -13,11 +13,17 @@ from sqlalchemy import func, select
 from app.core.timezone import ICT
 from app.direct_transfer import close, commit_flow, reservation, windows
 from app.direct_transfer.config import DirectTransferParams
+from app.direct_transfer.day14 import process_day14_no_shows
+from app.direct_transfer.tranche_state import transition_tranche
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.models import Commitment, EvidenceLog, FeeInvoice, LenderStanding, Tranche, Transfer
 from app.ledger.models import LedgerEntry
-from app.lending.models import Listing
+from app.lending.models import Holding, Listing
+from app.market import funding
+from app.models import RepaymentDay
 from app.notifications.models import Notification
+from app.repayment_schedule.models import Facility
+from app.scheduled_jobs import acceptance
 
 from .helpers import T0, make_investor, make_world, open_window
 
@@ -485,7 +491,7 @@ async def test_advance_window_is_idempotent_and_time_driven(world):
     await commit_flow.advance_all(world.db, now=SME_DEADLINE + dt.timedelta(days=3), params=world.params)
     await close.advance_all_windows(world.db, now=SME_DEADLINE + dt.timedelta(days=3), params=world.params)
     assert await totals() == after
-    assert (await _reload(world)).status == "AWAITING_PAYMENT"  # nothing after AWAITING_PAYMENT is this slice
+    assert (await _reload(world)).status == "AWAITING_PAYMENT"  # the Day-14 no-show step has not run: it waits
 
 
 # --------------------------------------------------------------------------- #
@@ -522,3 +528,132 @@ async def test_reservations_route_refused_for_commit_then_accept_windows(world):
     )
     assert err.status_code == 409
     assert await _count(world.db, Tranche) == 0
+
+
+# --------------------------------------------------------------------------- #
+# loan formation (slice S4)
+# --------------------------------------------------------------------------- #
+FORMATION_RUN = RECEIPT_DEADLINE + dt.timedelta(minutes=10)  # 15:40 on Day 14, after the 15:35 no-show step
+START = dt.date(2026, 11, 17)  # the first working day after Monday 16 Nov (Day 14)
+
+
+async def _accepted(world, amounts):
+    """An accepted round; its tickets, largest first."""
+    await _awaiting_sme(world, amounts)
+    await _decide(world, "ACCEPT", now=COMMIT_CLOSES + dt.timedelta(hours=1))
+    return list((await world.db.execute(select(Tranche).order_by(Tranche.amount_vnd.desc()))).scalars())
+
+
+async def _paid(world, tranche, *, confirmed=True, at=PAY_DEADLINE - dt.timedelta(hours=4)):
+    """Signed and paid on Day 14 and its receipt checked; confirmed by the SME unless `confirmed` is False. Only the
+    state machine: signing and receipts have their own tests."""
+    await transition_tranche(world.db, tranche, "SIGNED", now=at)
+    tranche.receipt_submitted_at = at
+    await transition_tranche(world.db, tranche, "ATTESTED", now=at, confirm_deadline=at + dt.timedelta(hours=24))
+    if confirmed:
+        await transition_tranche(world.db, tranche, "CONFIRMED", now=at + dt.timedelta(minutes=30))
+
+
+async def _day14_close(world, now=FORMATION_RUN):
+    await process_day14_no_shows(world.db, now=now, params=world.params)
+    return await close.advance_window(world.db, window_id=world.window.id, now=now, params=world.params)
+
+
+async def test_loan_forms_once_pooled_with_same_rate_start_end_and_payment_day(db_session):
+    world = await make_world(db_session, params=DirectTransferParams(repay_from_approval=True))  # the product default
+    tickets = await _accepted(world, [40 * M, 30 * M, 20 * M])
+    for t in tickets:
+        await _paid(world, t)
+    # Approved tickets do not each become a loan here (the LEGACY repay_from_approval path is off).
+    await close.form_investment_loan(world.db, tranche=tickets[0], window=world.window, now=PAY_DEADLINE, params=world.params)
+    assert tickets[0].status == "CONFIRMED" and await _count(world.db, Facility) == 0
+    await close.advance_window(world.db, window_id=world.window.id, now=NO_SHOW_AT, params=world.params)
+    assert (await _reload(world)).status == "AWAITING_PAYMENT"  # receipts are taken until 15:30
+
+    window = await _day14_close(world)
+    assert window.status == "REPAYING" and window.close_reason == "DAY_14" and window.confirmed_total_vnd == 90 * M
+    facility = (await world.db.execute(select(Facility))).scalar_one()  # one loan for everyone
+    assert window.facility_id == facility.id and facility.principal_vnd == 90 * M
+    assert facility.annual_rate_pct == window.annual_rate_pct and window.repayment_start_date == START
+    schedules = []
+    for t in tickets:
+        # each lender keeps its own tranche, holding and contract
+        holding = await world.db.get(Holding, t.holding_id)
+        assert t.status == "ACTIVE" and holding.investor_id == t.investor_id and holding.principal == t.amount_vnd
+        rows = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.tranche_id == t.id))).scalars().all()
+        assert {r.facility_id for r in rows} == {facility.id}
+        schedules.append(sorted(r.due_date for r in rows))
+    assert schedules[0][0] == START and schedules[0] == schedules[1] == schedules[2]  # same start, end and days
+
+    await _day14_close(world, now=FORMATION_RUN + dt.timedelta(days=3))
+    assert await _count(world.db, Facility) == 1  # formed once
+
+
+async def test_funding_advance_job_forms_the_loan_after_the_day14_no_show_step(world, monkeypatch):
+    monkeypatch.setattr(funding, "evidence_storage", lambda: world.storage)
+    tickets = await _accepted(world, [60 * M, 20 * M])
+    await _paid(world, tickets[0])
+    assert (await acceptance.run_funding_advance(world.db, now=FORMATION_RUN))["failed"] == 0
+    assert (await _reload(world)).status == "AWAITING_PAYMENT"  # the no-show step has not run: the job waits for it
+    await process_day14_no_shows(world.db, now=FORMATION_RUN, params=world.params)
+    assert (await acceptance.run_funding_advance(world.db, now=FORMATION_RUN))["failed"] == 0
+    window = await _reload(world)
+    assert window.status == "REPAYING" and window.confirmed_total_vnd == 60 * M and tickets[0].status == "ACTIVE"
+
+
+async def test_no_stub_interest_in_commit_then_accept_windows(world):
+    tickets = await _accepted(world, [40 * M, 30 * M])
+    for t in tickets:
+        await _paid(world, t)  # paid Monday, loan starts Tuesday: a LEGACY round would owe a day of stub interest
+    assert (await _day14_close(world)).status == "REPAYING"
+    assert all(t.stub_days == 0 and t.stub_interest_vnd == 0 and t.stub_receipt_date is None for t in tickets)
+    assert await _count(world.db, RepaymentDay, RepaymentDay.kind == "STUB") == 0
+
+
+async def test_loan_still_forms_when_confirmed_total_is_below_fifty_percent_after_no_shows(world):
+    tickets = await _accepted(world, [40 * M, 30 * M, 20 * M])  # 90% accepted
+    await _paid(world, tickets[2])  # only the 20M lender pays on time: 20% of the target
+    # The 30M lender paid late and staff have not settled it: late money never joins the loan, so it holds nothing up.
+    await transition_tranche(world.db, tickets[1], "SIGNED", now=PAY_DEADLINE - dt.timedelta(hours=1))
+    tickets[1].receipt_submitted_at = NO_SHOW_AT
+    await transition_tranche(world.db, tickets[1], "UNDER_REVIEW", now=NO_SHOW_AT, review_cause="LATE_MONEY")
+    window = await _day14_close(world)
+    assert [t.status for t in tickets] == ["EXPIRED", "UNDER_REVIEW", "ACTIVE"] and tickets[1].excluded_at_close
+    assert window.status == "REPAYING" and window.confirmed_total_vnd == 20 * M
+    assert (await world.db.execute(select(Facility))).scalar_one().principal_vnd == 20 * M
+
+
+async def test_window_with_no_confirmed_tranche_fails_with_no_fee(world):
+    tickets = await _accepted(world, [40 * M, 30 * M])
+    window = await _day14_close(world)  # nobody paid
+    assert {t.status for t in tickets} == {"EXPIRED"}
+    assert window.status == "FAILED" and window.facility_id is None and window.confirmed_total_vnd == 0
+    assert await _count(world.db, FeeInvoice) == 0 and await _count(world.db, LedgerEntry) == 0
+    assert await _count(world.db, Transfer) == 0  # no refunds: no money moved
+    assert (await world.db.get(Listing, window.listing_id)).status == "CANCELLED"
+
+
+async def test_sme_activation_invoice_issued_at_formation_on_confirmed_total(world):
+    tickets = await _accepted(world, [40 * M, 30 * M, 20 * M])
+    await _paid(world, tickets[0])
+    await _paid(world, tickets[1], confirmed=False)  # checked; the SME's 24 hours run to Tuesday 10:45
+    window = await _day14_close(world)  # the 20M lender is a no-show
+    assert window.status == "CLOSING" and await _count(world.db, FeeInvoice) == 0  # waits for the pending ticket
+    tuesday = dt.datetime(2026, 11, 17, 15, 0, tzinfo=ICT)
+    window = await close.advance_window(world.db, window_id=window.id, now=tuesday, params=world.params)
+    assert tickets[1].status == "ACTIVE"  # silence confirmed it, then the loan formed
+    assert window.status == "REPAYING" and window.confirmed_total_vnd == 70 * M
+    invoice = (await world.db.execute(select(FeeInvoice))).scalar_one()
+    assert invoice.kind == "SME_ACTIVATION" and invoice.base_vnd == 70 * M and invoice.fee_vnd == 2_100_000
+
+
+async def test_ledger_claims_post_only_when_tranche_becomes_active(world):
+    tickets = await _accepted(world, [40 * M, 30 * M])
+    for t in tickets:
+        await _paid(world, t)
+    assert await _count(world.db, LedgerEntry) == 0  # CONFIRMED is not yet in the loan
+    await _day14_close(world)
+    for t in tickets:
+        legs = (await world.db.execute(select(LedgerEntry).where(LedgerEntry.reference == t.reference_code))).scalars().all()
+        assert sorted(leg.type for leg in legs) == ["DISBURSEMENT", "FUNDING"]
+        assert {int(leg.amount) for leg in legs} == {t.amount_vnd}

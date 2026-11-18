@@ -118,9 +118,10 @@ class AcceptanceReminderResult(BaseModel):
 
 @router.post("/funding-advance", response_model=FundingAdvanceResult)
 async def run_funding_advance(db: AsyncSession = Depends(get_db)):
-    """Daily, 00:00 and 15:00 ICT: advance every commit-then-accept round with something due. At 00:00 on Day 13
+    """Daily, 00:00, 15:00 and 15:40 ICT: advance every commit-then-accept round with something due. At 00:00 on Day 13
     the pledge list is final and each lender's loan contract is generated; at 15:00 the silence rule decides a round
-    the SME did not decide (Money flow FINAL v1.0). Idempotent."""
+    the SME did not decide; from 15:40 on Day 14 the round closes and its pooled loan forms with everyone who paid
+    (Money flow FINAL v1.0). Idempotent."""
     result = await acceptance.run_funding_advance(db)
     return FundingAdvanceResult(job="funding-advance", **result)
 

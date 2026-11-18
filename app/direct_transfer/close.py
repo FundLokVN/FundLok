@@ -21,6 +21,7 @@ from app.direct_transfer.calendar_utils import (
     ict_date,
 )
 from app.direct_transfer.config import DirectTransferParams, resolve
+from app.direct_transfer.day14_times import window_cutoffs
 from app.direct_transfer.disputes import open_tranche_dispute
 from app.direct_transfer.errors import DirectTransferError, conflict, not_found
 from app.direct_transfer.evidence import log_event
@@ -63,12 +64,12 @@ async def _tranches(db: AsyncSession, window_id: UUID, *, lock: bool = True) -> 
 
 async def begin_close(
     db: AsyncSession, window: FundingWindow, *, now: dt.datetime, reason: str, params: DirectTransferParams,
-    calendar: BusinessDayCalendar | None = None,
+    calendar: BusinessDayCalendar | None = None, wait_from: dt.datetime | None = None,
 ) -> None:
     window.status = "CLOSING"
     window.close_reason = reason
     window.closing_started_at = now
-    window.close_wait_until = calendar_deadline(now, days=params.close_wait_days)
+    window.close_wait_until = calendar_deadline(wait_from or now, days=params.close_wait_days)
     # Tickets that never reached a receipt cannot be accepted after the window (Civil Code Art. 394.1).
     for tranche in await _tranches(db, window.id):
         if tranche.status in ("RESERVED", "SIGNED") and tranche.receipt_submitted_at is None:
@@ -128,13 +129,14 @@ async def cancel_window(
 
 async def _pending_tranches(db: AsyncSession, window_id: UUID) -> int:
     """Tranches whose outcome the close must still wait for: ATTESTED (SME dispute window), UNDER_REVIEW (except late
-    receipts, which hold no capacity) and SIGNED with a submitted receipt (awaiting staff)."""
+    receipts, which hold no capacity, and Day-14 late money, which never joins the loan) and SIGNED with a submitted
+    receipt (awaiting staff)."""
     rows = (await db.execute(select(Tranche).where(Tranche.window_id == window_id))).scalars().all()
     count = 0
     for t in rows:
         if t.status == "ATTESTED":
             count += 1
-        elif t.status == "UNDER_REVIEW" and t.review_cause != "LATE_RECEIPT":
+        elif t.status == "UNDER_REVIEW" and t.review_cause not in ("LATE_RECEIPT", "LATE_MONEY"):
             count += 1
         elif t.status == "SIGNED" and t.receipt_submitted_at is not None:
             count += 1
@@ -155,9 +157,23 @@ async def advance_window(
     cal = calendar or default_calendar()
     window = await lock_window(db, window_id)
     if window.flow == commit_flow.COMMIT_THEN_ACCEPT and window.status in ("OPEN", "AWAITING_SME", "AWAITING_PAYMENT"):
-        # Commit-then-accept windows (ADR-011) have their own time-driven transitions; nothing after AWAITING_PAYMENT
-        # is built yet (HANDOFF-06 Phase 2, slices S3 to S5).
-        return await commit_flow.advance_window(db, window_id=window_id, now=now, params=p)
+        # Commit-then-accept windows (ADR-011) have their own time-driven transitions up to Day 14.
+        window = await commit_flow.advance_window(db, window_id=window_id, now=now, params=p)
+        if window.status != "AWAITING_PAYMENT" or now < window_cutoffs(window, p).receipt_deadline_at:
+            return window
+        unpaid = (
+            await db.execute(
+                select(func.count()).select_from(Tranche).where(
+                    Tranche.window_id == window.id, Tranche.status.in_(("RESERVED", "SIGNED")),
+                    Tranche.receipt_submitted_at.is_(None),
+                )
+            )
+        ).scalar_one()
+        if unpaid:
+            return window  # the Day-14 no-show step (day14-cutoff, 15:35) has not run yet: it locks no-shows first
+        # After 15:30 on Day 14 the round closes; the loan forms once no ticket is pending, or at close_wait_until
+        # (spec rule 9: 2 calendar days after pay_deadline_at).
+        await begin_close(db, window, now=now, reason="DAY_14", params=p, calendar=cal, wait_from=window.pay_deadline_at)
     if window.status not in ("OPEN", "FULL", "CLOSING"):
         return window
 
@@ -233,7 +249,8 @@ async def finalize_window(
     await db.flush()
 
     listing = await db.get(Listing, window.listing_id)
-    if params.repay_from_approval:
+    pooled = window.flow == commit_flow.COMMIT_THEN_ACCEPT
+    if params.repay_from_approval and not pooled:
         await _close_repaying_investments(
             db, window=window, tranches=tranches, listing=listing, now=now, params=params, calendar=calendar,
             invoice_provider=invoice_provider,
@@ -245,8 +262,11 @@ async def finalize_window(
     window.closed_at = now
     window.confirmed_total_vnd = total
 
-    if total < window.min_raise_vnd:
-        # Below 50%: no loan, every tranche voided and refunded by the SME, no fee. PROVISIONAL(Q-D8)
+    # Commit-then-accept: the loan goes ahead with everyone who paid, at any total; with nobody confirmed the round
+    # fails with no fee (spec rule 9). LEGACY: below 50% fails.
+    failed = not confirmed if pooled else total < window.min_raise_vnd
+    if failed:
+        # No loan, every tranche voided and refunded by the SME, no fee. PROVISIONAL(Q-D8)
         for t in confirmed:
             await transition_tranche(db, t, "VOID", now=now, reason="BELOW_MIN_RAISE", void_reason="BELOW_MIN_RAISE")
             await create_refund_transfer(db, tranche=t, window=window, now=now, reason="BELOW_MIN_RAISE", params=params)
@@ -277,6 +297,8 @@ async def form_investment_loan(
     repayment days with their stub, and the ledger claims. The SME's activation fee is still invoiced once, when the
     round closes."""
     p = resolve(params)
+    if window.flow == commit_flow.COMMIT_THEN_ACCEPT:
+        return  # one pooled loan forms at close from every confirmed ticket (spec rule 9), never one by one
     cal = calendar or default_calendar()
     await lock_window(db, window.id)
     if tranche.status != "CONFIRMED":
@@ -405,11 +427,13 @@ async def _form_loan(
     # Investors' return, not the business's all-in rate: see investor_rate_pct.
     rate = investor_rate_pct(Decimal(window.annual_rate_pct), term, params)
 
-    # Stub interest per tranche: separate dated obligation, outside T0 (E3).
-    for t in confirmed:
-        t.stub_receipt_date = await _receipt_date(db, t)
-        t.stub_days = count_business_days(t.stub_receipt_date, start_date, calendar)
-        t.stub_interest_vnd = compute_stub_interest(t.amount_vnd, rate, t.stub_days, params.stub_basis_days)
+    # Stub interest per tranche: separate dated obligation, outside T0 (E3). None in commit-then-accept (rule 9):
+    # everyone pays on Day 14 and starts the same day.
+    if window.flow != commit_flow.COMMIT_THEN_ACCEPT:
+        for t in confirmed:
+            t.stub_receipt_date = await _receipt_date(db, t)
+            t.stub_days = count_business_days(t.stub_receipt_date, start_date, calendar)
+            t.stub_interest_vnd = compute_stub_interest(t.amount_vnd, rate, t.stub_days, params.stub_basis_days)
 
     orig = compute_origination(
         principal_vnd=total, annual_rate_pct=rate, contractual_term_months=term,
