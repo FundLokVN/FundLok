@@ -238,8 +238,10 @@ gcloud scheduler jobs create http day14-reminders-afternoon --location $REGION -
 
 ### Day 13 of a commit-then-accept round (docs/specs/direct_transfer/day13-loan-contracts.md)
 
-`POST /internal/jobs/funding-advance` (no body) runs at 00:00 and 15:00 ICT: at 00:00 on Day 13 the pledge list is
-final and each lender's loan contract is generated; at 15:00 the silence rule decides a round the SME did not decide.
+`POST /internal/jobs/funding-advance` (no body) runs at 00:00 and 15:00 ICT, and again at 15:40 (`funding-advance-day14`,
+after the 15:35 `day14-cutoff` run): at 00:00 on Day 13 the pledge list is final and each lender's loan contract is
+generated; at 15:00 the silence rule decides a round the SME did not decide; from 15:40 on Day 14 the round closes and
+its pooled loan forms with everyone who paid, once no ticket is pending or 2 days after the 14:45 pay deadline.
 `POST /internal/jobs/acceptance-reminders` (no body) runs at 09:00 ICT and reminds the SME 3 days and 1 day before the
 15:00 Day-13 deadline (in the app, by email, and on Zalo once `ZALO_ZBS_ACCEPTANCE_TEMPLATE_ID` is set). Both are
 idempotent and only touch commit-then-accept rounds (`FUNDING_WINDOW_FLOW=COMMIT_THEN_ACCEPT`).
@@ -247,6 +249,11 @@ idempotent and only touch commit-then-accept rounds (`FUNDING_WINDOW_FLOW=COMMIT
 ```bash
 gcloud scheduler jobs create http funding-advance --location $REGION --project $PROJECT \
   --schedule "0 0,15 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
+  --uri "$URL/internal/jobs/funding-advance" \
+  --oidc-service-account-email $SA --oidc-token-audience "$URL" \
+  --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 2m
+gcloud scheduler jobs create http funding-advance-day14 --location $REGION --project $PROJECT \
+  --schedule "40 15 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
   --uri "$URL/internal/jobs/funding-advance" \
   --oidc-service-account-email $SA --oidc-token-audience "$URL" \
   --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 2m
