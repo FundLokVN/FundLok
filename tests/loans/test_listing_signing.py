@@ -2,8 +2,10 @@
 
 FundLok approves the request (the operator's approval and a LOCKED score run, which fixes the rate); the SME then
 downloads the SME Service Agreement, the Standing Offer and the Loan Contract template filled in with those terms,
-signs them (the Standing Offer and the Loan Contract also by the Personal Guarantor) and uploads them back. Each
-upload is checked with NEAC (faked: conftest fake_neac); the last of the three publishes the project.
+signs them with its enterprise digital signature and uploads them back. Each upload is checked with NEAC (faked:
+conftest fake_neac). The Personal Guarantor then signs the Standing Offer and the Loan Contract by a Zalo one-time
+code (Money flow FINAL v1.0); a copy that already carries the guarantor's own digital signature also counts. The set
+complete publishes the project.
 """
 import asyncio
 import datetime as dt
@@ -24,7 +26,11 @@ from pypdf.generic import ArrayObject, ByteStringObject, DictionaryObject, NameO
 from app.direct_transfer.models import PaymentAccount
 from app.loans.agreement import loan_contract_text, standing_offer_text
 from app.loans.agreement import text as agreement_text
+from app.core.config import settings
+from app.loans.guarantor_models import GuarantorSignature, GuarantorSigningCode
 from app.loans.signing import signature_fields
+from app.phone_verification import zalo
+from app.users.models import User
 from conftest import auth_headers
 from tests.loans.test_service_agreement import TAX, _apply, _verified_with_bank
 
@@ -55,14 +61,51 @@ async def _kyc(db_session, sme, *, person_number=GUARANTOR_ID):
     await db_session.commit()
 
 
+_PHONE_SEQ = iter(range(10_000_000, 99_999_999))
+
+
+async def _verified_phone(db_session, sme):
+    """The guarantor's own account has a verified phone (sign-up's Zalo code): where their signing code goes."""
+    user = await db_session.get(User, UUID(sme["id"]))
+    user.phone = f"+849{next(_PHONE_SEQ):08d}"
+    user.phone_verified_at = dt.datetime.now(dt.timezone.utc)
+    await db_session.commit()
+    return user.phone
+
+
+@pytest.fixture
+def outbox(monkeypatch):
+    """Every code handed to Zalo, in order."""
+    sent: list[dict] = []
+
+    async def _record(to, code, *, tracking_id):
+        sent.append({"to": to, "code": code, "tracking_id": tracking_id})
+
+    monkeypatch.setattr(zalo, "send_otp", _record)
+    monkeypatch.setattr(settings, "PHONE_OTP_CHANNEL", "zalo")
+    return sent
+
+
+async def _guarantor_code(client, case):
+    return await client.post(f"/loans/applications/{case.app_id}/guarantor-signature/code", headers=auth_headers(case.sme))
+
+
+async def _guarantor_sign(client, case, code):
+    return await client.post(
+        f"/loans/applications/{case.app_id}/guarantor-signature", json={"code": code}, headers=auth_headers(case.sme)
+    )
+
+
 @pytest.fixture
 def approved(client, db_session, make_user, make_admin, attach_required_documents):
     """An SME whose request FundLok approved, with locked terms (14.5% a year), its KYB, an approved bank account,
     its owner's eKYC and the Guarantor's address (entered on the signing step: the eKYC carries none): everything
     signing needs, nothing signed yet."""
 
-    async def _make(*, lock=True, kyc=True, approve=True, tax_id=TAX, guarantor_address=True):
+    async def _make(*, lock=True, kyc=True, approve=True, tax_id=TAX, guarantor_address=True, phone=True):
         sme = await make_user(role="SME")
+        if phone:
+            await _verified_phone(db_session, sme)
         app_id = await _apply(client, sme, tax_id=tax_id)
         await _verified_with_bank(db_session, sme, tax_id=tax_id)
         if kyc:
@@ -481,38 +524,93 @@ async def test_signing_all_three_publishes_the_project(client, db_session, appro
     assert copy.content == stored[signed["sme_standing_offer"].file_key]
 
 
-async def test_the_standing_offer_needs_the_guarantors_own_signature(client, approved, stored, fake_neac):
+async def test_the_guarantor_signs_by_zalo_code_and_that_publishes_the_project(
+    client, db_session, approved, stored, fake_neac, outbox
+):
+    """Money flow FINAL v1.0, Day 0: the SME signs with its digital signature, the guarantor by a Zalo code."""
     case = await approved()
-    # Only the company's box signed: refused on the spot, before NEAC is asked.
-    one_box = await _upload(
-        client, case, "standing-offer",
-        await _signed(client, case, "standing-offer", signers=(TAX, GUARANTOR_ID), fields=("SME_Signature",)),
-    )
-    assert one_box.status_code == 422
-    assert one_box.headers["X-Error-Code"] == "SIGNING_GUARANTOR_MISSING"
-    assert fake_neac.calls == []
+    for kind in ("service-agreement", "standing-offer", "loan-contract"):
+        # Only the company's signature in the PDF: accepted now; the guarantor signs separately.
+        resp = await _upload(client, case, kind, await _signed(client, case, kind, fields=("SME_Signature",)))
+        assert resp.status_code == 200, (kind, resp.text)
+    body = resp.json()
+    assert body["published"] is False and body["guarantor_signed_by"] is None
+    assert body["guarantor_missing"] == [] and body["guarantor_phone"].startswith("09")
+    assert await _project_status(db_session, case.app_id) == "DRAFT", "three documents without the guarantor"
 
-    # Both boxes signed, but both by the company: NEAC finds no signature of the guarantor's.
-    only_company = await _upload(
-        client, case, "standing-offer", await _signed(client, case, "standing-offer", signers=(TAX,))
-    )
-    assert only_company.status_code == 422
-    assert only_company.headers["X-Error-Code"] == "SIGNING_GUARANTOR_MISSING"
+    sent = await _guarantor_code(client, case)
+    assert sent.status_code == 200, sent.text
+    assert sent.json()["channel"] == "zalo" and sent.json()["expires_in"] == 300
+    assert len(outbox) == 1 and outbox[0]["to"].startswith("849")
+    wrong = await _guarantor_sign(client, case, "000000" if outbox[0]["code"] != "000000" else "111111")
+    assert wrong.status_code == 400 and wrong.headers["X-Error-Code"] == "CODE_INCORRECT"
+    db_session.expire_all()
+    assert (await db_session.execute(select(GuarantorSigningCode.attempts))).scalar_one() == 1  # the guess counts
 
-    # The guarantor alone is not the company.
-    only_guarantor = await _upload(
-        client, case, "standing-offer", await _signed(client, case, "standing-offer", signers=(GUARANTOR_ID,))
-    )
-    assert only_guarantor.status_code == 422
-    assert only_guarantor.headers["X-Error-Code"] == "SIGNING_SIGNER_MISMATCH"
+    signed = await _guarantor_sign(client, case, outbox[0]["code"])
+    assert signed.status_code == 200, signed.text
+    assert signed.json()["published"] is True and signed.json()["guarantor_signed_by"] == "ZALO_OTP"
+    assert signed.json()["guarantor_signed_at"] is not None
+    assert await _project_status(db_session, case.app_id) == "ACTIVE"
 
-    # The Loan Contract template too, once the Offer is signed: both boxes, not only the company's.
+    signature = (await db_session.execute(select(GuarantorSignature))).scalar_one()
+    assert signature.signer_id_number == GUARANTOR_ID and signature.purpose == "LISTING_DOCUMENTS"
+    assert {d["document_type"] for d in signature.documents} == {"sme_standing_offer", "sme_loan_contract"}
+    assert all(len(d["sha256"]) == 64 and d["check_code"] for d in signature.documents)
+    audit = (
+        await db_session.execute(select(AuditLog.after_state).where(AuditLog.action == "GUARANTOR_SIGNED_BY_ZALO_OTP"))
+    ).scalar_one()
+    assert audit["signed_by"] == "ZALO_OTP" and audit["phone_masked"].startswith("09")
+
+    again = await _guarantor_code(client, case)
+    assert again.status_code == 409 and again.headers["X-Error-Code"] == "GUARANTOR_ALREADY_SIGNED"
+
+
+async def test_the_guarantor_signs_only_after_the_sme_signed_copies_are_on_file(client, approved, stored, fake_neac, outbox):
+    case = await approved()
+    early = await _guarantor_code(client, case)
+    assert early.status_code == 409 and early.headers["X-Error-Code"] == "GUARANTOR_SIGNS_AFTER_UPLOAD"
+    assert outbox == []
     await _sign_offer(client, case)
-    contract_one_box = await _upload(
-        client, case, "loan-contract",
-        await _signed(client, case, "loan-contract", signers=(TAX, GUARANTOR_ID), fields=("SME_Signature",)),
+    still = await _guarantor_code(client, case)
+    assert still.headers["X-Error-Code"] == "GUARANTOR_SIGNS_AFTER_UPLOAD"  # the Loan Contract is not on file yet
+
+
+async def test_a_code_for_another_listing_does_not_sign_this_one(client, db_session, approved, stored, fake_neac, outbox):
+    case = await approved()
+    for kind in ("standing-offer", "loan-contract"):
+        assert (await _upload(client, case, kind, await _signed(client, case, kind, fields=("SME_Signature",)))).status_code == 200
+    assert (await _guarantor_code(client, case)).status_code == 200
+    code = await db_session.execute(select(GuarantorSigningCode))
+    row = code.scalar_one()
+    row.subject_id = UUID(int=1)  # as if it had been sent for another application
+    await db_session.commit()
+    refused = await _guarantor_sign(client, case, outbox[0]["code"])
+    assert refused.status_code == 400 and refused.headers["X-Error-Code"] == "CODE_EXPIRED"
+
+
+async def test_a_copy_with_the_guarantors_own_digital_signature_still_counts(client, db_session, approved, stored, fake_neac):
+    """Copies signed in the PDF by the guarantor before the Zalo code keep working: no code needed."""
+    case = await approved()
+    await _upload(client, case, "service-agreement", await _signed(client, case, "service-agreement"))
+    await _sign_offer(client, case)
+    done = await _upload(
+        client, case, "loan-contract", await _signed(client, case, "loan-contract", signers=(TAX, GUARANTOR_ID))
     )
-    assert contract_one_box.headers["X-Error-Code"] == "SIGNING_GUARANTOR_MISSING"
+    assert done.status_code == 200, done.text
+    assert done.json()["published"] is True and done.json()["guarantor_signed_by"] == "DIGITAL_SIGNATURE"
+    assert await _project_status(db_session, case.app_id) == "ACTIVE"
+
+
+async def test_signing_waits_for_a_ready_guarantor(client, approved, stored, fake_neac, outbox):
+    """Ops rule "Guarantor ready before Day 0": an approved eKYC and a verified phone, before anything is accepted."""
+    case = await approved(phone=False)
+    status = await client.get(f"/loans/applications/{case.app_id}/listing-documents", headers=auth_headers(case.sme))
+    assert status.json()["guarantor_missing"] == ["PHONE"] and status.json()["guarantor_phone"] is None
+    refused = await _upload(client, case, "service-agreement", await _signed(client, case, "service-agreement"))
+    assert refused.status_code == 409 and refused.headers["X-Error-Code"] == "SIGNING_GUARANTOR_NOT_READY"
+    assert "PHONE" in refused.json()["detail"]
+    assert fake_neac.calls == []
 
 
 async def test_the_standing_offer_needs_a_verified_guarantor(client, approved, stored):
