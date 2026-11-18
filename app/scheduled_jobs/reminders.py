@@ -27,7 +27,7 @@ from app.admin import system_email
 from app.admin.internal_email.schemas import EmailContent
 from app.core.config import settings
 from app.direct_transfer.calendar_utils import default_calendar, ict_date
-from app.direct_transfer.models import FundingWindow
+from app.direct_transfer.models import WINDOW_LIVE_STATES, FundingWindow
 from app.direct_transfer.repayment import todays_payments
 from app.repayment_schedule.calendar import BusinessDayCalendar
 from app.scheduled_jobs.models import RepaymentReminder
@@ -42,7 +42,7 @@ STATUS_FAILED = "FAILED"
 MAX_ATTEMPTS = 3
 # The rounds todays_payments looks at: with repay_from_approval an investment
 # repays while its round is still open or closing.
-_REPAYING_ROUNDS = ("OPEN", "FULL", "CLOSING", "REPAYING")
+_REPAYING_ROUNDS = WINDOW_LIVE_STATES
 
 
 @dataclasses.dataclass(frozen=True)

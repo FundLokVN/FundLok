@@ -17,6 +17,11 @@ class DirectTransferParams:
     # --- funding window (docs/specs/direct_transfer/funding-window.md) ---
     hold_hours: int = 2
     window_days: int = 14
+    # Which flow new windows use: "LEGACY" (reserve, sign and pay within 2 hours) or "COMMIT_THEN_ACCEPT" (ADR-011,
+    # Money flow FINAL v1.0). Set by FUNDING_WINDOW_FLOW in the deployment; LEGACY until it is switched on there.
+    default_window_flow: str = dataclasses.field(
+        default_factory=lambda: os.getenv("FUNDING_WINDOW_FLOW", "LEGACY").strip().upper() or "LEGACY"
+    )
     min_raise_pct: int = 50
     min_ticket_vnd: int = 10_000_000  # Q-021 (config, Lok may revisit)
     max_target_vnd: int = 100_000_000

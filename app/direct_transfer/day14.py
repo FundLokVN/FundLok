@@ -32,6 +32,7 @@ from app.direct_transfer.day14_times import Day14Cutoffs, window_cutoffs
 from app.direct_transfer.errors import DirectTransferError, conflict, not_found
 from app.direct_transfer.evidence import log_event
 from app.direct_transfer.models import (
+    Commitment,
     Dispute,
     FundingWindow,
     LenderStanding,
@@ -39,6 +40,7 @@ from app.direct_transfer.models import (
     TopUpPledge,
     Tranche,
     Transfer,
+    WindowLoanContract,
 )
 from app.direct_transfer.receipts import normalize_memo
 from app.direct_transfer.tranche_state import transition_tranche
@@ -53,6 +55,8 @@ QR_SUFFIX_DIGITS = 4
 # A transfer stamped up to a minute before its QR was issued is a clock difference, not an older code.
 ISSUE_SKEW = dt.timedelta(minutes=1)
 SYSTEM_ROLE = "SYSTEM"
+# The counted no-show that closes a lender's account for good (Money flow FINAL v1.0).
+SECOND_NO_SHOW = 2
 # Windows the Day-14 steps look at: a commit-then-accept window is AWAITING_PAYMENT on Day 14.
 _DAY14_WINDOW_STATES = ("OPEN", "FULL", "AWAITING_PAYMENT", "CLOSING")
 
@@ -288,6 +292,14 @@ async def lock_lender(
         return False
     if no_show:
         standing.no_show_count = (standing.no_show_count or 0) + 1
+    if no_show and standing.no_show_count >= SECOND_NO_SHOW:
+        # Money flow FINAL v1.0: "A second no-show closes the account for good." Unlocking is no longer possible.
+        standing.status = "CLOSED"
+        standing.closed_at = now
+        standing.locked_window_id = window_id
+        standing.locked_at = standing.locked_at or now
+        await db.flush()
+        return True
     newly = standing.status != "LOCKED"
     standing.status = "LOCKED"
     standing.locked_window_id = window_id
@@ -296,6 +308,25 @@ async def lock_lender(
         standing.unlocked_at = None
     await db.flush()
     return newly
+
+
+async def void_no_show(db: AsyncSession, *, tranche: Tranche, now: dt.datetime) -> None:
+    """A no-show's loan never takes effect: its folded pledges and its Day-13 loan contract become VOID (NO_SHOW)."""
+    for c in (await db.execute(select(Commitment).where(Commitment.tranche_id == tranche.id))).scalars():
+        if c.status != "VOID":
+            c.status, c.void_reason = "VOID", "NO_SHOW"
+    contract = (
+        await db.execute(
+            select(WindowLoanContract).where(
+                WindowLoanContract.window_id == tranche.window_id,
+                WindowLoanContract.investor_id == tranche.investor_id,
+                WindowLoanContract.status != "VOID",
+            )
+        )
+    ).scalar_one_or_none()
+    if contract is not None:
+        contract.status, contract.void_reason = "VOID", "NO_SHOW"
+    await db.flush()
 
 
 async def _release_if_only_this_window(
@@ -436,6 +467,7 @@ async def process_day14_window(
                     db, tranche, "EXPIRED", now=now, actor_role=SYSTEM_ROLE, reason="NO_SHOW",
                     extra={"cause": "NO_SHOW"},
                 )
+                await void_no_show(db, tranche=tranche, now=now)
             newly = await lock_lender(
                 db, investor_id=tranche.investor_id, window_id=window.id, now=now, no_show=decide
             )

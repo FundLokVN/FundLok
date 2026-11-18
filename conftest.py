@@ -568,7 +568,44 @@ async def attach_signed_listing_documents(db_session, application_id) -> None:
                 status="UPLOADED",
             )
         )
+    await _attach_guarantor_signature(db_session, app_id)
     await db_session.commit()
+
+
+async def _attach_guarantor_signature(db_session, app_id) -> None:
+    """The Personal Guarantor's Zalo-code signature on the listing documents, as rows (app/loans/guarantor_otp.py):
+    with the three documents it completes the set that publishes the project."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select as _select
+
+    from app.lending.models import LoanApplication, ProjectOwnership
+    from app.loans.guarantor_models import PURPOSE_LISTING_DOCUMENTS, GuarantorSignature, GuarantorSigningCode
+    from app.loans.signing import guarantor_signature
+
+    if await guarantor_signature(db_session, app_id) is not None:
+        return
+    owner = (
+        await db_session.execute(
+            _select(ProjectOwnership.user_id)
+            .join(LoanApplication, LoanApplication.project_id == ProjectOwnership.project_id)
+            .where(LoanApplication.id == app_id)
+            .limit(1)
+        )
+    ).scalar_one()
+    now = datetime.now(timezone.utc)
+    code = GuarantorSigningCode(
+        id=uuid.uuid4(), user_id=owner, purpose=PURPOSE_LISTING_DOCUMENTS, subject_id=app_id, phone="+84900000000",
+        code_hash="test", channel="log", expires_at=now + timedelta(minutes=5), consumed_at=now, created_at=now,
+    )
+    db_session.add(code)
+    await db_session.flush()
+    db_session.add(
+        GuarantorSignature(
+            purpose=PURPOSE_LISTING_DOCUMENTS, subject_id=app_id, signer_user_id=owner, signer_name="TEST GUARANTOR",
+            signer_id_number="000000000000", phone=code.phone, code_id=code.id, documents=[], signed_at=now,
+        )
+    )
 
 
 @pytest.fixture

@@ -40,6 +40,7 @@ from app.direct_transfer.calendar_utils import default_calendar, ict_date
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.evidence import log_event
 from app.direct_transfer.models import (
+    WINDOW_LIVE_STATES,
     Dispute,
     DisputeEvidence,
     EvidenceFile,
@@ -68,7 +69,8 @@ from app.utils import r2
 from app.utils.audit import append_audit
 
 # Rounds still taking or settling investment: the ones the tab opens on.
-OPEN_ROUND_STATUSES = ("OPEN", "FULL", "CLOSING")
+# Every live state except REPAYING (the loan has formed), so it now includes AWAITING_SME and AWAITING_PAYMENT.
+OPEN_ROUND_STATUSES = tuple(s for s in WINDOW_LIVE_STATES if s != "REPAYING")
 
 # How the transfer list is filtered. NEEDS_ACTION is the queue: a receipt waiting to be read, or a ticket under
 # review waiting for a decision. The others group the ticket states.
@@ -220,6 +222,10 @@ async def advance_round(
             for tranche in waiting:
                 await form_investment_loan(db, tranche=tranche, window=window, now=now)
         window = await advance_window(db, window_id=window_id, now=now)
+        # Commit-then-accept: the Day-13 loan contracts the new state asks for (generated, or void on a decline).
+        from app.market import day13_contracts, funding as market_funding
+
+        await day13_contracts.after_advance(db, window=window, storage=market_funding.evidence_storage(), now=now)
     except DirectTransferError as exc:
         raise _http(exc) from exc
     append_audit(

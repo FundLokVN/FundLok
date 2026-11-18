@@ -160,9 +160,12 @@ async def payment_instructions(
     """Where and how to pay, with the current QR. The first call after signing issues the first QR (writes a
     payment_qrs row: the caller commits). Later calls return the latest QR, expired or not."""
     tranche = await _investor_tranche(db, tranche_id, investor_id)
+    window = await db.get(FundingWindow, tranche.window_id)
+    if tranche.status == "RESERVED" and window.flow == "COMMIT_THEN_ACCEPT":
+        # Day 14 (Money flow FINAL v1.0): the VietQR appears only once the lender signed its loan contract.
+        raise conflict("CONTRACT_REQUIRED", "Sign your loan contract first")
     if tranche.status != "SIGNED":
         raise conflict("TRANCHE_NOT_SIGNED", "Sign the acceptance first")
-    window = await db.get(FundingWindow, tranche.window_id)
     cutoffs = window_cutoffs(window, params)
     if cutoffs and now >= cutoffs.pay_deadline_at:
         raise conflict("PAY_DEADLINE_PASSED", "Payments for this round closed at 14:45 on disbursement day")

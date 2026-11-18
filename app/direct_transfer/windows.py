@@ -18,12 +18,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.direct_transfer import fees
+from app.core.timezone import ICT
 from app.direct_transfer.accounts import get_usable_account
 from app.direct_transfer.config import DirectTransferParams, resolve
-from app.direct_transfer.day14_times import window_cutoffs
+from app.direct_transfer.day14_times import cutoffs_for_date, window_cutoffs
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event, store_evidence_file
-from app.direct_transfer.models import WINDOW_LIVE_STATES, FundingWindow, StandingOffer, Tranche
+from app.direct_transfer.models import WINDOW_LIVE_STATES, Commitment, FundingWindow, StandingOffer, Tranche
 from app.direct_transfer.signing import Signer, SignerIdentity, render_offer_document
 from app.direct_transfer.storage import EvidenceStorage
 from app.lending.models import Contract, Listing, LoanApplication, Order, ProjectOwnership, ScoreRun
@@ -109,6 +110,32 @@ async def check_borrower_cap(
     return basis
 
 
+def commit_deadlines(window_start: dt.datetime, params: DirectTransferParams | None = None) -> dict[str, dt.datetime]:
+    """The deadlines of a commit-then-accept window (spec rule 1, Money flow FINAL v1.0 section 1). Day 0 is the ICT
+    date the window opens; all counts are calendar days (D-046), weekends and holidays move nothing, and none of
+    them moves when the target is reached early.
+
+    commit_closes_at     00:00 on Day 13: pledges and withdrawals end, the pledge list is final
+    sme_deadline_at      15:00 on Day 13: the SME accepts or declines (silence: the 50% rule)
+    pay_deadline_at      14:45 on Day 14: signing and new QRs close (Day-14 transfer rule)
+    no_show_at           15:00 on Day 14: lenders with no on-time transfer are locked
+    receipt_deadline_at  15:30 on Day 14: the last receipt upload
+    """
+    day0 = window_start.astimezone(ICT).date()
+
+    def at(day: int, hour: int) -> dt.datetime:
+        return dt.datetime.combine(day0 + dt.timedelta(days=day), dt.time(hour), tzinfo=ICT)
+
+    day14 = cutoffs_for_date(day0 + dt.timedelta(days=14), params)
+    return {
+        "commit_closes_at": at(13, 0),
+        "sme_deadline_at": at(13, 15),
+        "pay_deadline_at": day14.pay_deadline_at,
+        "no_show_at": day14.no_show_at,
+        "receipt_deadline_at": day14.receipt_deadline_at,
+    }
+
+
 async def open_funding_window(
     db: AsyncSession,
     *,
@@ -123,8 +150,12 @@ async def open_funding_window(
     storage: EvidenceStorage,
     window_days: int | None = None,
     params: DirectTransferParams | None = None,
+    flow: str | None = None,
 ) -> FundingWindow:
     p = resolve(params)
+    flow = flow or p.default_window_flow
+    if flow not in ("LEGACY", "COMMIT_THEN_ACCEPT"):
+        raise bad_request("Unknown window flow", "INVALID_FLOW")
     if not idempotency_key:
         raise bad_request("Idempotency-Key is required", "IDEMPOTENCY_KEY_REQUIRED")
     existing = (await db.execute(select(FundingWindow).where(FundingWindow.idempotency_key == idempotency_key))).scalar_one_or_none()
@@ -137,7 +168,7 @@ async def open_funding_window(
     if declared_outside_debt_vnd < 0:
         raise bad_request("Invalid declared debt")
     days = window_days if window_days is not None else p.window_days
-    if not (1 <= days <= p.window_days):
+    if flow == "LEGACY" and not (1 <= days <= p.window_days):
         raise bad_request(f"window_days must be between 1 and {p.window_days}")
 
     listing = (await db.execute(select(Listing).where(Listing.id == listing_id).with_for_update())).scalar_one_or_none()
@@ -198,7 +229,8 @@ async def open_funding_window(
         declared_outside_debt_vnd=declared_outside_debt_vnd, now=now, params=p,
     )
     min_ticket = max(p.min_ticket_vnd, int(listing.min_ticket or 0))
-    window_end = now + dt.timedelta(days=days)
+    deadlines = commit_deadlines(now, p) if flow == "COMMIT_THEN_ACCEPT" else None
+    window_end = deadlines["commit_closes_at"] if deadlines else now + dt.timedelta(days=days)
     offer_terms = {
         "listing_id": str(listing.id),
         "contract_id": str(contract.id),
@@ -215,6 +247,9 @@ async def open_funding_window(
         "sme_payment_account": {"bank_bin": account.bank_bin, "account_number": account.account_number},
         "separate_contract_per_accepting_investor": True,
     }
+    if deadlines:
+        offer_terms["flow"] = flow
+        offer_terms.update({k: v.isoformat() for k, v in deadlines.items()})
     window = FundingWindow(
         listing_id=listing.id,
         contract_id=contract.id,
@@ -232,6 +267,8 @@ async def open_funding_window(
         window_end=window_end,
         status="OPEN",
         idempotency_key=idempotency_key,
+        flow=flow,
+        **(deadlines or {}),
     )
     db.add(window)
     try:
@@ -302,6 +339,14 @@ class WindowProgress:
     pay_deadline_at: dt.datetime | None = None
     no_show_at: dt.datetime | None = None
     receipt_deadline_at: dt.datetime | None = None
+    # Commit-then-accept (spec 4.2); None on LEGACY windows.
+    flow: str | None = None
+    commit_closes_at: dt.datetime | None = None
+    sme_deadline_at: dt.datetime | None = None
+    committed_total_vnd: int | None = None
+    committed_pct: int | None = None
+    sme_decision: str | None = None
+    sme_decided_at: dt.datetime | None = None
 
 
 async def get_window_progress(db: AsyncSession, *, listing_id: UUID, now: dt.datetime) -> WindowProgress:
@@ -318,6 +363,26 @@ async def get_window_progress(db: AsyncSession, *, listing_id: UUID, now: dt.dat
     remaining = window.window_end - now
     days_left = max(0, -(-int(remaining.total_seconds()) // 86400)) if window.status in ("OPEN", "FULL") else 0
     cutoffs = window_cutoffs(window)
+    extra: dict = {}
+    if window.flow == "COMMIT_THEN_ACCEPT":
+        committed = int(
+            (
+                await db.execute(
+                    select(func.coalesce(func.sum(Commitment.amount_vnd), 0)).where(
+                        Commitment.window_id == window.id, Commitment.status.in_(("PLEDGED", "FOLDED"))
+                    )
+                )
+            ).scalar_one()
+        )
+        extra = dict(
+            flow=window.flow,
+            commit_closes_at=window.commit_closes_at,
+            sme_deadline_at=window.sme_deadline_at,
+            committed_total_vnd=committed,
+            committed_pct=committed * 100 // window.target_vnd,
+            sme_decision=window.sme_decision,
+            sme_decided_at=window.sme_decided_at,
+        )
     return WindowProgress(
         disbursement_date=cutoffs.disbursement_date if cutoffs else None,
         pay_deadline_at=cutoffs.pay_deadline_at if cutoffs else None,
@@ -341,6 +406,7 @@ async def get_window_progress(db: AsyncSession, *, listing_id: UUID, now: dt.dat
         closing_started_at=window.closing_started_at,
         close_wait_until=window.close_wait_until,
         repayment_start_date=window.repayment_start_date,
+        **extra,
     )
 
 

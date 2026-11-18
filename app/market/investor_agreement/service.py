@@ -408,7 +408,28 @@ async def sign_with_code(
         exc.persist = True  # the wrong guess is counted even though the request fails
         raise exc
     row.consumed_at = now
+    return await record_agreement(
+        db, investor_id=investor_id, tranche=tranche, code_row=row, storage=storage, now=now,
+        ip_address=ip_address, user_agent=user_agent, params=params,
+    )
 
+
+async def record_agreement(
+    db: AsyncSession,
+    *,
+    investor_id: UUID,
+    tranche: Tranche,
+    code_row: AgreementSigningCode,
+    storage: EvidenceStorage,
+    now: dt.datetime,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    params: DirectTransferParams | None = None,
+) -> InvestorServiceAgreement:
+    """Keep the current agreement as confirmed by the already-redeemed `code_row`, with the commitment's Annex.
+    Shared by `sign_with_code` and the Day-14 loan contract (app/market/day14_signing.py), where one Zalo code signs
+    the loan contract and, on the investor's first Day 14, this agreement too (Money flow FINAL v1.0)."""
+    row = code_row
     party = await current_party_b(db, investor_id)
     masked = masked_phone(row.phone)
     content, file_name = await build_pdf(

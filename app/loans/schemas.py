@@ -389,3 +389,24 @@ class ListingDocumentsOut(BaseModel):
     service_agreement: SignedListingDocumentOut
     standing_offer: SignedListingDocumentOut
     loan_contract: SignedListingDocumentOut
+    # The Personal Guarantor (Money flow FINAL v1.0): what they still lack before signing opens ("EKYC", "PHONE"),
+    # how they signed the Standing Offer and Loan Contract ("ZALO_OTP", or "DIGITAL_SIGNATURE" for copies signed
+    # in the PDF before the Zalo code), when, and the masked number the code goes to.
+    guarantor_missing: list[Literal["EKYC", "PHONE"]] = []
+    guarantor_signed_by: Literal["ZALO_OTP", "DIGITAL_SIGNATURE"] | None = None
+    guarantor_signed_at: datetime | None = None
+    guarantor_phone: str | None = None
+
+
+class GuarantorCodeOut(BaseModel):
+    """A Zalo code was sent to the guarantor: to `phone` (masked), good for `expires_in` seconds, the next one in
+    `resend_in` seconds. `channel` is "zalo" (or "log" in local development)."""
+
+    phone: str
+    channel: str
+    expires_in: int
+    resend_in: int
+
+
+class GuarantorSignRequest(BaseModel):
+    code: str
