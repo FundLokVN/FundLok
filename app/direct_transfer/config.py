@@ -8,6 +8,7 @@ value without monkeypatching.
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import os
 
 
@@ -52,6 +53,12 @@ class DirectTransferParams:
     max_evidence_bytes: int = 10 * 1024 * 1024
     allowed_evidence_types: tuple[str, ...] = ("application/pdf", "image/png", "image/jpeg", "image/webp")
     receipt_future_skew_minutes: int = 5
+    # --- Day-14 transfer rule (docs/specs/direct_transfer/day14-transfer-rule.md, Loc 18 Nov 2026) ---
+    qr_validity_minutes: int = 15  # each QR, and its code, is valid this long
+    qr_min_interval_seconds: int = 60  # a new QR at most once a minute (QR_TOO_SOON)
+    day14_pay_cutoff: dt.time = dt.time(14, 45)  # Day 14, ICT: signing and new QRs close
+    day14_no_show_at: dt.time = dt.time(15, 0)  # Day 14, ICT: no-shows and late money are locked
+    day14_receipt_cutoff: dt.time = dt.time(15, 30)  # Day 14, ICT: last receipt upload
 
 
 DEFAULT_PARAMS = DirectTransferParams()

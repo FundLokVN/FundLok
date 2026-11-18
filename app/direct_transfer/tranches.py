@@ -12,8 +12,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.direct_transfer import day14
 from app.direct_transfer.calendar_utils import calendar_deadline
 from app.direct_transfer.config import DirectTransferParams, resolve
+from app.direct_transfer.day14_times import window_cutoffs
 from app.direct_transfer.disputes import open_tranche_dispute
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event, store_evidence_file
@@ -106,6 +108,9 @@ async def accept_tranche(
     if now > tranche.hold_expires_at:
         raise conflict("HOLD_EXPIRED", "The reservation hold has expired")
     window = await db.get(FundingWindow, tranche.window_id)
+    cutoffs = window_cutoffs(window, p)
+    if cutoffs and now >= cutoffs.pay_deadline_at:
+        raise conflict("PAY_DEADLINE_PASSED", "Signing for this round closed at 14:45 on disbursement day")
     if window.status not in ("OPEN", "FULL") or now >= window.window_end:
         raise conflict("WINDOW_NOT_OPEN", "The window is not open")
     investor = await db.get(User, investor_id)
@@ -139,16 +144,31 @@ class PaymentInstructions:
     vietqr_payload: str
     hold_expires_at: dt.datetime
     warning: str
+    # Day-14 transfer rule: the QR's own code (also the memo) and its validity, and the round's cut-offs.
+    qr_code: str | None = None
+    qr_issued_at: dt.datetime | None = None
+    qr_expires_at: dt.datetime | None = None
+    pay_deadline_at: dt.datetime | None = None
+    receipt_deadline_at: dt.datetime | None = None
 
 
-async def payment_instructions(db: AsyncSession, *, tranche_id: UUID, investor_id: UUID, now: dt.datetime) -> PaymentInstructions:
+async def payment_instructions(
+    db: AsyncSession, *, tranche_id: UUID, investor_id: UUID, now: dt.datetime, params: DirectTransferParams | None = None
+) -> PaymentInstructions:
+    """Where and how to pay, with the current QR. The first call after signing issues the first QR (writes a
+    payment_qrs row: the caller commits). Later calls return the latest QR, expired or not."""
     tranche = await _investor_tranche(db, tranche_id, investor_id)
     if tranche.status != "SIGNED":
         raise conflict("TRANCHE_NOT_SIGNED", "Sign the acceptance first")
     window = await db.get(FundingWindow, tranche.window_id)
+    cutoffs = window_cutoffs(window, params)
+    if cutoffs and now >= cutoffs.pay_deadline_at:
+        raise conflict("PAY_DEADLINE_PASSED", "Payments for this round closed at 14:45 on disbursement day")
+    qr = await day14.current_qr(db, tranche=tranche, window=window, now=now, params=params)
     account = await db.get(PaymentAccount, window.sme_payment_account_id)
     payload = build_vietqr_payload(
-        bank_bin=account.bank_bin, account_number=account.account_number, amount_vnd=tranche.amount_vnd, memo=tranche.reference_code
+        bank_bin=account.bank_bin, account_number=account.account_number, amount_vnd=tranche.amount_vnd,
+        memo=qr.code if qr else tranche.reference_code,
     )
     return PaymentInstructions(
         bank_name=account.bank_name,
@@ -160,6 +180,11 @@ async def payment_instructions(db: AsyncSession, *, tranche_id: UUID, investor_i
         vietqr_payload=payload,
         hold_expires_at=tranche.hold_expires_at,
         warning=PAYMENT_WARNING,
+        qr_code=qr.code if qr else None,
+        qr_issued_at=qr.issued_at if qr else None,
+        qr_expires_at=qr.expires_at if qr else None,
+        pay_deadline_at=cutoffs.pay_deadline_at if cutoffs else None,
+        receipt_deadline_at=cutoffs.receipt_deadline_at if cutoffs else None,
     )
 
 
@@ -214,6 +239,9 @@ async def submit_receipt(
 
     tranche = await _investor_tranche(db, tranche_id, investor_id, lock=True)
     window = await lock_window(db, tranche.window_id)
+    cutoffs = window_cutoffs(window, p)
+    if cutoffs and now > cutoffs.receipt_deadline_at:
+        raise conflict("RECEIPT_DEADLINE_PASSED", "Receipts for this round could be uploaded until 15:30")
 
     # A hold that has lapsed but whose job has not yet run is treated as lapsed (lazy expiry): the money may have
     # moved, so the receipt is accepted as a LATE_RECEIPT for staff rather than refused.
@@ -333,6 +361,11 @@ async def apply_receipt_fields(
     failures = check_receipt(
         fields, expected, now=now, future_skew=dt.timedelta(minutes=params.receipt_future_skew_minutes)
     )
+    timing = await day14.record_payment_timing(
+        db, tranche=tranche, window=window, transfer=transfer, memo=fields.memo, transferred_at=fields.transferred_at,
+        params=params,
+    )
+    late_money = day14.is_late_money(window, timing, params)
     transfer.failure_codes = failures
     await log_event(
         db, entity_type="TRANSFER", entity_id=transfer.id, event_type="FIELDS_ENTERED", now=now, actor_id=actor_id,
@@ -346,7 +379,15 @@ async def apply_receipt_fields(
         # Late receipt: record the checks only; staff decide the outcome.
         transfer.check_status = "MATCHED" if not failures else "MISMATCH"
         return
-    if not failures:
+    if not failures and late_money:
+        # Day-14 late money: the receipt is right but outside its QR's 15 minutes (or after 14:45). It does not join
+        # the loan; the 15:00 step turns it into the lender's top-up (day14.process_day14_no_shows).
+        transfer.check_status = "MATCHED"
+        await transition_tranche(
+            db, tranche, "UNDER_REVIEW", now=now, actor_id=actor_id, actor_role=actor_role, review_cause="LATE_MONEY",
+            extra={"late_reason": timing.late_reason},
+        )
+    elif not failures:
         transfer.check_status = "MATCHED"
         transfer.confirmation_level = "ATTESTED"
         await transition_tranche(

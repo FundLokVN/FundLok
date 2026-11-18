@@ -157,6 +157,38 @@ class InvestorTrancheOut(TrancheOut):
     project_id: UUID | None = None
     project_name: str | None = None
     term_months: int | None = None
+    # Day-14 transfer rule (day14-transfer-rule.md 4.4): from the latest receipt. PENDING_CHECK: a receipt is in but
+    # its fields are not read yet. Null: no receipt, or the ticket never had a QR code.
+    payment_timing: Literal["ON_TIME", "LATE", "PENDING_CHECK"] | None = None
+    late_reason: Literal["EXPIRED_CODE", "NO_QR_CODE", "AFTER_CUTOFF"] | None = None
+
+
+class TopUpPledgeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    window_id: UUID
+    listing_title: str | None = None
+    amount_vnd: int
+    recorded_at: dt.datetime
+    status: Literal["AWAITING_UNLOCK", "AWAITING_SIGNING", "SIGNED", "SME_CONFIRMED", "VOID"]
+
+
+class LenderStandingOut(BaseModel):
+    """The lender's lock after a Day-14 no-show or late money (commit-then-accept-flow.md 4.7)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    status: Literal["GOOD", "LOCKED", "CLOSED"]
+    no_show_count: int
+    locked_at: dt.datetime | None = None
+    unlock_requires: list[Literal["EKYC", "ACKNOWLEDGEMENT"]]
+    acknowledgement_sentence: str | None = None
+    top_up_pledges: list[TopUpPledgeOut]
+
+
+class UnlockStandingIn(BaseModel):
+    acknowledgement: str = Field(min_length=1, max_length=500)
 
 
 class SmeTicketOut(BaseModel):

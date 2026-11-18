@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.contracts.schemas import ContractCreate
 from app.contracts.service import create_contract
+from app.direct_transfer import standing
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.errors import DirectTransferError, conflict, not_found
 from app.direct_transfer.models import FundingWindow, PaymentAccount, Tranche
@@ -332,6 +333,9 @@ async def reserve_and_accept(
     """
     if terms_version != INVESTOR_TERMS_VERSION:
         raise conflict("TERMS_OUTDATED", "The investing terms have changed; read them again before investing")
+    # Day-14 no-show or late money (Contract 4 Art. 5.4): no new commitment until the lender unlocks.
+    if await standing.is_locked(db, investor_id):
+        raise conflict("LENDER_LOCKED", "Your account is locked. Unlock it before investing again")
     agreement = await investor_agreement.current_signature(db, investor_id)
     account_id = payment_account_id or await _investor_payout_account(db, investor_id)
     if account_id is None:
