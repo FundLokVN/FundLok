@@ -497,6 +497,47 @@ class TransferReminder(Base):
     )
 
 
+class WindowLoanContract(Base):
+    """One Investor's own loan contract on a commit-then-accept round (Money flow FINAL v1.0, Day 13 and Day 14).
+
+    Generated at 00:00 on Day 13 from the final pledge list (one per lender, for its pledged total). The SME signs
+    it with its enterprise digital signature on Day 13 (accepting means signing), the Personal Guarantor by Zalo code
+    (guarantor_signatures, WINDOW_LOAN_CONTRACTS, not a condition), and the Investor by Zalo code on Day 14."""
+
+    __tablename__ = "window_loan_contracts"
+
+    id = _uuid_pk()
+    window_id = Column(UUID(as_uuid=True), ForeignKey("funding_windows.id", ondelete="RESTRICT"), nullable=False)
+    investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    contract_no = Column(Text, nullable=False, unique=True)
+    amount_vnd = Column(BigInteger, nullable=False)
+    status = Column(Text, nullable=False, server_default="GENERATED")
+    void_reason = Column(Text, nullable=True)
+    # The generated copy, as the SME downloads it.
+    file_key = Column(Text, nullable=False)
+    sha256 = Column(Text, nullable=False)
+    check_code = Column(Text, nullable=False)
+    generated_at = _ts(nullable=False)
+    # The SME's signed copy and NEAC's verdict.
+    sme_signed_file_key = Column(Text, nullable=True)
+    sme_signed_sha256 = Column(Text, nullable=True)
+    sme_signed_at = _ts(nullable=True)
+    sme_signature_check = Column(JSONB, nullable=True)
+    # The Investor's Zalo-code signature on Day 14 (the copy as they signed it, and the code's record).
+    investor_signed_at = _ts(nullable=True)
+    investor_signed_file_key = Column(Text, nullable=True)
+    investor_signature = Column(JSONB, nullable=True)
+    created_at = _ts(server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("window_id", "investor_id", name="uq_window_loan_contracts_window_investor"),
+        CheckConstraint("amount_vnd > 0", name="ck_window_loan_contracts_amount"),
+        CheckConstraint(
+            "status IN ('GENERATED','SME_SIGNED','INVESTOR_SIGNED','VOID')", name="ck_window_loan_contracts_status"
+        ),
+    )
+
+
 class Dispute(Base):
     __tablename__ = "disputes"
 

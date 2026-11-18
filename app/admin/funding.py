@@ -222,6 +222,10 @@ async def advance_round(
             for tranche in waiting:
                 await form_investment_loan(db, tranche=tranche, window=window, now=now)
         window = await advance_window(db, window_id=window_id, now=now)
+        # Commit-then-accept: the Day-13 loan contracts the new state asks for (generated, or void on a decline).
+        from app.market import day13_contracts, funding as market_funding
+
+        await day13_contracts.after_advance(db, window=window, storage=market_funding.evidence_storage(), now=now)
     except DirectTransferError as exc:
         raise _http(exc) from exc
     append_audit(

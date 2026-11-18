@@ -65,6 +65,7 @@ from app.direct_transfer.models import (  # noqa: F401
     Tranche,
     Transfer,
     TransferReminder,
+    WindowLoanContract,
 )
 # FKs to users and tranches.
 from app.market.investor_agreement.models import (  # noqa: F401

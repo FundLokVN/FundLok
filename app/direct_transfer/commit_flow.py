@@ -447,8 +447,13 @@ async def decide_window(
     idempotency_key: str,
     now: dt.datetime,
     params: DirectTransferParams | None = None,
+    contracts_signed: bool | None = None,
 ) -> FundingWindow:
-    """The SME accepts or declines. Only in AWAITING_SME and before `sme_deadline_at`; ACCEPT below 50% is allowed."""
+    """The SME accepts or declines. Only in AWAITING_SME and before `sme_deadline_at`; ACCEPT below 50% is allowed.
+
+    Money flow FINAL v1.0, Day 13: "Accepting means signing" every lender's loan contract. `contracts_signed` is
+    decided by the caller (the contracts live in app/market.day13_contracts); False refuses an ACCEPT with 409
+    CONTRACTS_NOT_SIGNED. None skips the check (service-level callers that sign nothing, such as tests of S2)."""
     resolve(params)
     if not idempotency_key:
         raise bad_request("Idempotency-Key is required", "IDEMPOTENCY_KEY_REQUIRED")
@@ -481,6 +486,10 @@ async def decide_window(
     if decision == "ACCEPT":
         if pledged <= 0:
             raise conflict("NOTHING_TO_ACCEPT", "There are no commitments to accept")
+        if contracts_signed is False:
+            raise conflict(
+                "CONTRACTS_NOT_SIGNED", "Accepting means signing: sign every investor's loan contract first"
+            )
         await _apply_accept(db, window, decision="ACCEPTED", now=now, decided_at=now, actor_id=sme_user_id)
     else:
         await _apply_decline(db, window, decision="DECLINED", now=now, decided_at=now, actor_id=sme_user_id)
