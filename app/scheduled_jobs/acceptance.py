@@ -2,10 +2,12 @@
 
 Two Cloud Scheduler jobs on prod-api (app/scheduled_jobs/router.py):
 
-* `funding-advance`, 00:00 and 15:00 ICT: runs `commit_flow.advance_window` for every commit-then-accept round with
-  something due (00:00 Day 13: the commit phase ends and the pledge list is final; 15:00 Day 13: the silence rule),
-  then what the new state asks of the round's loan contracts (`day13_contracts.after_advance`: generated at the end of
-  the commit phase, void on a decline). One round per transaction; idempotent.
+* `funding-advance`, 00:00, 15:00 and 15:40 ICT: runs `close.advance_window` for every commit-then-accept round with
+  something due (00:00 Day 13: the commit phase ends and the pledge list is final; 15:00 Day 13: the silence rule;
+  15:40 Day 14, after the 15:35 no-show step: the round closes and the pooled loan forms with everyone who paid, or
+  waits for pending tickets, at most 2 days), then what the new state asks of the round's loan contracts
+  (`day13_contracts.after_advance`: generated at the end of the commit phase, void when the round fails). One round
+  per transaction; idempotent.
 * `acceptance-reminders`, 09:00 ICT: 3 days and 1 day before the SME's 15:00 Day-13 deadline, the SME is reminded in
   the app, by email and on Zalo (once the ZBS template is approved and ZALO_ZBS_ACCEPTANCE_TEMPLATE_ID is set), each
   logged in acceptance_reminders (one per round, kind and channel). SMS has no provider (D-056): logged SKIPPED. A round
@@ -25,7 +27,7 @@ from app.admin import system_email
 from app.admin.internal_email.schemas import EmailContent
 from app.core.config import settings
 from app.core.timezone import ICT
-from app.direct_transfer import commit_flow
+from app.direct_transfer import close, commit_flow
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.models import AcceptanceReminder, FundingWindow
 from app.lending.models import Project
@@ -57,14 +59,17 @@ async def run_funding_advance(db: AsyncSession, *, now: dt.datetime | None = Non
     ids = (
         await db.execute(
             select(FundingWindow.id)
-            .where(FundingWindow.flow == commit_flow.COMMIT_THEN_ACCEPT, FundingWindow.status.in_(("OPEN", "AWAITING_SME")))
+            .where(
+                FundingWindow.flow == commit_flow.COMMIT_THEN_ACCEPT,
+                FundingWindow.status.in_(("OPEN", "AWAITING_SME", "AWAITING_PAYMENT", "CLOSING")),
+            )
             .order_by(FundingWindow.id)
         )
     ).scalars().all()
     totals = {"advanced": 0, "contracts": 0, "failed": 0}
     for window_id in ids:
         try:
-            window = await commit_flow.advance_window(db, window_id=window_id, now=now)
+            window = await close.advance_window(db, window_id=window_id, now=now)
             totals["contracts"] += await day13_contracts.generate_for_window(
                 db, window=window, storage=funding.evidence_storage(), now=now
             )
