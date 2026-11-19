@@ -16,7 +16,7 @@ Every project is unique today, so step 3 cannot find two open projects for one b
 old indexes back and refuses if two projects now share a business or tax code.
 
 Revision ID: d5c1e8a7f302
-Revises: b7e3c1d9a420
+Revises: c2f8a6d4e917
 Create Date: 2026-11-19
 
 """
@@ -28,7 +28,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "d5c1e8a7f302"
-down_revision: Union[str, Sequence[str], None] = "b7e3c1d9a420"
+down_revision: Union[str, Sequence[str], None] = "c2f8a6d4e917"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

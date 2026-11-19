@@ -11,7 +11,7 @@ from conftest import ALEMBIC_COMMAND, ALEMBIC_DATABASE_URL, ROOT
 from tests.ledger.test_migration import _admin_connect_kwargs
 
 DB = "test_db_one_borrower_migration"
-BEFORE = "b7e3c1d9a420"
+BEFORE = "c2f8a6d4e917"
 
 
 def test_migration_closes_ended_projects_and_downgrade_refuses_shared_codes():
