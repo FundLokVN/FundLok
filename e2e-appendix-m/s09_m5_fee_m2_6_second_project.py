@@ -15,14 +15,20 @@ with c() as cl:
     invoices = cl.get("/admin/funding/fee-invoices", headers=A).json()
     inv = [i for i in invoices if i["window_id"] == st["p1"]["window"]["id"]][0]
     record("5.6 one SME invoice = 3% x confirmed + VAT, due in 7 calendar days, not netted",
-           (inv["fee_vnd"], inv["vat_vnd"], inv["total_vnd"]) == (3_000_000, 300_000, 3_300_000),
+           (inv["fee_vnd"], inv["vat_vnd"], inv["total_vnd"]) == (2_700_000, 270_000, 2_970_000),
            f"fee {inv['fee_vnd']:,} + VAT {inv['vat_vnd']:,} = {inv['total_vnd']:,}; issued {inv['issued_at']} due {inv['due_at']}")
     mail = latest_mail(st[sme_key]["email"], "activation fee", since=inv["issued_at"].replace("Z", "+00:00")) or {}
     txt = (mail.get("HTML", "") + mail.get("Text", "")).lower()
-    record("5.6 separate QR for the fee", "vietqr" in str(inv).lower() or "qr" in txt,
-           "no QR in the invoice API or the email; the email says to reply for FundLok's account details")
-    record("5.7 late interest on an unpaid SME fee (SME agreement 5.4: Civil Code Arts. 357, 468)", inv["late_fee_vnd"] > 0,
-           f"late_fee_vnd={inv['late_fee_vnd']} (late_fee_bps_per_day=0)")
+    record("5.6 the fee email gives FundLok's own account (Techcombank 116889688) and the transfer memo",
+           "116889688" in txt and inv["reference_code"].lower() in txt,
+           f"email '{mail.get('Subject')}': account {'116889688' in txt}, memo {inv['reference_code'].lower() in txt}")
+    html = mail.get("HTML", "")
+    qr_imgs = [m for m in __import__("re").findall(r"<img[^>]+>", html) if "logo" not in m.lower()]
+    record("5.6 a separate VietQR for the fee on the invoice and in the email",
+           bool(qr_imgs) or any("qr" in k.lower() for k in inv.keys()),
+           f"no QR image in the email (only the logo) and no QR field in the invoice API; keys {sorted(inv.keys())}")
+    record("5.7 no late interest on an unpaid SME fee", inv.get("late_fee_vnd", 0) == 0,
+           f"late_fee_vnd={inv.get('late_fee_vnd')}")
 
     # M2.6: the same SME, P1 repaying, tries the same business again and then another business
     base = {"legal_name": "CONG TY TNHH P1 E2E", "industry": "Retail Trade",

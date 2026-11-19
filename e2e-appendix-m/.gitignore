@@ -1,3 +1,4 @@
 # run output: state.json holds short-lived access tokens; results, schedules and generated PDFs are per run
 out/
 __pycache__/
+logs/

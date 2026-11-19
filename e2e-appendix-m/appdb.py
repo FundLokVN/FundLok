@@ -18,7 +18,15 @@ import e2e_lib as L  # noqa: F401  (sets cwd, sys.path, DATABASE_URL)
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    """Run one coroutine on a fresh event loop, then drop the engine's pooled connections: they are bound to the loop
+    that opened them, and a script may call several helpers (several loops) in a row."""
+    async def wrapped():
+        from app.core import database
+        try:
+            return await coro
+        finally:
+            await database.engine.dispose()
+    return asyncio.run(wrapped())
 
 
 def mint_staff_sessions() -> dict:
@@ -89,3 +97,74 @@ def run_jobs(clocks: list[dt.datetime]) -> list[dict]:
 def openapi_paths() -> list[str]:
     from app.main import app
     return list(app.openapi()["paths"].keys())
+
+
+# --------------------------------------------------------------------------- commit-then-accept (Money flow FINAL v1.0)
+def _fake_neac(monkeypatch_target):
+    """NEAC verifies the SME's enterprise signature; it cannot be reached with a test certificate. Same approach as
+    conftest.fake_neac: the PDF carries %FAKE-NEAC-SIGNER:<id> and the fake returns that signer."""
+    import re as _re
+
+    from app.market.investor_agreement import neac
+
+    async def _verify(content: bytes, filename: str):
+        ids = [m.decode() for m in _re.findall(rb"%FAKE-NEAC-SIGNER:([A-Za-z0-9]+)", content)] or ["000000000000"]
+        sigs = [neac.NeacSignature(
+            issuer={"cn": "FPT Certification Authority SHA256", "o": "FPT CORPORATION", "c": "VN"},
+            signer={"cn": "E2E SIGNER", "c": "VN", "cccd": f"CCCD:{i}"}, intact="Không bị thay đổi",
+            certificate_validity="Thời điểm có hiệu lực: 2026-03-18; Thời điểm hết hiệu lực: 2027-03-26",
+            validity="Hợp lệ tại thời điểm ký", timestamp_status="Không",
+            signed_time="Ngày 19 tháng 11 năm 2026, 10:00:00 [UTC+07:00]", reason_invalidity="",
+            ocsp="Chứng thư số chưa bị thu hồi.", crl="Chứng thư số chưa bị thu hồi") for i in ids]
+        return neac.NeacResult(message="Success", signatures=sigs)
+
+    monkeypatch_target.verify_document = _verify
+
+
+def sme_sign_window_contracts(window_id: str, sme_user_id: str, tax_id: str, only: list[str] | None = None) -> list[str]:
+    """The SME signs each lender's Day-13 loan contract with its enterprise certificate: the app's own
+    day13_contracts.record_sme_signed, with NEAC faked (see _fake_neac). Returns the contract numbers signed."""
+    async def go():
+        from sqlalchemy import select
+
+        from app.core.database import SessionLocal
+        from app.core.timezone import ICT
+        from app.direct_transfer.models import FundingWindow
+        from app.market import day13_contracts, funding
+        from app.market.investor_agreement import neac
+        from app.users.models import User
+        from tests.loans.test_listing_signing import _fill_signature_fields, _markers
+        _fake_neac(neac)
+        storage = funding.evidence_storage()
+        done = []
+        async with SessionLocal() as db:
+            window = await db.get(FundingWindow, uuid.UUID(window_id))
+            actor = await db.get(User, uuid.UUID(sme_user_id))
+            for row in await day13_contracts.contracts_for(db, window.id):
+                if row.status != "GENERATED" or (only and row.contract_no not in only):
+                    continue
+                pdf = await storage.get(row.file_key, max_bytes=10_000_000)
+                signed = _markers(_fill_signature_fields(pdf, ("SME_Signature",)), f"FAKE-NEAC-SIGNER:{tax_id}")
+                await day13_contracts.record_sme_signed(
+                    db, window=window, row=row, content=signed, file_name="signed.pdf", storage=storage,
+                    now=dt.datetime.now(ICT), actor=actor)
+                done.append(row.contract_no)
+            await db.commit()
+        return done
+    return _run(go())
+
+
+def run_job(name: str, **kw) -> dict:
+    """A Cloud Scheduler job, run in-process with the real clock (the /internal/jobs routes need Google OIDC)."""
+    async def go():
+        from app.core.database import SessionLocal
+        from app.scheduled_jobs import acceptance, day14
+        fn = {"funding-advance": acceptance.run_funding_advance,
+              "acceptance-reminders": acceptance.send_acceptance_reminders,
+              "day14-cutoff": day14.run_day14_cutoff,
+              "day14-transfer-reminders": day14.send_day14_reminders}[name]
+        async with SessionLocal() as db:
+            out = await fn(db, **kw)
+            await db.commit()
+            return out
+    return _run(go())

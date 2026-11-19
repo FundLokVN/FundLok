@@ -233,3 +233,41 @@ def reserve(cl, tok: str, window_id: str, amount: int):
     return cl.post(f"/funding/windows/{window_id}/reservations",
                    json={"amount_vnd": amount, "ack_risk_disclosure": True, "terms_version": L.TERMS_VERSION},
                    headers=H(tok) | idem())
+
+
+# --------------------------------------------------------------------------- commit-then-accept (Money flow FINAL v1.0)
+def commit(cl, tok: str, window_id: str, amount: int, account_id: str):
+    """A pledge: press Confirm. No OTP, nothing signed, no money moves (standing offer Art. 3.1)."""
+    return cl.post(f"/funding/windows/{window_id}/commitments",
+                   json={"amount_vnd": amount, "ack_risk_disclosure": True, "terms_version": L.TERMS_VERSION,
+                         "payment_account_id": account_id}, headers=H(tok) | idem())
+
+
+def set_phone(user_id: str, phone: str) -> None:
+    """A verified Vietnamese mobile on the account: the Day-0/Day-13 guarantor code and the Day-14 contract code go to
+    it (Zalo; in this run they are written to logs/api.log instead)."""
+    L.psql(f"update users set phone = '{phone}', phone_verified_at = now() where id = '{user_id}'")
+
+
+def new_sme_project(key: str, email: str, owner: str, company: str, tax: str, amount: int, acct: str,
+                    monthly_revenue: int = 256_250_000) -> dict:
+    """Onboard an SME, take its project to approval and open its funding window (resumable)."""
+    st = load()
+    if st.get(key, {}).get("project"):
+        return st[key]["project"]
+    sme = onboard(key, email, owner, "SME", kyb_name=company, tax_code=tax)
+    p = make_project(key, company, tax, amount, 2, monthly_revenue)
+    fill_kyb_like_provider(sme["id"], "1 Le Duan, Quan 1, TP HCM", owner.upper())
+    w = open_window(key, p, {"holder_type": "ENTITY", "bank_bin": "970436", "account_number": acct, "account_name": company})
+    st = load()
+    st[key]["project"] = p | {"window": w, "tax": tax, "sme": key, "acct": acct, "company": company}
+    save(st)
+    return st[key]["project"]
+
+
+def staff_fields(cl, A: dict, transfer_id: str, *, amount: int, when, payer: dict, payee_acct: str, memo: str, txn: str):
+    """Staff key in what the receipt shows (receipt OCR is off locally)."""
+    return cl.post(f"/admin/funding/transfers/{transfer_id}/fields",
+                   json={"amount_vnd": amount, "transferred_at": when.isoformat(), "payer_name": payer["name"],
+                         "payer_account": payer["account_number"], "payee_account": payee_acct, "memo": memo,
+                         "bank_txn_id": txn, "reason": "E2E: read from the screenshot"}, headers=A)

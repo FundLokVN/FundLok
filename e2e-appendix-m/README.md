@@ -1,6 +1,6 @@
-# Appendix M end-to-end run (FundLok handbook v3.1)
+# Appendix M end-to-end run (FundLok handbook v3.22, Money flow FINAL v1.0)
 
-Scripts that drive the handbook's Appendix M test script against a **local** FundLok stack, through the real API, and record a PASS / FAIL / PARTIAL result for every step. They produced the pre-launch test report of 14 Nov 2026 (backend `main` @ `ece64a4`, frontend `production` @ `0870c55`). A clean run from an empty database takes about 5 minutes.
+Scripts that drive the handbook's Appendix M test script against a **local** FundLok stack, through the real API, and record a PASS / FAIL / PARTIAL result for every step. They produced the pre-launch test report of 14 Nov 2026 (`reference/results-2026-11-15.jsonl`, the old pay-at-commit flow) and, rewritten for the commit-then-accept flow (pledges, Day-13 signing and decision, Day-14 contract code, 15-minute QR, 14:45 / 15:00 / 15:30, late money as a top-up pledge), the run of 19 Nov 2026 on backend `main` @ `1722dd1` (`reference/results-2026-11-19.jsonl`). A clean run takes about 8 minutes.
 
 > **Local, throwaway database only.** The run creates accounts and projects, moves deadlines directly in the database to fast-forward time, and runs worker jobs with a fake clock. Never point it at a shared, staging or production database.
 
@@ -10,11 +10,11 @@ Scripts that drive the handbook's Appendix M test script against a **local** Fun
 2. A **fresh** database, migrated and seeded:
    ```bash
    docker compose up -d postgres mailpit minio
-   DATABASE_URL=postgresql+psycopg2://fundlok:fundlok@localhost:5433/fundlok_dev alembic upgrade head
-   docker compose exec -T postgres psql -U fundlok -d fundlok_dev -v ON_ERROR_STOP=1 < scripts/seed_data.sql
+   DATABASE_URL=postgresql+psycopg2://fundlok:fundlok@localhost:5433/fundlok_e2e alembic upgrade head
+   docker compose exec -T postgres psql -U fundlok -d fundlok_e2e -v ON_ERROR_STOP=1 < scripts/seed_data.sql
    ```
    The seed provides `admin@fundlok.vn` and `sysadmin@fundlok.vn`.
-3. The API running from the backend folder with its normal `.env`, on <http://localhost:8000>: `uvicorn app.main:app --port 8000`.
+3. The API on <http://localhost:8000>, started with **`../venv/Scripts/python serve_e2e.py`** (launch config `api-e2e`). It uses the throwaway database `fundlok_e2e`, `FUNDING_WINDOW_FLOW=COMMIT_THEN_ACCEPT`, FundLok's fee account (`FUNDLOK_FEE_*`) and `PHONE_OTP_CHANNEL=log`, so the Zalo codes (Day-13 guarantor, Day-14 contract) go to `logs/api.log`, where the scripts read them. No real phone gets a message. Create the database once: `docker exec repo-postgres-1 psql -U fundlok -d postgres -c "CREATE DATABASE fundlok_e2e OWNER fundlok;"`. `e2e_lib` refuses to run against any other database.
 4. Optional: the frontend on <http://localhost:3000>, used only by the wording scan in `s13`.
 5. Python: the backend's own virtualenv. It already has httpx, Pillow, pypdf, PyYAML and the app's dependencies.
 6. [`uv`](https://docs.astral.sh/uv/) on PATH. `builders.cic_pdf` uses it to build a CIC report PDF with a Vietnamese text layer (fpdf2) in a throwaway environment.
@@ -25,7 +25,7 @@ Environment overrides, all optional: `FUNDLOK_BACKEND` (default `..`), `DATABASE
 
 ```bash
 cd e2e-appendix-m
-../venv/Scripts/python run_all.py --fresh      # Windows; on macOS/Linux: ../.venv/bin/python
+../venv/Scripts/python run_all.py --fresh --reset-db   # wipe, migrate and seed fundlok_e2e, then run everything
 ```
 
 - `--fresh` clears `out/`. Use it together with a freshly migrated and seeded database: the scripts reuse fixed emails and tax codes.
@@ -37,7 +37,21 @@ cd e2e-appendix-m
   - `out/p1_standing_offer.txt`: text of the generated Standing Offer.
   - A summary printed at the end.
 
-## What each script covers
+## What each script covers (19 Nov 2026 rewrite)
+
+| Script | Appendix M | What it does |
+|---|---|---|
+| `s03_lenders.py` | 1.4 | Lenders A-F with approved eKYC, bank accounts and a verified mobile; no agreement pre-recorded (it is signed on the first Day 14) |
+| `s04_m3_commitments.py` | 3.1-3.7, 3.10 | Pledges on P1 (A40 B30 C20 D10), withdrawal, minimum, capacity, full window, reopening after a withdrawal; P2 last ticket; sets up P3-P5 (new SMEs) |
+| `s05_m5_disbursement.py` | 3.8-3.9, 4.1, 4.2, 4.8, 5.x, 6.1, 6.9 | P1: end of Day 12 (contracts), reminders, Accept needs signing (NEAC faked), guarantor Zalo code, Day-14 reminders, contract code, QR with its own code, new QR, on-time receipts, 14:45 / 15:00 / 15:30, SME receipt and silence, pooled loan, SME fee |
+| `s06_m6_no_show.py` | 6.4 | D's unlock: fresh eKYC, then the final sentence (vi and en) |
+| `s07_m7_schedule.py` | 7.1, 7.2, 7.5, 7.7 | Each lender's schedule against the handbook 10.7 formulas at P1's actual rate |
+| `s10_m4_decisions.py` | 4.3-4.8 | P2 Decline, P3 silence at 70%, P4 manual accept at 40% (noon cut-off shown), P5 silence at 40%, a decision after the deadline |
+| `s11_m6_p3_day14.py` | 6.5-6.8, 6.10 | P3 Day 14: E on time, F late money (expired code) -> top-up pledge, D's second no-show -> closed, loan below 50% goes ahead, staff waiver |
+
+The 14 Nov table below is kept for the scripts that did not change (s01, s02, s08, s09, s12-s14 were adjusted, not rewritten).
+
+## What each script covered on 14 Nov
 
 | Script | Appendix M | What it does |
 |---|---|---|
@@ -75,6 +89,9 @@ Local machines lack some external services. Each workaround uses the app's own c
 | SME signing (Service Agreement, Standing Offer, Loan Contract) | Needs CA-signed PDFs verified with NEAC | `appdb.attach_and_activate`: `conftest.attach_signed_listing_documents`, then the real `activate_project_if_approved` |
 | Lender Service Agreement | Needs a Zalo OTP and a signed PDF | `appdb.record_agreements`, as `conftest.make_eligible_investor` does |
 | Receipt OCR | Off locally | Staff key in the transfer fields through the admin API |
+| Day-13 SME signature on each lender's contract | NEAC cannot verify a test certificate | `appdb.sme_sign_window_contracts`: the app's own `day13_contracts.record_sme_signed`, NEAC faked as `conftest.fake_neac` does |
+| Cloud Scheduler jobs (funding-advance, acceptance and Day-14 reminders, day14-cutoff) | The `/internal/jobs` routes need Google OIDC | `appdb.run_job`: the same service functions, in-process, real clock |
+| Zalo codes | No Zalo sends in a test | `PHONE_OTP_CHANNEL=log` (DEBUG only); scripts read the code from `logs/api.log` |
 | Day 13 / Day 14 / 24 h / 7 days | No clock override in the app | `psql` updates to `tranches.hold_expires_at`, `tranches.confirm_deadline`, `funding_windows.window_end` and `repayment_days.due_date`, followed by the staff Advance route, or `appdb.run_jobs` with a fixed clock |
 
 ## Manual checklist (browser)
@@ -95,7 +112,7 @@ These were checked by hand in the original run. `s14` records them, so edit it i
 Wipe and re-create the throwaway database, then repeat Prerequisites step 2:
 
 ```bash
-docker compose exec -T postgres psql -U fundlok -d fundlok_dev -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+../venv/Scripts/python run_all.py --fresh --reset-db   # only ever touches fundlok_e2e
 ```
 
 ## Reference and related documents

@@ -25,7 +25,13 @@ BACKEND = os.path.abspath(os.environ.get("FUNDLOK_BACKEND", os.path.join(HERE, "
 OUT = os.path.join(HERE, "out")
 os.makedirs(OUT, exist_ok=True)
 
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://fundlok:fundlok@localhost:5433/fundlok_dev")
+os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://fundlok:fundlok@localhost:5433/fundlok_e2e")
+os.environ.setdefault("FUNDING_WINDOW_FLOW", "COMMIT_THEN_ACCEPT")  # Money flow FINAL v1.0 (serve_e2e.py sets the same)
+os.environ.setdefault("DEBUG", "True")
+os.environ.setdefault("PHONE_OTP_CHANNEL", "log")
+os.environ.setdefault("FUNDLOK_FEE_BANK_BIN", "970407")
+os.environ.setdefault("FUNDLOK_FEE_ACCOUNT_NUMBER", "116889688")
+os.environ.setdefault("FUNDLOK_FEE_ACCOUNT_NAME", "CONG TY CO PHAN FUNDLOK")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 if HERE not in sys.path:
@@ -38,7 +44,11 @@ API = os.environ.get("E2E_API", "http://localhost:8000")
 FRONTEND = os.environ.get("E2E_FRONTEND", "http://localhost:3000")
 MAILPIT = os.environ.get("E2E_MAILPIT", "http://localhost:8025")
 PG_CONTAINER = os.environ.get("E2E_PG_CONTAINER", "repo-postgres-1")
-PG_USER, PG_DB = "fundlok", "fundlok_dev"
+PG_USER = "fundlok"
+PG_DB = os.environ["DATABASE_URL"].rsplit("/", 1)[-1].split("?")[0]
+if PG_DB != "fundlok_e2e" and not os.environ.get("E2E_I_KNOW_THIS_IS_THROWAWAY"):
+    raise SystemExit(f"Refusing to run against {PG_DB!r}: the e2e run edits and wipes data. Use fundlok_e2e.")
+API_LOG = os.path.join(HERE, "logs", "api.log")  # written by serve_e2e.py
 
 PW = "E2eTest#2026"          # password of every account this run creates (local test accounts only)
 TERMS_VERSION = "2026-10-30"  # app/market/funding.py INVESTOR_TERMS_VERSION
@@ -150,3 +160,31 @@ def previous_weekdays(n: int, before: dt.date | None = None) -> list[dt.date]:
         if d.weekday() < 5:
             out.append(d)
     return list(reversed(out))
+
+
+# --------------------------------------------------------------------------- one-time codes (PHONE_OTP_CHANNEL=log)
+def log_mark() -> int:
+    """Current size of the API log, so a later read only sees codes issued after this point."""
+    return os.path.getsize(API_LOG) if os.path.exists(API_LOG) else 0
+
+
+def code_from_log(mark: int, needle: str, wait: int = 10) -> str:
+    """The newest 6-digit code logged after `mark` on a line containing `needle` (e.g. a ticket reference)."""
+    import re
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if os.path.exists(API_LOG):
+            with open(API_LOG, encoding="utf-8", errors="replace") as f:
+                f.seek(mark)
+                hits = [ln for ln in f.read().splitlines() if needle in ln and "PHONE_OTP_CHANNEL=log" in ln]
+            if hits:
+                m = re.search(r": (\d{6}) \(PHONE_OTP_CHANNEL=log\)", hits[-1])
+                if m:
+                    return m.group(1)
+        time.sleep(0.5)
+    raise RuntimeError(f"no code for {needle!r} in {API_LOG} (is the API running through serve_e2e.py?)")
+
+
+def err(r) -> str:
+    return r.headers.get("X-Error-Code", "")
+

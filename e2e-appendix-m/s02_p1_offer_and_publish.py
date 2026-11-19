@@ -58,8 +58,16 @@ with c() as cl:
     record("2.5 sign in one step (SME agreement + standing offer), guarantor signs", "PARTIAL",
            "three separate CA-signed PDF uploads, each verified with NEAC; not executable locally (rows attached as "
            "conftest.attach_signed_listing_documents does)")
-record("4.7 / 10.3 Day-13 15:00 deadline and Day-14 disbursement exist", False,
-       f"window_start={window['window_start']} window_end={window['window_end']} (open time + 14 days, no 15:00 anchor)")
+with c() as cl:
+    ww = cl.get(f"/funding/listings/{window['listing_id']}/window", headers=A).json()
+ict = lambda s: s and __import__("datetime").datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(L.ICT)  # noqa: E731
+sd, pd = ict(ww.get("sme_deadline_at")), ict(ww.get("pay_deadline_at"))
+record("10.3 the round runs on the FINAL v1.0 flow: pledges to the end of Day 12, SME decision by 15:00 Day 13, "
+       "sign and pay by 14:45 Day 14",
+       ww.get("flow") == "COMMIT_THEN_ACCEPT" and sd and sd.strftime("%H:%M") == "15:00" and pd and pd.strftime("%H:%M") == "14:45"
+       and (pd.date() - sd.date()).days == 1,
+       f"flow {ww.get('flow')}; commit closes {ict(ww.get('commit_closes_at'))}; SME deadline {sd}; pay deadline {pd}; "
+       "NB production must set FUNDING_WINDOW_FLOW=COMMIT_THEN_ACCEPT (default LEGACY)")
 st = load()
 st["p1"] = p1 | {"sme": "sme1", "window": window}
 save(st)
