@@ -32,6 +32,11 @@ class DirectTransferParams:
     close_wait_days: int = 2  # PROVISIONAL(Q-D4)
     refund_days: int = 2  # Q-020
     working_days_per_month: int = 21  # Q-011 resolved A
+    # Automatic extension (docs/specs/repayment_schedule/automatic-extension.md, D-042)
+    extension_filing_last_day: int = 5  # the SME files month m by the 5th of month m+1 (ICT)
+    extension_days_per_month: int = 21  # D: Δ = ceil(U / due x 21), then up to a multiple of 5
+    extension_day_step: int = 5
+    extension_basis_days: int = 252  # extra interest P x r x Δ / 252
     stub_basis_days: int = 252  # PROVISIONAL(Q-D5): business days per year
     rate_cap_pct: int = 20  # INV-5 / Dieu 468
     # --- repayment (docs/specs/direct_transfer/repayment-collection.md) ---
