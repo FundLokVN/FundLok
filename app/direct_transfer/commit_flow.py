@@ -41,6 +41,7 @@ from app.notifications.models import (
     EVENT_WINDOW_DECLINED,
 )
 from app.notifications.service import create_notification
+from app.projects.borrower import close_project_if_finished
 from app.users.models import User
 from app.utils.audit import append_audit
 
@@ -419,6 +420,7 @@ async def _apply_decline(
     listing = await db.get(Listing, window.listing_id)
     if listing is not None:
         listing.status = "CANCELLED"
+    await close_project_if_finished(db, window.project_id, "ROUND_FAILED")
 
 
 async def _record_decision(

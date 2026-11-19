@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -6,11 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from fastapi import HTTPException, status
 
+from starlette.concurrency import run_in_threadpool
+
 from app.direct_transfer.models import PaymentAccount
-from app.lending.models import LoanApplication, Project, ProjectOwnership
+from app.lending.models import LoanApplication, LoanApplicationDocument, Project, ProjectOwnership
 from app.projects import borrower
-from app.projects.schemas import ProjectCreate
+from app.projects.schemas import LoanApplicationCreateInline, ProjectCreate
+from app.uploads.models import CicSummary, EInvoiceSummary, TaxFilingSummary
+from app.uploads.schemas import SIGNED_DOCUMENT_TYPES
 from app.users.models import Role, User
+from app.utils.audit import append_audit
+from app.utils.r2 import copy_object
 
 
 from sqlalchemy.exc import IntegrityError
@@ -90,17 +97,138 @@ async def create_project(
     except IntegrityError as e:
         await db.rollback()
         err_msg = str(e.orig)
-        # The tax code's business is already on FundLok, however its code was written (uq_projects_tax_business).
-        if "tax_id" in err_msg or "tax_business" in err_msg:
+        # The tax code's business already has a project open on FundLok, however its code was written
+        # (uq_projects_one_open_per_business / uq_projects_one_open_per_tax_id).
+        if "uq_projects_one_open_per" in err_msg:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="This business already has a project on FundLok. Contact support if you believe this is an error",
+                detail="This business already has a request in progress on FundLok. Contact support if you believe this is an error",
                 headers={"X-Error-Code": borrower.DUPLICATE_TAX_CODE},
             )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Database integrity error: check unique fields or constraints."
         )
+
+
+NO_APPROVED_REQUEST = "NO_APPROVED_REQUEST"
+
+
+async def _repeat_source(db: AsyncSession, user_id: UUID) -> tuple[Project, LoanApplication] | None:
+    """The SME's newest ended project whose request staff approved: what a repeat request copies. A request that was
+    only ever rejected has nothing vouched for, so the business goes through the full application instead."""
+    return (
+        await db.execute(
+            select(Project, LoanApplication)
+            .join(ProjectOwnership, ProjectOwnership.project_id == Project.id)
+            .join(LoanApplication, LoanApplication.project_id == Project.id)
+            .where(
+                ProjectOwnership.user_id == user_id,
+                Project.status.in_(borrower.ENDED_PROJECT_STATUSES),
+                LoanApplication.admin_approval == "APPROVED",
+            )
+            .order_by(Project.created_at.desc(), LoanApplication.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+
+
+async def repeat_project(
+    db: AsyncSession, loan: LoanApplicationCreateInline, current_user: User
+) -> tuple[Project, LoanApplication]:
+    """A business borrowing again asks only for the new amount (and term): the company details, the evidence it
+    uploaded (charter, registration, e-invoices, tax filings, CIC) with what was parsed from it, and its figures are
+    copied from its last approved request, and the new request goes straight to review. The listing documents are
+    not copied: they carry the approved terms, so they are signed again after this request's approval."""
+    if current_user.role != Role.SME.value:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only SMEs can create projects")
+    if await borrower.unfinished_project(db, current_user.id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=borrower.OPEN_PROJECT_DETAIL,
+            headers={"X-Error-Code": borrower.SME_HAS_OPEN_PROJECT},
+        )
+    source = await _repeat_source(db, current_user.id)
+    if source is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No approved earlier request to copy from: fill in the full application",
+            headers={"X-Error-Code": NO_APPROVED_REQUEST},
+        )
+    old_project, old_application = source
+    project_data = ProjectCreate.model_construct(  # copied as stored: validated when it was first created
+        legal_name=old_project.legal_name,
+        tax_id=old_project.tax_id,
+        industry=old_project.industry,
+        address=old_project.address,
+        incorporation_date=old_project.incorporation_date,
+        employee_count=old_project.employee_count,
+        company_size=None,
+        loan_application=loan.model_copy(
+            update={
+                "duration_months": loan.duration_months or old_application.duration_months,
+                "purpose": loan.purpose or old_application.purpose,
+                "repayment_preference": loan.repayment_preference or old_application.repayment_preference,
+            }
+        ),
+    )
+    project, application = await create_project(db, project_data, current_user)
+
+    documents = (
+        await db.execute(
+            select(LoanApplicationDocument).where(
+                LoanApplicationDocument.loan_application_id == old_application.id,
+                LoanApplicationDocument.status == "UPLOADED",
+                LoanApplicationDocument.document_type.not_in(SIGNED_DOCUMENT_TYPES),
+            )
+        )
+    ).scalars().all()
+    copied: dict[UUID, UUID] = {}
+    for doc in documents:
+        # Each application owns its files (file_key is unique, and a re-upload deletes the old object).
+        file_key = f"application_documents/{current_user.id}/{application.id}/{doc.file_key.rsplit('/', 1)[-1]}"
+        await run_in_threadpool(copy_object, doc.file_key, file_key)
+        twin = LoanApplicationDocument(
+            loan_application_id=application.id, document_type=doc.document_type, file_key=file_key,
+            original_filename=doc.original_filename, content_type=doc.content_type,
+            file_size_bytes=doc.file_size_bytes, status="UPLOADED", uploaded_at=doc.uploaded_at,
+        )
+        db.add(twin)
+        await db.flush()
+        copied[doc.id] = twin.id
+    for summary_model in (EInvoiceSummary, TaxFilingSummary, CicSummary):
+        summary = (
+            await db.execute(select(summary_model).where(summary_model.loan_application_id == old_application.id))
+        ).scalar_one_or_none()
+        if summary is not None and summary.document_id in copied:
+            values = {
+                c.name: getattr(summary, c.name)
+                for c in summary_model.__table__.columns
+                if c.name not in ("id", "created_at")
+            }
+            db.add(summary_model(**values | {
+                "id": uuid.uuid4(), "loan_application_id": application.id, "document_id": copied[summary.document_id],
+            }))
+
+    application.self_reported_figures = old_application.self_reported_figures
+    application.figures_updated_at = old_application.figures_updated_at
+    application.guarantor_address = old_application.guarantor_address
+    application.status = "SUBMITTED"
+    application.submitted_at = datetime.now(timezone.utc)
+    append_audit(
+        db, entity_type="LOAN_APPLICATION", entity_id=application.id, action="APPLICATION_REPEATED",
+        actor_id=current_user.id,
+        after_state={"from_application_id": str(old_application.id), "documents_copied": len(copied)},
+    )
+    await db.flush()
+    application = (
+        await db.execute(
+            select(LoanApplication)
+            .where(LoanApplication.id == application.id)
+            .options(selectinload(LoanApplication.documents))
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    return project, application
 
 
 async def get_my_projects(db: AsyncSession, current_user: User):
@@ -118,6 +246,8 @@ async def get_my_projects(db: AsyncSession, current_user: User):
                 LoanApplication.documents
             )
         )
+        # Newest first: the dashboard shows the current request first, earlier ones after it.
+        .order_by(Project.created_at.desc())
     )
     return result.scalars().all()
 

@@ -34,6 +34,7 @@ from app.direct_transfer.tranche_state import transition_tranche
 from app.direct_transfer.tranches import confirm_lapsed_tranches
 from app.direct_transfer.windows import confirmed_total, lock_window
 from app.lending.models import Contract, Holding, Listing
+from app.projects.borrower import close_project_if_finished
 from app.repayment_schedule.calendar import BusinessDayCalendar
 from app.repayment_schedule.origination import compute_origination, originate_facility
 from app.repayment_schedule.state_machine import apply_transition
@@ -120,6 +121,7 @@ async def cancel_window(
     listing = await db.get(Listing, window.listing_id)
     listing.status = "CANCELLED"
     await db.flush()
+    await close_project_if_finished(db, window.project_id, "ROUND_CANCELLED")
     await log_event(
         db, entity_type="WINDOW", entity_id=window.id, event_type="WINDOW_CANCELLED", now=now, actor_id=staff_id,
         actor_role="ADMIN", reason=reason,
@@ -273,6 +275,7 @@ async def finalize_window(
         window.status = "FAILED"
         listing.status = "CANCELLED"
         await db.flush()
+        await close_project_if_finished(db, window.project_id, "ROUND_FAILED")
         await log_event(
             db, entity_type="WINDOW", entity_id=window.id, event_type="WINDOW_CLOSED", now=now,
             payload={"outcome": "FAILED", "confirmed_total_vnd": total, "min_raise_vnd": window.min_raise_vnd, "refunds": len(confirmed)},
@@ -381,6 +384,7 @@ async def _close_repaying_investments(
         window.status = "FAILED"
         listing.status = "CANCELLED"
         await db.flush()
+        await close_project_if_finished(db, window.project_id, "ROUND_FAILED")
         await log_event(
             db, entity_type="WINDOW", entity_id=window.id, event_type="WINDOW_CLOSED", now=now,
             payload={"outcome": "FAILED", "confirmed_total_vnd": 0, "mode": "REPAY_FROM_APPROVAL"},

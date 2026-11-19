@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import relationship
@@ -28,6 +29,8 @@ TAX_BUSINESS_SQL = (
     "CASE WHEN tax_id ~ '^[0-9]{12}$' THEN tax_id "
     "WHEN tax_id ~ '^[0-9]{10}(-[0-9]{3})?$' THEN left(tax_id, 10) END"
 )
+# A project still in progress (borrower.ENDED_PROJECT_STATUSES are the ended ones).
+OPEN_PROJECT_SQL = "status NOT IN ('CLOSED', 'ARCHIVED')"
 
 
 class Project(Base):
@@ -35,11 +38,12 @@ class Project(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     legal_name = Column(Text, nullable=False)
-    tax_id = Column(Text, unique=True)
-    # The business the tax code belongs to, so one business has one project however its code is written: a branch
-    # ("0123456789-001") is its company's 10 digits, a 12-digit personal number (household business) is itself.
-    # Null for a code in neither shape (older rows), which the unique index then leaves alone.
-    # docs/specs/projects/one-borrower.md.
+    # Unique among open projects only (uq_projects_one_open_per_tax_id): a business borrows again on a new project.
+    tax_id = Column(Text)
+    # The business the tax code belongs to, so one business has one open project however its code is written: a
+    # branch ("0123456789-001") is its company's 10 digits, a 12-digit personal number (household business) is
+    # itself. Null for a code in neither shape (older rows), which the unique index then leaves alone.
+    # docs/specs/projects/one-borrower.md (v1.1: one project in progress per business, one new project per loan).
     tax_business = Column(Text, Computed(TAX_BUSINESS_SQL, persisted=True))
     industry = Column(Text)
     address = Column(JSONB)
@@ -59,7 +63,13 @@ class Project(Base):
     ownerships = relationship("ProjectOwnership", back_populates="project", cascade="all, delete-orphan")
     loan_applications = relationship("LoanApplication", back_populates="project")
 
-    __table_args__ = (Index("uq_projects_tax_business", "tax_business", unique=True),)
+    __table_args__ = (
+        Index(
+            "uq_projects_one_open_per_business", "tax_business", unique=True,
+            postgresql_where=text(OPEN_PROJECT_SQL),
+        ),
+        Index("uq_projects_one_open_per_tax_id", "tax_id", unique=True, postgresql_where=text(OPEN_PROJECT_SQL)),
+    )
 
 
 class ProjectOwnership(Base):

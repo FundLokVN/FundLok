@@ -42,6 +42,7 @@ from app.notifications.service import create_notification
 from app.repayment_schedule.calendar import BusinessDayCalendar
 from app.repayment_schedule.models import Facility, ScheduledPayment
 from app.repayment_schedule.state_machine import apply_transition
+from app.projects.borrower import close_project_if_finished
 from app.users.models import User
 
 
@@ -628,6 +629,7 @@ async def maybe_close_facility(db: AsyncSession, window: FundingWindow, *, now: 
         return False
     window.status = "REPAID"
     await db.flush()
+    await close_project_if_finished(db, window.project_id, "REPAID")
     await log_event(
         db, entity_type="WINDOW", entity_id=window.id, event_type="WINDOW_REPAID", now=now,
         payload={"facility_ids": [str(f) for f in facility_ids]},
