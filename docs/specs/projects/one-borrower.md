@@ -27,7 +27,7 @@ D-016 (Lok, 2026-10-28): at most 100M outstanding per borrower on FundLok, and o
 - The scope of the borrower cap (FundLok loans only, or also declared outside debt; `cross_platform_cap_vnd` is 400M, provisional): a separate decision, still open (open question 2).
 - Merging or cleaning existing rows that break the rules: the migration lists them and stops (section 6, rule 6).
 - A "returned to SME" application state (TD-02).
-- Copying a closed project's details into a new one: a UI convenience for Phat, not a rule.
+- ~~Copying a closed project's details into a new one~~: built as the repeat request (section 4, `POST /projects/repeat`, Phat 2026-11-19).
 
 ## 3. Data Model
 
@@ -67,6 +67,21 @@ No change to request or response shapes.
 | 409 | `TAX_CODE_NOT_VERIFIED_BUSINESS` | The SME's business is verified (approved KYB with a tax code) and this is another business |
 | 409 | `SME_HAS_OPEN_PROJECT` | The SME has a project in progress (rule 3). The friendly pre-check |
 | 409 | `DUPLICATE_TAX_CODE` | The business already has a project **in progress** under another account, however its code was written (the database index). A business whose earlier projects have all ended is **not** refused |
+
+### `POST /projects/repeat` (added 2026-11-19)
+
+A business borrowing again sends only `{requested_amount, duration_months}` (the same bounds as `POST /projects`; the
+term defaults to the last request's). The new project copies the company details of the SME's newest ended project
+whose application staff approved; the application copies its purpose, repayment preference, self-reported figures,
+guarantor address, and its uploaded documents (each file copied to the new application's own key) with their parsed
+summaries, and is `SUBMITTED` at once. The signed listing documents are not copied: they carry the approved terms and
+are signed again after this request's approval. Staff review and the score run are unchanged.
+
+| Status | Code | When |
+|---|---|---|
+| 409 | `SME_HAS_OPEN_PROJECT` | The SME has a project in progress |
+| 409 | `NO_APPROVED_REQUEST` | No ended project with an approved application to copy: the business uses the full application |
+| 422 | | Amount or term outside the engine's bounds |
 
 ### `POST /admin/projects/{project_id}/funding-window`, and opening on its own (`publish_if_ready`)
 
@@ -129,6 +144,8 @@ v1.1, as built (`tests/projects/test_one_borrower.py`, `tests/projects/test_one_
 - [x] `test_business_can_reapply_after_its_application_is_rejected`: also closing twice writes one audit row, and a
   second account for the same business is refused by the database while the new project is open
 - [x] `test_migration_closes_ended_projects_and_downgrade_refuses_shared_codes`
+- [x] `test_a_repeat_request_copies_the_last_approved_request_and_goes_to_review`
+- [x] `test_a_repeat_request_takes_a_new_term_and_needs_an_approved_request_to_copy`
 - A second live listing for one SME: `test_an_sme_repaying_a_loan_can_neither_start_nor_list_another_project` and
   `test_the_database_holds_one_live_listing_per_sme` (v1.0, unchanged)
 

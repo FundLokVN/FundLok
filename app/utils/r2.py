@@ -129,6 +129,12 @@ def delete_object(file_key: str, *, bucket: str | None = None) -> None:
     _client().delete_object(Bucket=bucket or settings.R2_BUCKET, Key=file_key)
 
 
+def copy_object(source_key: str, target_key: str, *, bucket: str | None = None) -> None:
+    """Server-side copy within the bucket: a repeat request's own copy of the documents it reuses."""
+    bucket = bucket or settings.R2_BUCKET
+    _client().copy_object(Bucket=bucket, Key=target_key, CopySource={"Bucket": bucket, "Key": source_key})
+
+
 def head_object(file_key: str, *, bucket: str | None = None) -> dict | None:
     """Object metadata ({size, content_type}) or None if the key does not exist."""
     try:

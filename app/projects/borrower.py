@@ -44,6 +44,9 @@ INVALID_TAX_CODE = "INVALID_TAX_CODE"
 TAX_CODE_NOT_VERIFIED_BUSINESS = "TAX_CODE_NOT_VERIFIED_BUSINESS"
 DUPLICATE_TAX_CODE = "DUPLICATE_TAX_CODE"  # raised by the database (uq_projects_one_open_per_business / _tax_id)
 SME_HAS_OPEN_PROJECT = "SME_HAS_OPEN_PROJECT"
+OPEN_PROJECT_DETAIL = (
+    "You already have a project in progress. You can start another once it ends or its loan is repaid in full"
+)
 
 _COMPANY = re.compile(r"^(\d{10})(?:-?(\d{3}))?$")
 _PERSONAL = re.compile(r"^\d{12}$")
@@ -168,10 +171,7 @@ async def check_new_project(db: AsyncSession, *, user_id: UUID, tax_id: str | No
             "This tax code is not the business you verified. A project can only be for your verified business",
         )
     if await unfinished_project(db, user_id) is not None:
-        raise BorrowerRefused(
-            409, SME_HAS_OPEN_PROJECT,
-            "You already have a project in progress. You can start another once it ends or its loan is repaid in full",
-        )
+        raise BorrowerRefused(409, SME_HAS_OPEN_PROJECT, OPEN_PROJECT_DETAIL)
     return code
 
 
