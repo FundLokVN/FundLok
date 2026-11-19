@@ -23,7 +23,13 @@ from app.direct_transfer.config import DEFAULT_PARAMS
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.evidence import store_evidence_file
 from app.direct_transfer.models import FundingWindow, PaymentAccount, RepaymentDay, Tranche, Transfer
-from app.direct_transfer.repayment import mark_days_paid, report_missing_day, todays_payments, tranche_schedule
+from app.direct_transfer.repayment import (
+    late_interest_vnd,
+    mark_days_paid,
+    report_missing_day,
+    todays_payments,
+    tranche_schedule,
+)
 from app.direct_transfer.schemas import RepaymentRowOut, TodaysPaymentsOut
 from app.direct_transfer.tranches import mask_name
 from app.direct_transfer.vietqr import build_vietqr_payload
@@ -146,6 +152,14 @@ async def read_investment_due(
     rows = await tranche_schedule(db, tranche_id=tranche_id, user_id=current_user.id)
     due = [row for row in rows if row["status"] in ("DUE", "LATE") and row["due_date"] <= today]
     net = sum(row["net_vnd"] for row in due)
+    window = await db.get(FundingWindow, tranche.window_id)
+    late_interest = sum(
+        late_interest_vnd(
+            row["principal_vnd"], row["interest_vnd"], annual_rate_pct=window.annual_rate_pct,
+            due_date=row["due_date"], received_on=today,
+        )
+        for row in due
+    )
     account = await db.get(PaymentAccount, tranche.investor_account_id) if tranche.investor_account_id else None
     qr = None
     if account is not None and account.bank_bin and net > 0:
@@ -184,6 +198,7 @@ async def read_investment_due(
         payee=rows[0]["payee"] if rows else None,
         vietqr_payload=qr,
         rejection=rejection,
+        late_interest_vnd=late_interest,
     )
 
 
