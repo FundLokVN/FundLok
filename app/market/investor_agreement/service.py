@@ -483,7 +483,7 @@ class InvestmentConfirmation:
     amount_vnd: int
     annual_rate_pct: Decimal
     term_months: int
-    # P × 2.5% × M / 12, floored, before VAT (fees.investor_fee_total, the figure the tranche is billed on).
+    # P × 2.5% × M / 12, to the nearest dong, before VAT (fees.investor_fee_total, the figure the tranche is billed on).
     service_fee_vnd: int
     service_fee_bps_per_year: int
     # Investors pay as soon as they commit, within the hold (funding-window.md rule 8): the hold's last day.

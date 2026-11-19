@@ -25,7 +25,7 @@ class DirectTransferParams:
     min_raise_pct: int = 50
     min_ticket_vnd: int = 10_000_000  # Q-021 (config, Lok may revisit)
     max_target_vnd: int = 100_000_000
-    cross_platform_cap_vnd: int = 400_000_000  # PROVISIONAL(Q-D12)
+    cross_platform_cap_vnd: int = 100_000_000  # D-054: per legal entity, target plus declared outside debt
     # Deadlines count calendar time, never working days (AM-E20, Loc 15 Nov 2026; holidays ignored, D-046).
     sme_confirm_hours: int = 24  # SME checks a receipt within 24 hours (was dispute_working_days = 2, D-021)
     confirmed_dispute_days: int = 30  # A5: after an automatic confirmation the SME may dispute with a bank statement
