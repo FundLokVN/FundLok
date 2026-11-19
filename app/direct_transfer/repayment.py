@@ -3,9 +3,9 @@
 The facility schedule (one fixed daily amount, `app/repayment_schedule`) is split pro rata across the ACTIVE
 tranches into per-investor `repayment_days`. The SME pays each investor the NET amount (gross minus the 5% tax
 it withholds on individual investors' interest) directly; FundLok computes, shows QR codes and records evidence.
-A day counts as paid unless the investor reports it missing by the deadline.
-
-No arrears/lateness logic (MVP scope): a reported, unresolved day simply stays REPORTED_MISSED and blocks settlement.
+A day with the SME's payment proof (a bank receipt) counts as paid unless the investor reports it missing within 24
+hours of the proof. A day with no proof by 18:00 ICT on its due date is LATE (docs/specs/repayment_schedule/
+late-status.md): overdue to everyone, never presumed paid, and it settles only once proof arrives and is accepted.
 """
 from __future__ import annotations
 
@@ -13,11 +13,12 @@ import dataclasses
 import datetime as dt
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.direct_transfer import cic
+from app.core.timezone import ICT
 from app.direct_transfer.calendar_utils import calendar_deadline, ict_date, start_of_day_ict
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.disputes import open_missed_day_dispute
@@ -35,6 +36,8 @@ from app.direct_transfer.models import (
 )
 from app.direct_transfer.tranches import mask_name
 from app.direct_transfer.vietqr import build_vietqr_payload
+from app.notifications.models import EVENT_REPAYMENT_DAY_LATE, EVENT_REPAYMENT_DAY_OVERDUE_SME
+from app.notifications.service import create_notification
 from app.repayment_schedule.calendar import BusinessDayCalendar
 from app.repayment_schedule.models import Facility, ScheduledPayment
 from app.repayment_schedule.state_machine import apply_transition
@@ -84,8 +87,8 @@ def principal_for_day(principal_total: int, day_index: int, day_count: int) -> i
 
 
 def report_deadline_for(due_date: dt.date, params: DirectTransferParams, calendar: BusinessDayCalendar | None = None) -> dt.datetime:
-    # 24 calendar hours after the due date ends. The Late-status spec (docs/specs/repayment_schedule/late-status.md,
-    # PR #108, draft) will re-anchor this on the SME's proof time later.
+    # Placeholder until the SME's proof arrives: mark_days_paid moves it to proof time + 24 hours (late-status.md
+    # rule 3). A day with no proof never reaches it: it is LATE first.
     return calendar_deadline(start_of_day_ict(due_date + dt.timedelta(days=1)), hours=params.lender_report_hours)
 
 
@@ -307,21 +310,46 @@ async def mark_days_paid(
     receipt_file_id: UUID | None,
     idempotency_key: str,
     now: dt.datetime,
+    params: DirectTransferParams | None = None,
 ) -> list[RepaymentDay]:
+    """The SME paid these days, with its bank receipt as proof: DUE or LATE -> PRESUMED_PAID, and the investor has 24
+    hours from now to press Not received (silence counts as received). Payments apply to the oldest unpaid day first."""
+    p = resolve(params)
     if not idempotency_key:
         raise bad_request("Idempotency-Key is required", "IDEMPOTENCY_KEY_REQUIRED")
     if not repayment_day_ids:
         raise bad_request("No repayment days given")
+    if receipt_file_id is None:
+        raise bad_request("Attach the bank receipt of this payment", "RECEIPT_REQUIRED")
     today = ict_date(now)
     result: list[RepaymentDay] = []
     for day_id in repayment_day_ids:
         day, tranche, window = await _sme_day(db, day_id, sme_user_id)
         if day.due_date > today:
             raise conflict("NOT_DUE_YET", "This day is not due yet")
-        if day.status == "DUE":
+        older = (
+            await db.execute(
+                select(RepaymentDay.id).where(
+                    RepaymentDay.tranche_id == tranche.id,
+                    RepaymentDay.status.in_(("DUE", "LATE")),
+                    RepaymentDay.id.not_in(repayment_day_ids),
+                    (RepaymentDay.due_date < day.due_date)
+                    | ((RepaymentDay.due_date == day.due_date) & (RepaymentDay.day_index < day.day_index)),
+                )
+            )
+        ).scalars().all()
+        if older:
+            raise conflict(
+                "OLDER_DAYS_UNPAID",
+                "Pay the oldest unpaid day first: " + ", ".join(str(i) for i in sorted(older, key=str)),
+            )
+        if day.status in ("DUE", "LATE"):
+            if day.status == "LATE":
+                day.late_cleared_at = now
             day.status = "PRESUMED_PAID"
             day.marked_paid_at = now
             day.marked_paid_by = sme_user_id
+            day.report_deadline = calendar_deadline(now, hours=p.lender_report_hours)
         if receipt_file_id is not None:
             key = f"{idempotency_key}:{day.id}"
             existing = (await db.execute(select(Transfer).where(Transfer.idempotency_key == key))).scalar_one_or_none()
@@ -345,14 +373,51 @@ async def mark_days_paid(
     return result
 
 
-async def presume_paid_days(db: AsyncSession, *, now: dt.datetime) -> int:
-    """A day counts as paid unless reported: DUE rows whose due date is before today (ICT) become PRESUMED_PAID."""
-    today = ict_date(now)
-    res = await db.execute(
-        update(RepaymentDay).where(RepaymentDay.status == "DUE", RepaymentDay.due_date < today).values(status="PRESUMED_PAID")
-    )
+async def mark_late_days(db: AsyncSession, *, now: dt.datetime, params: DirectTransferParams | None = None) -> int:
+    """DUE days with no payment proof by the cut-off (18:00 ICT) on their due date become LATE: overdue to staff, the SME
+    and the investor, never presumed paid, not counted for investor fees, and they block extension filing. The
+    investor is told about each day, the SME once per run. Idempotent. Returns the number of days marked."""
+    p = resolve(params)
+    local = now.astimezone(ICT)
+    last_due = local.date() if local.time() >= p.late_cutoff else local.date() - dt.timedelta(days=1)
+    days = (
+        await db.execute(
+            select(RepaymentDay)
+            .where(RepaymentDay.status == "DUE", RepaymentDay.settled_at.is_(None), RepaymentDay.due_date <= last_due)
+            .order_by(RepaymentDay.due_date, RepaymentDay.day_index, RepaymentDay.id)
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+    by_sme: dict[UUID, list[RepaymentDay]] = {}
+    for day in days:
+        day.status = "LATE"
+        day.late_marked_at = now
+        tranche = await db.get(Tranche, day.tranche_id)
+        window = await db.get(FundingWindow, tranche.window_id)
+        by_sme.setdefault(window.sme_user_id, []).append(day)
+        await log_event(
+            db, entity_type="REPAYMENT_DAY", entity_id=day.id, event_type="REPAYMENT_DAY_LATE", now=now,
+            payload={"due_date": day.due_date.isoformat(), "net_vnd": day.net_vnd},
+        )
+        create_notification(
+            db, user_id=tranche.investor_id, event=EVENT_REPAYMENT_DAY_LATE, entity_type="REPAYMENT_DAY",
+            entity_id=day.id,
+            data={
+                "tranche_id": str(tranche.id), "repayment_day_id": str(day.id), "due_date": day.due_date.isoformat(),
+                "net_vnd": day.net_vnd, "memo": tranche.reference_code,
+            },
+        )
+    for sme_user_id, late in by_sme.items():
+        create_notification(
+            db, user_id=sme_user_id, event=EVENT_REPAYMENT_DAY_OVERDUE_SME, entity_type="REPAYMENT_DAY",
+            entity_id=late[0].id,
+            data={
+                "days": len(late), "net_vnd": sum(d.net_vnd for d in late),
+                "oldest_due_date": late[0].due_date.isoformat(),
+            },
+        )
     await db.flush()
-    return res.rowcount or 0
+    return len(days)
 
 
 async def report_missing_day(
@@ -376,7 +441,7 @@ async def report_missing_day(
         raise conflict("ALREADY_REPORTED", "This day was already reported")
     if day.due_date > ict_date(now):
         raise conflict("NOT_DUE_YET", "This day is not due yet")
-    if day.status == "MATCHED":
+    if day.status in ("MATCHED", "LATE"):  # a LATE day is already overdue: nothing to report
         raise DirectTransferError(400, f"Invalid state transition: {day.status} → REPORTED_MISSED", "INVALID_TRANSITION")
 
     if now < day.report_deadline:

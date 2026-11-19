@@ -79,6 +79,12 @@ EVENT_EXTENSION_APPLIED = "EXTENSION_APPLIED"
 EVENT_TRANSFER_DUE_TODAY = "TRANSFER_DUE_TODAY"
 EVENT_TOP_UP_PLEDGE_RECORDED = "TOP_UP_PLEDGE_RECORDED"
 
+# Late status (docs/specs/repayment_schedule/late-status.md): a repayment day with no payment proof by 18:00 ICT on its
+# due date. To the investor, one per day: `data` tranche_id, repayment_day_id, due_date, net_vnd, memo.
+# To the business, one per run: `data` days, net_vnd, oldest_due_date.
+EVENT_REPAYMENT_DAY_LATE = "REPAYMENT_DAY_LATE"
+EVENT_REPAYMENT_DAY_OVERDUE_SME = "REPAYMENT_DAY_OVERDUE_SME"
+
 NOTIFICATION_EVENTS = frozenset(
     {
         EVENT_APPLICATION_APPROVED,
@@ -101,6 +107,8 @@ NOTIFICATION_EVENTS = frozenset(
         EVENT_EXTENSION_APPLIED,
         EVENT_TRANSFER_DUE_TODAY,
         EVENT_TOP_UP_PLEDGE_RECORDED,
+        EVENT_REPAYMENT_DAY_LATE,
+        EVENT_REPAYMENT_DAY_OVERDUE_SME,
     }
 )
 

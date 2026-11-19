@@ -44,7 +44,8 @@ class DirectTransferParams:
     # Each investment starts repaying as soon as staff approve it, as its own loan (Phat, 2026-11-02), instead of
     # one pooled loan when the round closes. The round's minimum raise then no longer refunds anyone.
     repay_from_approval: bool = True
-    lender_report_hours: int = 24  # Q-026: lender reports a missed day within 24 hours of the due date ending
+    lender_report_hours: int = 24  # the lender has 24 hours from the SME's proof to press Not received (A5)
+    late_cutoff: dt.time = dt.time(18, 0)  # ICT: a day with no payment proof by then on its due date is LATE
     late_report_cap_days: int = 30  # PROVISIONAL(Q-D14): the 30-day dispute window after report_deadline
     # --- disputes ---
     dispute_response_days: int = 2  # placeholder

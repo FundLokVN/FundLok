@@ -148,7 +148,7 @@ async def emit_daily_balances(db: AsyncSession, *, on_date: dt.date, now: dt.dat
             continue
         paid = [d for d in days if d.status in ("PRESUMED_PAID", "MATCHED")]
         missed = [d for d in days if d.status == "REPORTED_MISSED"]
-        unpaid_interest = sum(d.interest_vnd for d in days if d.status in ("DUE", "REPORTED_MISSED"))
+        unpaid_interest = sum(d.interest_vnd for d in days if d.status in ("DUE", "LATE", "REPORTED_MISSED"))
         outstanding = tranche.amount_vnd - sum(d.principal_vnd for d in paid)
         window, payload = await _common_payload(db, tranche)
         payload.update(

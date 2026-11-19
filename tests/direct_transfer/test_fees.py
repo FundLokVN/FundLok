@@ -12,7 +12,7 @@ from app.direct_transfer.fees import ManualInvoiceProvider
 from app.direct_transfer.models import FeeInvoice, InvestorFeeAccrual, RepaymentDay, Tranche
 from app.ledger.models import LedgerAccount, LedgerEntry
 
-from .helpers import T0, at, close_now, fund_window, make_investor, make_world, open_window, reserve
+from .helpers import T0, at, close_now, fund_window, make_investor, make_world, open_window, pay_days_through, reserve
 
 M = 1_000_000
 
@@ -83,7 +83,7 @@ def test_investor_fee_worked_example_rounds_to_nearest_dong():
 
 
 async def settle_through(world, now):
-    await repayment.presume_paid_days(world.db, now=now)
+    await pay_days_through(world, now)
     await repayment.settle_days(world.db, now=now)
 
 

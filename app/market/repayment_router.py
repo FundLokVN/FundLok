@@ -90,7 +90,8 @@ async def mark_paid(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     """The business says it paid these days (due today or earlier): DUE -> PRESUMED_PAID. Each investor then has
-    two working days to report a day that did not arrive. Returns the rows as they now stand."""
+    24 hours, from now, to report a day that did not arrive. A receipt (`receipt_file_id`) is required: without proof
+    a day becomes LATE at 18:00 on its due date. Returns the rows as they now stand."""
     now = _now()
     try:
         days = await mark_days_paid(
@@ -143,7 +144,7 @@ async def read_investment_due(
     tranche = await _business_tranche(db, tranche_id, current_user.id)
     today = on_date or ict_date(_now())
     rows = await tranche_schedule(db, tranche_id=tranche_id, user_id=current_user.id)
-    due = [row for row in rows if row["status"] == "DUE" and row["due_date"] <= today]
+    due = [row for row in rows if row["status"] in ("DUE", "LATE") and row["due_date"] <= today]
     net = sum(row["net_vnd"] for row in due)
     account = await db.get(PaymentAccount, tranche.investor_account_id) if tranche.investor_account_id else None
     qr = None
