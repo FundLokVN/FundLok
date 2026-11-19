@@ -38,7 +38,7 @@ previous_rows JSONB nullable   -- the per-investor rows the extension replaced (
 status TEXT CHECK IN ('EXTENDED','NO_SHORTFALL','NO_ROOM') · filed_at TIMESTAMPTZ
 UNIQUE (window_id, period_month)
 ```
-Migration `c2f8a6d4e917` (off `a4d2c7e9b130`). Existing tables change in place: future `repayment_days` rows are re-amounted and Δ rows appended; `facility.interest_vnd` and `total_obligation_vnd` grow by the extra interest; a new `schedule_version` row (facility-level daily, final instalment, day count); `tranches.investor_fee_total_vnd` grows. `facility.backstop_day_index` never moves (immutable trigger).
+Migration `c2f8a6d4e917` (off `b7e3c1d9a420`, the Late-status migration). Existing tables change in place: future `repayment_days` rows are re-amounted and Δ rows appended; `facility.interest_vnd` and `total_obligation_vnd` grow by the extra interest; a new `schedule_version` row (facility-level daily, final instalment, day count); `tranches.investor_fee_total_vnd` grows. `facility.backstop_day_index` never moves (immutable trigger).
 
 **Revenue share s.** `score_runs.daily_repayment_rate`, set once at underwriting: `(T / M) / expected monthly revenue` (`underwriting/grading/pricing.py`). Never changed. It is the blank in Contracts 3 and 5 (D-044: to be confirmed with Loc). A loan whose score run has no s cannot file (`409 REVENUE_SHARE_UNKNOWN`).
 

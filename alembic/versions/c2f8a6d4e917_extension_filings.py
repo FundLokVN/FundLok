@@ -5,7 +5,7 @@ passes, the row records the extension (delta_days, new start date) and keeps the
 (`previous_rows`) so the old version stays readable. Additive only.
 
 Revision ID: c2f8a6d4e917
-Revises: a4d2c7e9b130
+Revises: b7e3c1d9a420
 Create Date: 2026-11-19 12:00:00.000000
 
 """
@@ -18,7 +18,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'c2f8a6d4e917'
-down_revision: Union[str, Sequence[str], None] = 'a4d2c7e9b130'
+down_revision: Union[str, Sequence[str], None] = 'b7e3c1d9a420'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
