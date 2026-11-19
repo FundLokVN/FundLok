@@ -42,6 +42,12 @@ class DirectTransferParams:
     lender_report_hours: int = 24  # the lender has 24 hours from the SME's proof to press Not received (A5)
     late_cutoff: dt.time = dt.time(18, 0)  # ICT: a day with no payment proof by then on its due date is LATE
     late_report_cap_days: int = 30  # PROVISIONAL(Q-D14): the 30-day dispute window after report_deadline
+    # Late interest (docs/specs/repayment_schedule/late-interest.md, D-041): 150% of r on overdue principal, never above
+    # 30% a year, plus 10% a year on overdue interest; calendar days on a 365-day year.
+    late_principal_rate_pct_of_r: int = 150
+    late_principal_rate_cap_pct: int = 30
+    late_interest_on_interest_pct: int = 10
+    late_interest_basis_days: int = 365
     # --- disputes ---
     dispute_response_days: int = 2  # placeholder
     # --- fees (docs/specs/direct_transfer/fees.md); LIVE by default, E1 / D-023 ---
