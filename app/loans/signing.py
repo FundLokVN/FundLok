@@ -216,7 +216,8 @@ async def status(db: AsyncSession, application: LoanApplication, user: User) -> 
     phone = guarantor_otp.guarantor_phone(user)
     return SigningStatus(
         ready=data.terms is not None,
-        published=project is not None and project.status == "ACTIVE",
+        # CLOSED: the request ended after it went live, so the signed set stays shown as done (one-borrower v1.1).
+        published=project is not None and project.status in ("ACTIVE", "CLOSED"),
         guarantor_verified=data.guarantor.id_number is not None,
         guarantor_missing=guarantor_not_ready(data.guarantor, user),
         guarantor_signed_by=await guarantor_signed_by(db, application.id),

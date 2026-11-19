@@ -90,11 +90,12 @@ async def create_project(
     except IntegrityError as e:
         await db.rollback()
         err_msg = str(e.orig)
-        # The tax code's business is already on FundLok, however its code was written (uq_projects_tax_business).
-        if "tax_id" in err_msg or "tax_business" in err_msg:
+        # The tax code's business already has a project open on FundLok, however its code was written
+        # (uq_projects_one_open_per_business / uq_projects_one_open_per_tax_id).
+        if "uq_projects_one_open_per" in err_msg:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="This business already has a project on FundLok. Contact support if you believe this is an error",
+                detail="This business already has a request in progress on FundLok. Contact support if you believe this is an error",
                 headers={"X-Error-Code": borrower.DUPLICATE_TAX_CODE},
             )
         raise HTTPException(
@@ -118,6 +119,8 @@ async def get_my_projects(db: AsyncSession, current_user: User):
                 LoanApplication.documents
             )
         )
+        # Newest first: the dashboard shows the current request first, earlier ones after it.
+        .order_by(Project.created_at.desc())
     )
     return result.scalars().all()
 
