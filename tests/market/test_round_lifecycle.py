@@ -11,7 +11,9 @@ import uuid
 from sqlalchemy import select
 
 from app.direct_transfer.calendar_utils import count_business_days, first_working_day_after, ict_date
+from app.direct_transfer.evidence import store_evidence_file
 from app.direct_transfer.models import FundingWindow, RepaymentDay
+from app.direct_transfer.storage import InMemoryStorage
 from app.lending.models import AuditLog
 from tests.market.test_funding_flow import PNG, _open_project, _reserve, _upload
 
@@ -84,9 +86,13 @@ async def test_a_round_goes_from_investment_to_daily_repayment(
 
     # A day not yet due cannot be marked paid; one due today can.
     day_ids = [r["repayment_day_id"] for r in due["rows"]]
+    proof_id = str((await store_evidence_file(
+        db_session, InMemoryStorage(), owner_user_id=uuid.UUID(sme["id"]), purpose="RECEIPT",
+        content=f"%PDF-1.4 {uuid.uuid4()}".encode(), content_type="application/pdf",
+    )).id)
     if start > ict_date(dt.datetime.now(dt.timezone.utc)):
         not_yet = await client.post(
-            "/repayment/days/mark-paid", json={"repayment_day_ids": day_ids[:1]},
+            "/repayment/days/mark-paid", json={"repayment_day_ids": day_ids[:1], "receipt_file_id": proof_id},
             headers=sme["headers"] | {"Idempotency-Key": str(uuid.uuid4())},
         )
         assert not_yet.status_code == 409 and not_yet.headers["X-Error-Code"] == "NOT_DUE_YET"
@@ -95,7 +101,7 @@ async def test_a_round_goes_from_investment_to_daily_repayment(
             day.due_date = ict_date(dt.datetime.now(dt.timezone.utc))
         await db_session.commit()
     paid = await client.post(
-        "/repayment/days/mark-paid", json={"repayment_day_ids": day_ids},
+        "/repayment/days/mark-paid", json={"repayment_day_ids": day_ids, "receipt_file_id": proof_id},
         headers=sme["headers"] | {"Idempotency-Key": str(uuid.uuid4())},
     )
     assert paid.status_code == 200, paid.text

@@ -634,6 +634,8 @@ class RepaymentDay(Base):
     marked_paid_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     reported_at = _ts(nullable=True)
     reported_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    late_marked_at = _ts(nullable=True)  # no payment proof by the cut-off on the due date (late-status.md)
+    late_cleared_at = _ts(nullable=True)  # proof arrived later
     matched_at = _ts(nullable=True)
     settled_at = _ts(nullable=True)
     transfer_id = Column(
@@ -651,7 +653,7 @@ class RepaymentDay(Base):
         CheckConstraint("tax_withheld_vnd >= 0 AND tax_withheld_vnd <= interest_vnd", name="ck_repayment_days_tax"),
         CheckConstraint("net_vnd = gross_vnd - tax_withheld_vnd", name="ck_repayment_days_net"),
         CheckConstraint(
-            "status IN ('DUE','PRESUMED_PAID','REPORTED_MISSED','MATCHED')", name="ck_repayment_days_status"
+            "status IN ('DUE','LATE','PRESUMED_PAID','REPORTED_MISSED','MATCHED')", name="ck_repayment_days_status"
         ),
         Index("ix_repayment_days_due", "facility_id", "due_date"),
     )
