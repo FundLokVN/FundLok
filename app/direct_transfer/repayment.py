@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+from decimal import ROUND_HALF_UP, Decimal
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -81,6 +82,21 @@ def split_instalment_interest(grosses: list[int], principal_total: int) -> list[
 def principal_for_day(principal_total: int, day_index: int, day_count: int) -> int:
     """Cumulative round-half-up so the principal over the term is exactly `principal_total`."""
     return rdiv(principal_total * day_index, day_count) - rdiv(principal_total * (day_index - 1), day_count)
+
+
+def late_interest_vnd(
+    principal_vnd: int, interest_vnd: int, *, annual_rate_pct, due_date: dt.date, received_on: dt.date,
+    params: DirectTransferParams | None = None,
+) -> int:
+    """Late interest on one day's overdue parts (late-interest.md rule 2): calendar days after the due date up to the
+    receipt date, on a 365-day year, nearest dong with 0.5 up. Nothing when received by the end of the due date."""
+    p = resolve(params)
+    days = max(0, (received_on - due_date).days)
+    principal_rate = min(
+        Decimal(str(annual_rate_pct)) * p.late_principal_rate_pct_of_r / 100, Decimal(p.late_principal_rate_cap_pct)
+    )
+    value = (principal_vnd * principal_rate + interest_vnd * p.late_interest_on_interest_pct) / 100 * days
+    return int((value / p.late_interest_basis_days).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
 def report_deadline_for(due_date: dt.date, params: DirectTransferParams, calendar: BusinessDayCalendar | None = None) -> dt.datetime:

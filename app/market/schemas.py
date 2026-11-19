@@ -340,6 +340,9 @@ class InvestmentDueOut(BaseModel):
     vietqr_payload: str | None
     # Set when a day due here is due again because staff denied its receipt.
     rejection: RepaymentRejectionOut | None = None
+    # Late interest on the days here past their due date, to today (late-interest.md): the business pays it to the
+    # investor directly, apart from the VietQR amount. FundLok never collects it.
+    late_interest_vnd: int = 0
 
 
 class RepaymentReceiptAccountOut(BaseModel):

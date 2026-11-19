@@ -314,6 +314,7 @@ async def test_the_business_pays_an_investor_and_uploads_its_receipt(
     """One investment's page: what is due now as one transfer with one VietQR, then the receipt and the days marked
     paid in one step."""
     from app.direct_transfer.models import EvidenceFile, Transfer
+    from app.direct_transfer.repayment import late_interest_vnd
     from app.direct_transfer.vietqr import parse_tlv
 
     setup = await _open_project(client, db_session, make_admin, make_user)
@@ -342,6 +343,25 @@ async def test_the_business_pays_an_investor_and_uploads_its_receipt(
     # One transfer for the whole day: the investor's account, the full amount, the investment's memo.
     assert due["payee"]["account_number"] and due["reference_code"] == ticket["reference_code"]
     assert dict(parse_tlv(due["vietqr_payload"]))["54"] == str(due["net_vnd"])
+    assert due["late_interest_vnd"] == 0  # due today: nothing late yet
+
+    # Three days overdue, the instruction shows the late interest to pay the investor apart from the QR amount.
+    db_session.expire_all()
+    for day in (await db_session.execute(select(RepaymentDay).where(RepaymentDay.id.in_(first_ids)))).scalars():
+        day.due_date = today - dt.timedelta(days=3)
+    await db_session.commit()
+    overdue = (await client.get(f"/repayment/tranches/{ticket['id']}/due", headers=sme["headers"])).json()
+    window = await db_session.get(FundingWindow, uuid.UUID(ticket["window_id"]))
+    assert overdue["late_interest_vnd"] == sum(
+        late_interest_vnd(r["principal_vnd"], r["interest_vnd"], annual_rate_pct=window.annual_rate_pct,
+                          due_date=today - dt.timedelta(days=3), received_on=today)
+        for r in overdue["days"]
+    ) > 0
+    assert overdue["net_vnd"] == due["net_vnd"]  # not in the VietQR amount
+    db_session.expire_all()
+    for day in (await db_session.execute(select(RepaymentDay).where(RepaymentDay.id.in_(first_ids)))).scalars():
+        day.due_date = today
+    await db_session.commit()
 
     # Only the business sees what it owes; it pays only this investment's days.
     assert (await client.get(f"/repayment/tranches/{ticket['id']}/due", headers=an["headers"])).status_code == 403
