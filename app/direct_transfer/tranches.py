@@ -19,9 +19,17 @@ from app.direct_transfer.day14_times import window_cutoffs
 from app.direct_transfer.disputes import open_tranche_dispute
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event, store_evidence_file
-from app.direct_transfer.models import FundingWindow, PaymentAccount, Tranche, Transfer
+from app.direct_transfer.models import Dispute, FundingWindow, PaymentAccount, Tranche, Transfer
 from app.direct_transfer.refunds import create_refund_transfer
-from app.direct_transfer.receipts import ExpectedTransfer, ReceiptExtractor, ReceiptFields, check_receipt
+from app.direct_transfer.receipts import (
+    AMOUNT_MISMATCH,
+    REFERENCE_MISSING,
+    ExpectedTransfer,
+    ReceiptExtractor,
+    ReceiptFields,
+    _normalize_memo,
+    check_receipt,
+)
 from app.direct_transfer.signing import Signer, SignerIdentity
 from app.direct_transfer.storage import EvidenceStorage
 from app.direct_transfer.tranche_state import transition_tranche
@@ -570,6 +578,106 @@ async def sme_dispute_tranche(
     return tranche
 
 
+BANK_TXN_MISMATCH = "BANK_TXN_MISMATCH"
+
+
+async def sme_receipt_check(
+    db: AsyncSession,
+    *,
+    tranche_id: UUID,
+    sme_user_id: UUID,
+    content: bytes,
+    content_type: str,
+    filename: str | None,
+    fields: ReceiptFields | None,
+    storage: EvidenceStorage,
+    now: dt.datetime,
+    params: DirectTransferParams | None = None,
+) -> Tranche:
+    """The SME's own screenshot of the money arriving, within its 24 hours (spec 4.6, rule 8). Amount, reference and
+    bank transaction id equal to the lender's: CONFIRMED. A difference: UNDER_REVIEW with a RECEIPT_MISMATCH dispute.
+    `fields` is what the system read off the screenshot; None (OCR off or unsure) confirms on the SME's word, the
+    same as pressing Received."""
+    p = resolve(params)
+    tranche, _ = await _sme_tranche(db, tranche_id, sme_user_id, lock=True)
+    if tranche.status != "ATTESTED":
+        raise DirectTransferError(400, f"Invalid state transition: {tranche.status} → CONFIRMED", "INVALID_TRANSITION")
+    if now >= tranche.confirm_deadline:
+        raise conflict("DISPUTE_WINDOW_CLOSED", "The 24 hours have passed: silence counted as received")
+    evidence = await store_evidence_file(
+        db, storage, owner_user_id=sme_user_id, purpose="RECEIPT", content=content, content_type=content_type,
+        filename=filename, params=p,
+    )
+    failures: list[str] = []
+    if fields is not None:
+        lender = (
+            await db.execute(
+                select(Transfer).where(
+                    Transfer.tranche_id == tranche.id, Transfer.kind == "DISBURSEMENT", Transfer.check_status == "MATCHED"
+                ).order_by(Transfer.created_at.desc())
+            )
+        ).scalars().first()
+        if fields.amount_vnd != tranche.amount_vnd:
+            failures.append(AMOUNT_MISMATCH)
+        if _normalize_memo(tranche.reference_code) not in _normalize_memo(fields.memo or ""):
+            failures.append(REFERENCE_MISSING)
+        if not (lender and lender.bank_txn_id and (fields.bank_txn_id or "").strip().upper() == lender.bank_txn_id.strip().upper()):
+            failures.append(BANK_TXN_MISMATCH)
+    await log_event(
+        db, entity_type="TRANCHE", entity_id=tranche.id, event_type="SME_RECEIPT_UPLOADED", now=now,
+        actor_id=sme_user_id, actor_role="SME", file_sha256=evidence.sha256,
+        payload={"file_id": str(evidence.id), "fields": fields.to_json() if fields else None, "failure_codes": failures},
+    )
+    if not failures:
+        return await sme_confirm_tranche(db, tranche_id=tranche.id, sme_user_id=sme_user_id, now=now, params=p)
+    await transition_tranche(
+        db, tranche, "UNDER_REVIEW", now=now, actor_id=sme_user_id, actor_role="SME", review_cause="RECEIPT_MISMATCH",
+        extra={"failure_codes": failures},
+    )
+    await open_tranche_dispute(
+        db, tranche=tranche, cause="RECEIPT_MISMATCH", now=now, raised_by=sme_user_id, claim_file_id=evidence.id,
+        params=p,
+    )
+    return tranche
+
+
+async def sme_dispute_after_confirmation(
+    db: AsyncSession,
+    *,
+    tranche_id: UUID,
+    sme_user_id: UUID,
+    statement: str,
+    content: bytes,
+    content_type: str,
+    filename: str | None,
+    storage: EvidenceStorage,
+    now: dt.datetime,
+    params: DirectTransferParams | None = None,
+) -> Dispute:
+    """A confirmation by silence stays open to dispute for 30 days, with a bank statement (spec 4.6, rule 8, A5).
+    The ticket keeps its state (it may already be in the loan); staff decide the dispute."""
+    p = resolve(params)
+    tranche, _ = await _sme_tranche(db, tranche_id, sme_user_id, lock=True)
+    if tranche.dispute_until is None or now >= tranche.dispute_until:
+        raise conflict("DISPUTE_WINDOW_CLOSED", "The dispute window has closed")
+    if not (statement and statement.strip()):
+        raise bad_request("Say what is wrong", "EVIDENCE_REQUIRED")
+    statement_file = await store_evidence_file(
+        db, storage, owner_user_id=sme_user_id, purpose="BANK_STATEMENT", content=content, content_type=content_type,
+        filename=filename, params=p,
+    )
+    dispute = await open_tranche_dispute(
+        db, tranche=tranche, cause="SME_DISPUTE", now=now, raised_by=sme_user_id, claim_statement=statement.strip(),
+        claim_file_id=statement_file.id, params=p,
+    )
+    await log_event(
+        db, entity_type="TRANCHE", entity_id=tranche.id, event_type="SME_DISPUTED_AFTER_CONFIRMATION", now=now,
+        actor_id=sme_user_id, actor_role="SME", file_sha256=statement_file.sha256,
+        payload={"dispute_id": str(dispute.id), "dispute_until": tranche.dispute_until.isoformat()},
+    )
+    return dispute
+
+
 async def _void_if_excluded(
     db: AsyncSession, tranche: Tranche, window: FundingWindow, *, now: dt.datetime, params: DirectTransferParams
 ) -> None:
@@ -596,6 +704,7 @@ async def confirm_lapsed_tranches(
         transfer = (
             await db.execute(select(Transfer).where(Transfer.tranche_id == tranche.id, Transfer.kind == "DISBURSEMENT"))
         ).scalars().first()
+        tranche.dispute_until = calendar_deadline(now, days=p.confirmed_dispute_days)
         await transition_tranche(db, tranche, "CONFIRMED", now=now, reason="DISPUTE_WINDOW_LAPSED")
         if transfer is not None:
             transfer.confirmation_level = "CONFIRMED"
@@ -651,6 +760,7 @@ async def list_window_tranches(db: AsyncSession, *, window_id: UUID, sme_user_id
                 "attested_at": t.attested_at,
                 "confirm_deadline": t.confirm_deadline,
                 "review_cause": t.review_cause,
+                "dispute_until": t.dispute_until,
             }
         )
     return out

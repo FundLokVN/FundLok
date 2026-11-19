@@ -80,7 +80,7 @@ No unique index on (window, investor): a lender may commit several times (D-039,
 - `window_end` stays NOT NULL and equals `commit_closes_at` for new windows.
 
 ### Modified table: `tranches`
-No column changes. Meaning changes for `COMMIT_THEN_ACCEPT` windows:
+One new column, `dispute_until TIMESTAMPTZ nullable` (migration `a4d2c7e9b130`): `confirmed_at + 30 days` when the ticket is confirmed automatically (24-hour silence, or the system's own receipt check), else null (section 4.6). Meaning changes for `COMMIT_THEN_ACCEPT` windows:
 - created at acceptance, one per lender with pledged commitments, `amount_vnd` = the sum of the lender's folded commitments;
 - `hold_expires_at` = `window.pay_deadline_at` (not 2 hours);
 - the `acceptance_*` columns hold the Day-14 **loan contract** signature (the pledge is on `commitments`);
@@ -226,10 +226,10 @@ All three: INVESTOR, and the tranche must be the caller's, state `RESERVED`, win
 
 ### 4.6 SME: receipt check (new route for the existing service function)
 
-`POST /funding/tranches/{tranche_id}/sme-receipt` · SME · multipart `file` (PDF/PNG/JPEG/WEBP, ≤ 10 MB) · `202`
-Stores the SME's own screenshot of the money arriving. If amount, reference and bank transaction id match the lender's, the tranche goes `ATTESTED → CONFIRMED`; otherwise `UNDER_REVIEW` with a `RECEIPT_MISMATCH` dispute. Silence for 24 calendar hours after the lender's receipt is checked counts as received (`CONFIRMED`). `POST /funding/tranches/{id}/report-missing` (SME "Not received") stays as the dispute route and must be raised within the same 24 hours.
+`POST /funding/tranches/{tranche_id}/sme-receipt` · SME · multipart `file` (PDF/PNG/JPEG/WEBP, ≤ 10 MB) · `202 SmeTicketOut`
+Stores the SME's own screenshot of the money arriving. When nothing can be read off it (OCR off, or an unsure read) the upload confirms on the SME's word, as pressing Received would. If amount, reference and bank transaction id match the lender's, the tranche goes `ATTESTED → CONFIRMED`; otherwise `UNDER_REVIEW` with a `RECEIPT_MISMATCH` dispute. Silence for 24 calendar hours after the lender's receipt is checked counts as received (`CONFIRMED`). `POST /funding/tranches/{id}/report-missing` (SME "Not received") stays as the dispute route and must be raised within the same 24 hours.
 
-`POST /funding/tranches/{tranche_id}/dispute` · SME · `{ "statement": "string", "bank_statement_file_id": "uuid" }` → `202`. For a tranche confirmed by silence: allowed until `confirmed_at + 30 days`; opens a dispute for staff. After that: `409 DISPUTE_WINDOW_CLOSED`. Each auto-confirmation exposes `dispute_until` (ISO) on `InvestorTrancheOut` and `SmeTicketOut` so the UI can show it beside the confirmation (A5).
+`POST /funding/tranches/{tranche_id}/dispute` · SME · multipart `statement` (text) and `file` (the bank statement; PDF/PNG/JPEG/WEBP, ≤ 10 MB; there is no separate evidence upload for the SME) → `202 SmeTicketOut`. For a tranche confirmed by silence: allowed until `confirmed_at + 30 days`; opens a dispute for staff. After that: `409 DISPUTE_WINDOW_CLOSED`. Each auto-confirmation exposes `dispute_until` (ISO) on `InvestorTrancheOut` and `SmeTicketOut` so the UI can show it beside the confirmation (A5).
 
 ### 4.7 Lender lock (new)
 

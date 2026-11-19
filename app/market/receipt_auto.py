@@ -378,6 +378,8 @@ async def _accept(
     await transition_tranche(
         db, tranche, "ATTESTED", now=now, actor_role=SYSTEM_ROLE, reason=reason, confirm_deadline=now,
     )
+    # An automatic confirmation the SME never checked: it may still dispute it for 30 days (A5).
+    tranche.dispute_until = now + dt.timedelta(days=resolve(None).confirmed_dispute_days)
     await transition_tranche(db, tranche, "CONFIRMED", now=now, actor_role=SYSTEM_ROLE, reason=reason)
 
 

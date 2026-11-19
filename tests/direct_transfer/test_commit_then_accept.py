@@ -11,12 +11,22 @@ import pytest
 from sqlalchemy import func, select
 
 from app.core.timezone import ICT
-from app.direct_transfer import close, commit_flow, reservation, windows
+from app.direct_transfer import close, commit_flow, disputes, reservation, tranches, windows
 from app.direct_transfer.config import DirectTransferParams
 from app.direct_transfer.day14 import process_day14_no_shows
 from app.direct_transfer.tranche_state import transition_tranche
 from app.direct_transfer.errors import DirectTransferError
-from app.direct_transfer.models import Commitment, EvidenceLog, FeeInvoice, LenderStanding, Tranche, Transfer
+from app.direct_transfer.models import (
+    Commitment,
+    Dispute,
+    DisputeEvidence,
+    EvidenceFile,
+    EvidenceLog,
+    FeeInvoice,
+    LenderStanding,
+    Tranche,
+    Transfer,
+)
 from app.ledger.models import LedgerEntry
 from app.lending.models import Holding, Listing
 from app.market import funding
@@ -25,7 +35,7 @@ from app.notifications.models import Notification
 from app.repayment_schedule.models import Facility
 from app.scheduled_jobs import acceptance
 
-from .helpers import T0, make_investor, make_world, open_window
+from .helpers import T0, attested_tranche, good_fields, make_investor, make_world, open_window
 
 M = 1_000_000
 TERMS = "terms-1"
@@ -454,6 +464,87 @@ async def test_acceptance_notifies_every_lender(world):
             n.event for n in (await world.db.execute(select(Notification).where(Notification.user_id == inv.user.id))).scalars()
         ]
         assert sorted(events) == ["COMMITMENT_RECEIVED", "CONTRACT_SIGNING_OPEN", "WINDOW_ACCEPTED"]
+
+
+# --------------------------------------------------------------------------- #
+# the SME's receipt check and the 30-day dispute (slice S5: the same for both flows)
+# --------------------------------------------------------------------------- #
+async def _attested(world, amount=20 * M):
+    if world.window is None:
+        await open_window(world)
+    inv = await make_investor(world)
+    tranche = await attested_tranche(world, inv, amount)
+    transfer = (await world.db.execute(select(Transfer).where(Transfer.tranche_id == tranche.id))).scalar_one()
+    return inv, tranche, transfer
+
+
+async def _sme_receipt(world, tranche, fields, *, now):
+    return await tranches.sme_receipt_check(
+        world.db, tranche_id=tranche.id, sme_user_id=world.sme.id, content=f"%PDF-1.4 sme {tranche.id}".encode(),
+        content_type="application/pdf", filename="sme.pdf", fields=fields, storage=world.storage, now=now,
+        params=world.params,
+    )
+
+
+async def _dispute(world, tranche, *, now):
+    return await tranches.sme_dispute_after_confirmation(
+        world.db, tranche_id=tranche.id, sme_user_id=world.sme.id, statement="Not on our Techcombank statement",
+        content=b"%PDF-1.4 bank statement", content_type="application/pdf", filename="statement.pdf",
+        storage=world.storage, now=now, params=world.params,
+    )
+
+
+async def test_sme_receipt_match_confirms_the_tranche(world):
+    inv, tranche, transfer = await _attested(world)
+    now = tranche.attested_at + dt.timedelta(hours=2)
+    await _sme_receipt(world, tranche, good_fields(world, tranche, inv, when=now, bank_txn_id=transfer.bank_txn_id), now=now)
+    assert tranche.status == "CONFIRMED" and tranche.dispute_until is None  # the SME checked it itself
+
+    # A screenshot with another bank transaction goes to staff as a mismatch.
+    inv2, other, _ = await _attested(world, 10 * M)
+    await _sme_receipt(world, other, good_fields(world, other, inv2, when=now), now=now)
+    assert other.status == "UNDER_REVIEW" and other.review_cause == "RECEIPT_MISMATCH"
+    dispute = (await world.db.execute(select(Dispute).where(Dispute.tranche_id == other.id))).scalar_one()
+    assert dispute.cause == "RECEIPT_MISMATCH" and dispute.status == "OPEN"
+
+    # Nothing read off the screenshot (OCR off): the upload confirms on the SME's word.
+    _, third, _ = await _attested(world, 10 * M)
+    await _sme_receipt(world, third, None, now=now)
+    assert third.status == "CONFIRMED"
+
+
+async def test_silence_for_24_hours_confirms_the_tranche(world):
+    _, tranche, _ = await _attested(world)
+    deadline = tranche.confirm_deadline
+    assert deadline == tranche.attested_at + dt.timedelta(hours=24)
+    assert await tranches.confirm_lapsed_tranches(world.db, now=deadline - dt.timedelta(seconds=1), params=world.params) == 0
+    await _refused(_sme_receipt(world, tranche, None, now=deadline), "DISPUTE_WINDOW_CLOSED")  # the 24 hours are over
+    assert await tranches.confirm_lapsed_tranches(world.db, now=deadline, params=world.params) == 1
+    await world.db.refresh(tranche)
+    assert tranche.status == "CONFIRMED" and tranche.confirmed_at == deadline
+    assert tranche.dispute_until == deadline + dt.timedelta(days=30)
+
+
+async def test_dispute_after_silence_is_open_for_30_days_with_bank_statement(world):
+    _, tranche, _ = await _attested(world)
+    lapsed = tranche.confirm_deadline
+    await tranches.confirm_lapsed_tranches(world.db, now=lapsed, params=world.params)
+    await world.db.refresh(tranche)
+
+    await _refused(_dispute(world, tranche, now=lapsed + dt.timedelta(days=31)), "DISPUTE_WINDOW_CLOSED")
+    dispute = await _dispute(world, tranche, now=lapsed + dt.timedelta(days=29))
+    assert dispute.cause == "SME_DISPUTE" and dispute.status == "OPEN" and dispute.required_next_party == "INVESTOR"
+    claim = (await world.db.execute(select(DisputeEvidence).where(DisputeEvidence.dispute_id == dispute.id))).scalar_one()
+    assert claim.party == "SME" and claim.kind == "CLAIM" and claim.statement == "Not on our Techcombank statement"
+    assert (await world.db.get(EvidenceFile, claim.file_id)).purpose == "BANK_STATEMENT"
+    assert tranche.status == "CONFIRMED"  # the ticket keeps its state while staff decide
+
+    # Staff decide: received after all, so nothing changes.
+    await disputes.decide_dispute(
+        world.db, dispute_id=dispute.id, staff_id=world.admin.id, outcome="RECEIVED", reason="Bank trace shows it",
+        now=lapsed + dt.timedelta(days=30), params=world.params,
+    )
+    assert tranche.status == "CONFIRMED" and dispute.status == "DECIDED"
 
 
 # --------------------------------------------------------------------------- #
