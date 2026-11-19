@@ -329,7 +329,17 @@ async def _apply_day_outcome(
     params: DirectTransferParams, actor_role: str = "ADMIN",
 ) -> None:
     if outcome == "NOT_PAID":
-        return  # the day stays REPORTED_MISSED (no arrears states in MVP)
+        # The SME could not show bank proof: the day is LATE (late-status.md rule 5). A day reported after it settled
+        # (LATE_REPORT) keeps its status: the ledger is append-only.
+        day = await db.get(RepaymentDay, dispute.repayment_day_id)
+        if day.status == "REPORTED_MISSED":
+            day.status = "LATE"
+            day.late_marked_at = now
+            await log_event(
+                db, entity_type="REPAYMENT_DAY", entity_id=day.id, event_type="REPAYMENT_DAY_LATE", now=now,
+                actor_id=staff_id, actor_role=actor_role, reason=reason, payload={"dispute_id": str(dispute.id)},
+            )
+        return
     from app.direct_transfer.repayment import match_day  # local import: repayment imports this module
 
     await match_day(

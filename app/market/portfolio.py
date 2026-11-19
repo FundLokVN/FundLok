@@ -36,9 +36,10 @@ from app.users.models import User
 RECEIVED = ("CONFIRMED", "ACTIVE")
 # Money sent, waiting for FundLok's check.
 CHECKING = ("ATTESTED", "UNDER_REVIEW")
-# A day the business paid (by its word until FundLok matches the receipt), or the investor said never arrived.
+# A day the business paid (by its word until FundLok matches the receipt), the investor said never arrived, or LATE:
+# no payment proof by 18:00 on its due date (shown as overdue, never as paid).
 PAID = ("PRESUMED_PAID", "MATCHED")
-SHOWN_DAYS = (*PAID, "REPORTED_MISSED")
+SHOWN_DAYS = (*PAID, "REPORTED_MISSED", "LATE")
 
 
 def _month(day: dt.date) -> str:
@@ -111,7 +112,7 @@ def _repayment_rows(
             "tranche_id": tranche_id,
             "reference": codes[tranche_id],
             "type": type_,
-            "status": "FAILED" if "REPORTED_MISSED" in states else "COMPLETED" if states == {"MATCHED"} else "PENDING",
+            "status": "FAILED" if states & {"REPORTED_MISSED", "LATE"} else "COMPLETED" if states == {"MATCHED"} else "PENDING",
             "created_at": max(moments) if moments else _ict_noon(due_date),
             "amount": sign * sum(day.net_vnd for day in group),
             "counterparty": names[tranche_id],

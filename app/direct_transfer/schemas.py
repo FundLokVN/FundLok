@@ -156,7 +156,7 @@ class RepaymentRowOut(BaseModel):
     gross_vnd: int
     tax_withheld_vnd: int
     net_vnd: int
-    status: Literal["DUE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
+    status: Literal["DUE", "LATE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
     report_deadline: dt.datetime
     payee: PayeeOut | None
     reference_code: str

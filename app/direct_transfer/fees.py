@@ -284,8 +284,9 @@ async def accrue_investor_fees(db: AsyncSession, *, now: dt.datetime, params: Di
             if month in existing or month >= this_month:
                 continue
             month_rows = [r for r in rows if _first_of_month(r.due_date) == month]
-            # A month is accruable when ended and every row in it is resolved (settled, or reported missed).
-            if not all(r.settled_at is not None or r.status == "REPORTED_MISSED" for r in month_rows):
+            # A month is accruable when ended and every row in it is resolved (settled, reported missed, or LATE: a
+            # late day is not received, so it counts for nothing until it settles; the final true-up picks it up).
+            if not all(r.settled_at is not None or r.status in ("REPORTED_MISSED", "LATE") for r in month_rows):
                 continue
             received = sum(r.gross_vnd for r in month_rows if r.settled_at is not None)
             if received <= 0:

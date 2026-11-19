@@ -57,7 +57,7 @@ def summarise(payments: dict, today: dt.date) -> Summary | None:
     """What to remind about from todays_payments' answer, or None when every
     day is marked paid already. Amounts are what the SME transfers (net of
     the tax it withholds), as on the dashboard."""
-    due = [row for row in payments["rows"] if row["status"] == "DUE"]
+    due = [row for row in payments["rows"] if row["status"] in ("DUE", "LATE")]
     if not due:
         return None
     today_rows = [row for row in due if row["due_date"] == today]

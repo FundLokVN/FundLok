@@ -5,7 +5,9 @@ import uuid
 from sqlalchemy import select
 
 from app.direct_transfer.calendar_utils import ict_date
+from app.direct_transfer.evidence import store_evidence_file
 from app.direct_transfer.models import RepaymentDay
+from app.direct_transfer.storage import InMemoryStorage
 from tests.market.test_funding_flow import _reserve
 from tests.market.test_round_lifecycle import _approved, _open_project
 
@@ -44,8 +46,12 @@ async def test_suspended_account_can_still_repay(client, db_session, make_admin,
     for day in (await db_session.execute(select(RepaymentDay).where(RepaymentDay.id.in_(day_ids)))).scalars():
         day.due_date = ict_date(dt.datetime.now(dt.timezone.utc))
     await db_session.commit()
+    proof_id = str((await store_evidence_file(
+        db_session, InMemoryStorage(), owner_user_id=uuid.UUID(sme["id"]), purpose="RECEIPT",
+        content=f"%PDF-1.4 {uuid.uuid4()}".encode(), content_type="application/pdf",
+    )).id)
     paid = await client.post(
-        "/repayment/days/mark-paid", json={"repayment_day_ids": day_ids},
+        "/repayment/days/mark-paid", json={"repayment_day_ids": day_ids, "receipt_file_id": proof_id},
         headers=sme["headers"] | {"Idempotency-Key": str(uuid.uuid4())},
     )
     assert paid.status_code == 200, paid.text

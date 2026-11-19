@@ -54,13 +54,14 @@ async def advance_windows_job(ctx: dict[str, Any]) -> int:
 
 
 async def repayment_day_job(ctx: dict[str, Any]) -> dict[str, int]:
-    """Daily: presume unreported days paid, settle days past the missed-day report deadline."""
+    """Daily: days with no payment proof by 18:00 on their due date become LATE; days with proof settle once the
+    investor's 24 hours pass with no report."""
     async with _factory(ctx)() as db:
         now = _now(ctx)
-        presumed = await repayment.presume_paid_days(db, now=now)
+        late = await repayment.mark_late_days(db, now=now)
         settled = await repayment.settle_days(db, now=now)
         await db.commit()
-        return {"presumed": presumed, "settled": settled}
+        return {"late": late, "settled": settled}
 
 
 async def invoice_job(ctx: dict[str, Any]) -> dict[str, int]:
