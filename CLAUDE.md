@@ -13,7 +13,7 @@ FundLok (FL) is a Vietnam-registered P2P lending platform connecting SMB borrowe
 - **Revenue model:** FL charges two fees, each invoiced separately and paid into FL's own account after the fact (ADR-009, D-023): an SME activation fee of 3% of confirmed principal (VAT invoice, due 7 days, never netted from principal) and an investor service fee of 2.5% a year (accrued monthly, invoiced).
 - **No custody (ADR-009):** FL never holds money. Money moves directly between the investor's and the SME's own bank accounts (Decree 94 Art. 11.1.b). FL issues a dynamic VietQR, collects uploaded receipts, records evidence, computes schedules and reports. There is no FL cash account, no bank API and no CIC connection yet; confirmations rest on uploaded documents reviewed by staff. ADR-002/003's omnibus account and ADR-008's GPay rail are superseded for all new paths.
 - **Ledger:** FL maintains an internal append-only ledger. On the direct-transfer path it is a confirmed-transfer model: `transfers` is the evidence record and claim legs post against a platform-level `EXTERNAL` account; no `OMNIBUS_CASH` legs (D-026, `docs/specs/direct_transfer/ledger-amendment.md`). It is immutable at both the application layer and the database layer (PostgreSQL trigger).
-- **Borrower journey:** SMB registers → 3rd-party KYC → describes project/enterprise → applies for loan → ML grading engine assigns interest rate tier → listed on marketplace → lenders fund → disbursement → scheduled repayments → lenders receive pro-rata distributions + converted shares after repayment.
+- **Borrower journey:** SMB registers → 3rd-party KYC → describes project/enterprise → applies for loan → deterministic 0–100 grade (no tiers, no letter grades) and the handbook 8.3 rate formula with a versioned parameter set set the rate → listed on marketplace → lenders commit → SME accepts or declines → disbursement → daily repayments paid by the SME directly to each lender, with interest and tax split per instalment (ADR-011).
 - **Early repayment** is encouraged as a platform value — better practice, better outcomes.
 - **Regulatory framework:** Vietnam Decree No. 94/2025/ND-CP (fintech/P2P regulatory sandbox) and Circular 64/2024/TT-NHNN (banking Open API technical standard). See ADR-004.
 
@@ -53,15 +53,14 @@ Key carry-forwards:
 **Ownership is strict. Do not modify files outside your boundary without explicit agreement.**
 
 ### Edward (CTO) — Backend, Architecture, Compliance
-- `app/banking/` — Brankas API client, omnibus account service, webhook handlers (see also `docs/specs/banking/account-linking-mock.md` — Brankas is not expected to happen; this module is mocked indefinitely pending a partner decision)
-- `app/verification/` — KYC/KYB identity verification (Didit client, session state, signed webhook)
+- `app/banking/` — mocked indefinitely; superseded by ADR-009 direct transfer (see `docs/specs/banking/account-linking-mock.md`). No Brankas client or omnibus account is in use
+- `app/verification/` — legacy KYC/KYB (Didit client, session state, signed webhook); still mounted but not the live path. Live KYC/KYB runs on `app/gverify/` (TPV Datatrust, Phat's, Edward reviews)
 - `app/underwriting/` — ML grading engine (async)
 - `app/contracts/` — loan contract creation from a locked score run (final terms, funding target)
-- `app/repayment_schedule/` — amortization engine, early repayment tracking
-- `app/share_conversion/` — post-repayment share issuance
-- `app/compliance/` — Decree 94 reporting, exposure cap enforcement
+- `app/repayment_schedule/` — **handed to Phat for implementation (D-058, 2026-11-16)**; Edward keeps the specs, the ledger legs and migrations (see Phat's list)
+- Decree 94 reporting and the borrower cap: there is no `app/compliance/` module. The cap lives in `app/direct_transfer/windows.py` (`cross_platform_cap_vnd` is 100M per legal entity, target plus declared outside debt: D-040, D-054)
 - `app/ledger/` — double-entry ledger, custodial/ledger accounts, balance-by-sum (see ADR-003, docs/specs/ledger/ledger-foundation.md)
-- `app/direct_transfer/` — funding window, tranches, transfers and evidence, disputes, repayment collection, fees, CIC event log (ADR-009). Phat's routers call its service functions.
+- `app/direct_transfer/` — funding window, tranches, transfers and evidence, disputes, fees, CIC event log (ADR-009, ADR-011). Phat's routers call its service functions. The repayment code in it (`repayment.py` and the repayment jobs) is Phat's to implement (D-058); the ledger posting, tranche state machine, fees and migrations stay Edward's.
 - `app/payments/` — legacy omnibus disbursement/repayment shim over `app/ledger/` (deprecated behind a flag once `app/direct_transfer/` is wired)
 - `app/system/` — platform/ops settings (e.g. maintenance mode)
 - `app/core/` — database session, config, async migration
@@ -72,6 +71,12 @@ Key carry-forwards:
 
 ### Phat — Full Stack + Sole Frontend Owner
 - All React frontend (Edward does not touch UI under any circumstances)
+- The **repayment engine** (D-058, Loc's decision of 2026-11-15): `app/repayment_schedule/`, `app/direct_transfer/repayment.py` and the repayment jobs. Rounding, oldest-first payments, Late status, late interest, holidays ignored and automatic extension are implemented by Phat from Edward's specs. Edward keeps the specs and approves, in writing, every PR that touches money: the ledger claim legs (`ledger_posting.py`), the tranche state machine, fees, or a migration. No ledger leg is built on a spec Edward has not confirmed.
+- `app/gverify/` — live eKYC/eKYB via TPV Datatrust (Edward reviews the verification domain)
+- `app/consent/` — sign-up terms and consent records
+- `app/phone_verification/` — phone OTP and Zalo
+- `app/scheduled_jobs/` — Cloud Scheduler endpoints (reminders, fee emails)
+- `app/rates/` — investor rate calculator
 - `app/users/router.py`, `app/users/schemas.py` — user-facing endpoints
 - `app/projects/` — project management endpoints
 - `app/loans/` — loan application endpoints
@@ -147,7 +152,7 @@ All specs live in `docs/specs/<module>/<feature>.md`. See `docs/specs/_TEMPLATE.
 
 ### Testing
 - Every new module must have a pytest file under `tests/<module>/`
-- Tests use fixtures — never hit a real DB or Brankas API in tests
+- Tests use fixtures and run on a throwaway Postgres (`scripts/docker_test.sh`, mirroring CI) — never a shared or dev DB, and never a real bank, KYC or Zalo API
 - Acceptance criteria from the spec map 1:1 to test function names
 
 ### Git
@@ -175,7 +180,7 @@ ScoreRun:         RUNNING → READY → LOCKED
 Contract:         DRAFT → SIGNED → ACTIVE_PENDING_FUNDING → ACTIVE_FUNDED → CLOSED
 Listing:          DRAFT → OPEN → FUNDED → CLOSED
 Order:            legacy omnibus path only (deprecated behind a flag)
-Tranche:          RESERVED → SIGNED → ATTESTED → CONFIRMED → ACTIVE
+Tranche:          RESERVED → SIGNED → ATTESTED → CONFIRMED → ACTIVE   (today's code; ADR-011 replaces this with commit-then-accept: see HANDOFF-06)
                   RESERVED|SIGNED → EXPIRED; SIGNED|ATTESTED → UNDER_REVIEW → CONFIRMED | VOID; CONFIRMED → VOID (before ACTIVE)
 ```
 
@@ -198,8 +203,9 @@ Tranche:          RESERVED → SIGNED → ATTESTED → CONFIRMED → ACTIVE
 | ADR-006 | fl-knowledge: BM25 → Pinecone + local embeddings | Accepted |
 | ADR-007 | fl-knowledge: PDF ingestion (regulatory source documents) | Accepted |
 | ADR-008 | Payment rails and custody model (GPay) | Superseded by ADR-009 |
-| ADR-009 | Direct-transfer custody model, funding window, evidence-based confirmation | Accepted |
+| ADR-009 | Direct-transfer custody model, funding window, evidence-based confirmation | Accepted (§2 funding window superseded by ADR-011) |
 | ADR-010 | fl-knowledge: hybrid search (semantic + BM25) and stale-vector cleanup | Accepted |
+| ADR-011 | Commit-then-accept funding flow (replaces ADR-009 §2 funding window) | Accepted |
 
 Full ADRs in `docs/adr/`.
 
@@ -234,5 +240,9 @@ Edward is CTO and backend/architecture owner. **Edward does not write UI code.**
 - [x] Direct-transfer disbursement and repayment (HANDOFF-04, `docs/specs/direct_transfer/`, `app/direct_transfer/`)
 - [ ] Compliance module — Decree 94 exposure caps, CIC data, reporting (ADR-004)
 
-**MVP scope (decided 27 Sep 2026)**
-MVP is the full platform happy path, end to end: registration → KYC/KYB → project/listing creation → search/browse → investor order (invest) → disbursement → repayment collection → closing. Repayment includes extension/relief re-pricing (`docs/specs/repayment_schedule/fixed-daily-repayment-mechanism-v1.4.md`, D23) but **not** its fee (D27, deferred). Explicitly **out of scope for MVP**: all lateness/arrears handling — no `ARREARS_WARNING`, `ARREARS`, `ACCELERATED`, `IN_RECOVERY`, or `WRITTEN_OFF` states, no late-rate interest. MVP's practical repayment state machine is `DRAFT → APPROVED → DISBURSED → ACTIVE ⇄ UNDER_REVIEW → SETTLED` only.
+**MVP scope (decided 27 Sep 2026, updated 14 Nov 2026)**
+MVP is the full platform happy path, end to end: registration → KYC/KYB → project/listing creation → search/browse → lender commitment → SME decision → disbursement → repayment collection → closing. Repayment includes extension/relief re-pricing (`docs/specs/repayment_schedule/fixed-daily-repayment-mechanism-v1.4.md`, D23) but **not** its fee (D27, deferred).
+
+**Updated 14 Nov 2026 (Loc, Appendix M test, confirmed by Edward):** two items moved **into** launch scope. (1) **Late repayment interest.** A day with no SME proof by the end of its due date is Late; late interest is 150% of the loan rate on overdue principal (never above 30% a year) plus 10% a year on overdue interest, in calendar days, paid by the SME to each lender; a Late instalment blocks extension filing. (2) **Automatic extension.** The SME files by the 5th with that month's tax declaration or bank inflow statement and revenue; if the shortfall test passes and nothing is Late, the system extends with no staff step and no fee. Late is a repayment-day status, not a loan state. Both are specified in `docs/specs/` before any build, and finalised when handbook v3.2 lands.
+
+Still **out of scope**: default handling (M10) and its states: no `ARREARS_WARNING`, `ARREARS`, `ACCELERATED`, `IN_RECOVERY` or `WRITTEN_OFF`; backstop, recovery and fraud handling. The practical repayment state machine remains `DRAFT → APPROVED → DISBURSED → ACTIVE ⇄ UNDER_REVIEW → SETTLED`.

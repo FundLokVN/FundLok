@@ -12,7 +12,7 @@ from app.core.timezone import ICT
 from app.direct_transfer import jobs, worker
 from app.direct_transfer.models import CicEvent, FeeInvoice, FundingWindow, InvestorFeeAccrual, RepaymentDay, Tranche
 
-from .helpers import T0, accept, at, attested_tranche, fund_window, make_investor, open_window, reserve
+from .helpers import T0, accept, at, attested_tranche, fund_window, make_investor, open_window, pay_days_through, reserve
 
 M = 1_000_000
 Session = async_sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
@@ -56,18 +56,18 @@ async def test_advance_windows_job_lapses_confirms_and_closes(world, db_session)
     assert await jobs.advance_windows_job(ctx_at(ict(2026, 11, 19, 1))) == 0  # nothing live any more
 
 
-async def test_repayment_day_job_presumes_and_settles(loan, db_session):
+async def test_repayment_day_job_marks_unproven_days_late_and_settles_none(loan, db_session):
     world, window, _ = loan
     await db_session.commit()
     out = await jobs.repayment_day_job(ctx_at(ict(2026, 11, 9, 0, 10)))
-    assert out == {"presumed": 40, "settled": 20}  # 4 working days of rows are past; the first day passed its deadline
+    assert out == {"late": 40, "settled": 0}  # Wed (10 instalments + 10 stubs), Thu and Fri: no proof, so LATE, never paid
     again = await jobs.repayment_day_job(ctx_at(ict(2026, 11, 9, 0, 10)))
-    assert again == {"presumed": 0, "settled": 0}
+    assert again == {"late": 0, "settled": 0}
 
 
 async def test_invoice_job_marks_overdue_accrues_and_invoices(loan, db_session):
     world, _, _ = loan
-    await jobs.repayment_day_job(ctx_at(ict(2026, 12, 3)))
+    await pay_days_through(world, ict(2026, 12, 3))  # November paid with proof, so it settles and accrues
     await db_session.commit()
     await jobs.repayment_day_job(ctx_at(ict(2026, 12, 3)))
     out = await jobs.invoice_job(ctx_at(ict(2026, 12, 3)))

@@ -1,5 +1,5 @@
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 from uuid import UUID
 
@@ -323,6 +323,11 @@ async def start_score_run(
         interest_rate_pct=grading_result.interest_rate_pct,
         bank_rate_pct=bank_rate_row.rate_pct,
         bank_rate_effective_from=bank_rate_row.effective_from,
+        daily_repayment_rate=(
+            Decimal(str(grading_result.daily_repayment_rate)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+            if grading_result.daily_repayment_rate is not None
+            else None
+        ),
         overall_score=(
             Decimal(str(round(grading_result.final_grade, 2))) if grading_result.final_grade is not None else None
         ),

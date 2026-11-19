@@ -3,33 +3,46 @@
 The facility schedule (one fixed daily amount, `app/repayment_schedule`) is split pro rata across the ACTIVE
 tranches into per-investor `repayment_days`. The SME pays each investor the NET amount (gross minus the 5% tax
 it withholds on individual investors' interest) directly; FundLok computes, shows QR codes and records evidence.
-A day counts as paid unless the investor reports it missing by the deadline.
-
-No arrears/lateness logic (MVP scope): a reported, unresolved day simply stays REPORTED_MISSED and blocks settlement.
+A day with the SME's payment proof (a bank receipt) counts as paid unless the investor reports it missing within 24
+hours of the proof. A day with no proof by 18:00 ICT on its due date is LATE (docs/specs/repayment_schedule/
+late-status.md): overdue to everyone, never presumed paid, and it settles only once proof arrives and is accepted.
 """
 from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+from decimal import ROUND_HALF_UP, Decimal
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.direct_transfer import cic
-from app.direct_transfer.calendar_utils import ict_date, start_of_day_ict, working_deadline
+from app.core.timezone import ICT
+from app.direct_transfer.calendar_utils import calendar_deadline, ict_date, start_of_day_ict
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.disputes import open_missed_day_dispute
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event
 from app.direct_transfer.ledger_posting import post_repayment_day_settled
-from app.direct_transfer.models import Dispute, FundingWindow, PaymentAccount, RepaymentDay, Tranche, Transfer
+from app.direct_transfer.models import (
+    WINDOW_LIVE_STATES,
+    Dispute,
+    FundingWindow,
+    PaymentAccount,
+    RepaymentDay,
+    Tranche,
+    Transfer,
+)
 from app.direct_transfer.tranches import mask_name
 from app.direct_transfer.vietqr import build_vietqr_payload
+from app.notifications.models import EVENT_REPAYMENT_DAY_LATE, EVENT_REPAYMENT_DAY_OVERDUE_SME
+from app.notifications.service import create_notification
 from app.repayment_schedule.calendar import BusinessDayCalendar
 from app.repayment_schedule.models import Facility, ScheduledPayment
 from app.repayment_schedule.state_machine import apply_transition
+from app.projects.borrower import close_project_if_finished
 from app.users.models import User
 
 
@@ -55,13 +68,45 @@ def split_gross(amount: int, weights: list[int]) -> list[int]:
     return bases
 
 
+def tax_nearest(interest: int, withholding_bps: int) -> int:
+    """Withholding on one day's interest, rounded to the nearest dong (D-045, handbook 10.8)."""
+    return rdiv(interest * withholding_bps, 10_000)
+
+
+def split_instalment_interest(grosses: list[int], principal_total: int) -> list[int]:
+    """Each day's interest part = gross x I / T rounded DOWN (I = total interest, T = total repayable); the last day
+    takes the remainder so the interest sums to I exactly. Principal is gross minus this (D-045)."""
+    total = sum(grosses)
+    interest_total = total - principal_total
+    parts = [g * interest_total // total for g in grosses[:-1]]
+    parts.append(interest_total - sum(parts))
+    return parts
+
+
 def principal_for_day(principal_total: int, day_index: int, day_count: int) -> int:
     """Cumulative round-half-up so the principal over the term is exactly `principal_total`."""
     return rdiv(principal_total * day_index, day_count) - rdiv(principal_total * (day_index - 1), day_count)
 
 
+def late_interest_vnd(
+    principal_vnd: int, interest_vnd: int, *, annual_rate_pct, due_date: dt.date, received_on: dt.date,
+    params: DirectTransferParams | None = None,
+) -> int:
+    """Late interest on one day's overdue parts (late-interest.md rule 2): calendar days after the due date up to the
+    receipt date, on a 365-day year, nearest dong with 0.5 up. Nothing when received by the end of the due date."""
+    p = resolve(params)
+    days = max(0, (received_on - due_date).days)
+    principal_rate = min(
+        Decimal(str(annual_rate_pct)) * p.late_principal_rate_pct_of_r / 100, Decimal(p.late_principal_rate_cap_pct)
+    )
+    value = (principal_vnd * principal_rate + interest_vnd * p.late_interest_on_interest_pct) / 100 * days
+    return int((value / p.late_interest_basis_days).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
 def report_deadline_for(due_date: dt.date, params: DirectTransferParams, calendar: BusinessDayCalendar | None = None) -> dt.datetime:
-    return working_deadline(start_of_day_ict(due_date), params.missed_day_report_working_days, calendar)
+    # Placeholder until the SME's proof arrives: mark_days_paid moves it to proof time + 24 hours (late-status.md
+    # rule 3). A day with no proof never reaches it: it is LATE first.
+    return calendar_deadline(start_of_day_ict(due_date + dt.timedelta(days=1)), hours=params.lender_report_hours)
 
 
 async def generate_repayment_days(
@@ -87,14 +132,15 @@ async def generate_repayment_days(
         raise RepaymentInvariantError("schedule length does not match business_day_count")
 
     per_tranche: list[list[tuple[ScheduledPayment, int, int, int]]] = [[] for _ in tranches]  # (sp, gross, principal, interest)
-    for sp in schedule:
-        gross_split = split_gross(int(sp.expected_amount_vnd), weights)
-        for i, t in enumerate(tranches):
-            principal = principal_for_day(t.amount_vnd, sp.day_index, n_days)
-            interest = gross_split[i] - principal
-            if interest < 0:
-                raise RepaymentInvariantError(f"negative interest for tranche {t.id} on day {sp.day_index}")
-            per_tranche[i].append((sp, gross_split[i], principal, interest))
+    splits = [split_gross(int(sp.expected_amount_vnd), weights) for sp in schedule]
+    for i, t in enumerate(tranches):
+        grosses = [split[i] for split in splits]
+        interests = split_instalment_interest(grosses, t.amount_vnd)
+        for sp, gross, interest in zip(schedule, grosses, interests):
+            principal = gross - interest
+            if principal < 0:
+                raise RepaymentInvariantError(f"negative principal for tranche {t.id} on day {sp.day_index}")
+            per_tranche[i].append((sp, gross, principal, interest))
 
     created = 0
     for i, t in enumerate(tranches):
@@ -103,7 +149,7 @@ async def generate_repayment_days(
         taxes: list[int] = []
         if individual:
             for _, _, _, interest in rows[:-1]:
-                taxes.append(interest * p.withholding_bps // 10_000)
+                taxes.append(tax_nearest(interest, p.withholding_bps))
             total_interest = sum(r[3] for r in rows)
             total_tax = rdiv(total_interest * p.withholding_bps, 10_000)
             last_interest = rows[-1][3]
@@ -176,7 +222,7 @@ async def todays_payments(db: AsyncSession, *, sme_user_id: UUID, on_date: dt.da
         await db.execute(
             select(FundingWindow).where(
                 FundingWindow.sme_user_id == sme_user_id,
-                FundingWindow.status.in_(("OPEN", "FULL", "CLOSING", "REPAYING")),
+                FundingWindow.status.in_(WINDOW_LIVE_STATES),
             )
         )
     ).scalars().all()
@@ -281,21 +327,46 @@ async def mark_days_paid(
     receipt_file_id: UUID | None,
     idempotency_key: str,
     now: dt.datetime,
+    params: DirectTransferParams | None = None,
 ) -> list[RepaymentDay]:
+    """The SME paid these days, with its bank receipt as proof: DUE or LATE -> PRESUMED_PAID, and the investor has 24
+    hours from now to press Not received (silence counts as received). Payments apply to the oldest unpaid day first."""
+    p = resolve(params)
     if not idempotency_key:
         raise bad_request("Idempotency-Key is required", "IDEMPOTENCY_KEY_REQUIRED")
     if not repayment_day_ids:
         raise bad_request("No repayment days given")
+    if receipt_file_id is None:
+        raise bad_request("Attach the bank receipt of this payment", "RECEIPT_REQUIRED")
     today = ict_date(now)
     result: list[RepaymentDay] = []
     for day_id in repayment_day_ids:
         day, tranche, window = await _sme_day(db, day_id, sme_user_id)
         if day.due_date > today:
             raise conflict("NOT_DUE_YET", "This day is not due yet")
-        if day.status == "DUE":
+        older = (
+            await db.execute(
+                select(RepaymentDay.id).where(
+                    RepaymentDay.tranche_id == tranche.id,
+                    RepaymentDay.status.in_(("DUE", "LATE")),
+                    RepaymentDay.id.not_in(repayment_day_ids),
+                    (RepaymentDay.due_date < day.due_date)
+                    | ((RepaymentDay.due_date == day.due_date) & (RepaymentDay.day_index < day.day_index)),
+                )
+            )
+        ).scalars().all()
+        if older:
+            raise conflict(
+                "OLDER_DAYS_UNPAID",
+                "Pay the oldest unpaid day first: " + ", ".join(str(i) for i in sorted(older, key=str)),
+            )
+        if day.status in ("DUE", "LATE"):
+            if day.status == "LATE":
+                day.late_cleared_at = now
             day.status = "PRESUMED_PAID"
             day.marked_paid_at = now
             day.marked_paid_by = sme_user_id
+            day.report_deadline = calendar_deadline(now, hours=p.lender_report_hours)
         if receipt_file_id is not None:
             key = f"{idempotency_key}:{day.id}"
             existing = (await db.execute(select(Transfer).where(Transfer.idempotency_key == key))).scalar_one_or_none()
@@ -319,14 +390,51 @@ async def mark_days_paid(
     return result
 
 
-async def presume_paid_days(db: AsyncSession, *, now: dt.datetime) -> int:
-    """A day counts as paid unless reported: DUE rows whose due date is before today (ICT) become PRESUMED_PAID."""
-    today = ict_date(now)
-    res = await db.execute(
-        update(RepaymentDay).where(RepaymentDay.status == "DUE", RepaymentDay.due_date < today).values(status="PRESUMED_PAID")
-    )
+async def mark_late_days(db: AsyncSession, *, now: dt.datetime, params: DirectTransferParams | None = None) -> int:
+    """DUE days with no payment proof by the cut-off (18:00 ICT) on their due date become LATE: overdue to staff, the SME
+    and the investor, never presumed paid, not counted for investor fees, and they block extension filing. The
+    investor is told about each day, the SME once per run. Idempotent. Returns the number of days marked."""
+    p = resolve(params)
+    local = now.astimezone(ICT)
+    last_due = local.date() if local.time() >= p.late_cutoff else local.date() - dt.timedelta(days=1)
+    days = (
+        await db.execute(
+            select(RepaymentDay)
+            .where(RepaymentDay.status == "DUE", RepaymentDay.settled_at.is_(None), RepaymentDay.due_date <= last_due)
+            .order_by(RepaymentDay.due_date, RepaymentDay.day_index, RepaymentDay.id)
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+    by_sme: dict[UUID, list[RepaymentDay]] = {}
+    for day in days:
+        day.status = "LATE"
+        day.late_marked_at = now
+        tranche = await db.get(Tranche, day.tranche_id)
+        window = await db.get(FundingWindow, tranche.window_id)
+        by_sme.setdefault(window.sme_user_id, []).append(day)
+        await log_event(
+            db, entity_type="REPAYMENT_DAY", entity_id=day.id, event_type="REPAYMENT_DAY_LATE", now=now,
+            payload={"due_date": day.due_date.isoformat(), "net_vnd": day.net_vnd},
+        )
+        create_notification(
+            db, user_id=tranche.investor_id, event=EVENT_REPAYMENT_DAY_LATE, entity_type="REPAYMENT_DAY",
+            entity_id=day.id,
+            data={
+                "tranche_id": str(tranche.id), "repayment_day_id": str(day.id), "due_date": day.due_date.isoformat(),
+                "net_vnd": day.net_vnd, "memo": tranche.reference_code,
+            },
+        )
+    for sme_user_id, late in by_sme.items():
+        create_notification(
+            db, user_id=sme_user_id, event=EVENT_REPAYMENT_DAY_OVERDUE_SME, entity_type="REPAYMENT_DAY",
+            entity_id=late[0].id,
+            data={
+                "days": len(late), "net_vnd": sum(d.net_vnd for d in late),
+                "oldest_due_date": late[0].due_date.isoformat(),
+            },
+        )
     await db.flush()
-    return res.rowcount or 0
+    return len(days)
 
 
 async def report_missing_day(
@@ -350,7 +458,7 @@ async def report_missing_day(
         raise conflict("ALREADY_REPORTED", "This day was already reported")
     if day.due_date > ict_date(now):
         raise conflict("NOT_DUE_YET", "This day is not due yet")
-    if day.status == "MATCHED":
+    if day.status in ("MATCHED", "LATE"):  # a LATE day is already overdue: nothing to report
         raise DirectTransferError(400, f"Invalid state transition: {day.status} → REPORTED_MISSED", "INVALID_TRANSITION")
 
     if now < day.report_deadline:
@@ -375,7 +483,7 @@ async def report_missing_day(
         return day
 
     # Late (PROVISIONAL(Q-D14)): accepted into reconciliation without changing history, up to the cap.
-    late_limit = working_deadline(day.report_deadline - dt.timedelta(seconds=1), p.late_report_cap_working_days)
+    late_limit = calendar_deadline(day.report_deadline, days=p.late_report_cap_days)
     if now >= late_limit:
         await log_event(
             db, entity_type="REPAYMENT_DAY", entity_id=day.id, event_type="REPAYMENT_DAY_REPORTED", now=now,
@@ -521,6 +629,7 @@ async def maybe_close_facility(db: AsyncSession, window: FundingWindow, *, now: 
         return False
     window.status = "REPAID"
     await db.flush()
+    await close_project_if_finished(db, window.project_id, "REPAID")
     await log_event(
         db, entity_type="WINDOW", entity_id=window.id, event_type="WINDOW_REPAID", now=now,
         payload={"facility_ids": [str(f) for f in facility_ids]},

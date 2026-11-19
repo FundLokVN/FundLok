@@ -244,6 +244,13 @@ class Settings(BaseSettings):
     # message per investor ticket due today that it has not marked paid
     # (app/scheduled_jobs/zalo_reminders.py). Unset: no Zalo reminder is sent.
     ZALO_ZBS_REMINDER_TEMPLATE_ID: str | None = None
+    # The approved ZBS template for the Day-14 "sign and pay by 14:45" reminder to
+    # investors (app/scheduled_jobs/day14.py). Unset: that reminder goes by in-app
+    # notification and email only.
+    ZALO_ZBS_DAY14_TEMPLATE_ID: str | None = None
+    # The approved ZBS template for the SME's Day-13 acceptance reminder, 3 days and 1 day before the 15:00 deadline
+    # (app/scheduled_jobs/acceptance.py: company_name, amount, deadline). Unset: in-app and email only.
+    ZALO_ZBS_ACCEPTANCE_TEMPLATE_ID: str | None = None
 
     # ARQ worker (T2 -- HANDOFF-03). The daily repayment batch and ML scoring
     # run through ARQ, never BackgroundTasks (CLAUDE.md). Points at the

@@ -8,6 +8,7 @@ value without monkeypatching.
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import os
 
 
@@ -16,29 +17,44 @@ class DirectTransferParams:
     # --- funding window (docs/specs/direct_transfer/funding-window.md) ---
     hold_hours: int = 2
     window_days: int = 14
+    # Which flow new windows use: "LEGACY" (reserve, sign and pay within 2 hours) or "COMMIT_THEN_ACCEPT" (ADR-011,
+    # Money flow FINAL v1.0). Set by FUNDING_WINDOW_FLOW in the deployment; LEGACY until it is switched on there.
+    default_window_flow: str = dataclasses.field(
+        default_factory=lambda: os.getenv("FUNDING_WINDOW_FLOW", "LEGACY").strip().upper() or "LEGACY"
+    )
     min_raise_pct: int = 50
     min_ticket_vnd: int = 10_000_000  # Q-021 (config, Lok may revisit)
     max_target_vnd: int = 100_000_000
-    cross_platform_cap_vnd: int = 400_000_000  # PROVISIONAL(Q-D12)
-    dispute_working_days: int = 2  # SME dispute window on disbursement (placeholder, D-021)
-    close_wait_working_days: int = 2  # PROVISIONAL(Q-D4)
-    refund_working_days: int = 2  # Q-020
+    cross_platform_cap_vnd: int = 100_000_000  # D-054: per legal entity, target plus declared outside debt
+    # Deadlines count calendar time, never working days (AM-E20, Loc 15 Nov 2026; holidays ignored, D-046).
+    sme_confirm_hours: int = 24  # SME checks a receipt within 24 hours (was dispute_working_days = 2, D-021)
+    confirmed_dispute_days: int = 30  # A5: after an automatic confirmation the SME may dispute with a bank statement
+    close_wait_days: int = 2  # PROVISIONAL(Q-D4)
+    refund_days: int = 2  # Q-020
     working_days_per_month: int = 21  # Q-011 resolved A
+    # Automatic extension (docs/specs/repayment_schedule/automatic-extension.md, D-042)
+    extension_filing_last_day: int = 5  # the SME files month m by the 5th of month m+1 (ICT)
+    extension_days_per_month: int = 21  # D: Δ = ceil(U / due x 21), then up to a multiple of 5
+    extension_day_step: int = 5
+    extension_basis_days: int = 252  # extra interest P x r x Δ / 252
     stub_basis_days: int = 252  # PROVISIONAL(Q-D5): business days per year
     rate_cap_pct: int = 20  # INV-5 / Dieu 468
     # --- repayment (docs/specs/direct_transfer/repayment-collection.md) ---
     withholding_bps: int = 500  # PROVISIONAL(Q-D6): 5% on interest, individuals only
-    # What investors earn: flat over the whole loan, not a year (Phat, 2026-11-02; the marketplace's target). The
-    # loan is formed at this, capped at the business's own rate; the rest of the business's all-in cost is
-    # FundLok's, invoiced separately. None: investors earn the business's full rate.
-    investor_return_bps: int | None = 250
     # Each investment starts repaying as soon as staff approve it, as its own loan (Phat, 2026-11-02), instead of
     # one pooled loan when the round closes. The round's minimum raise then no longer refunds anyone.
     repay_from_approval: bool = True
-    missed_day_report_working_days: int = 2  # Q-026
-    late_report_cap_working_days: int = 5  # PROVISIONAL(Q-D14)
+    lender_report_hours: int = 24  # the lender has 24 hours from the SME's proof to press Not received (A5)
+    late_cutoff: dt.time = dt.time(18, 0)  # ICT: a day with no payment proof by then on its due date is LATE
+    late_report_cap_days: int = 30  # PROVISIONAL(Q-D14): the 30-day dispute window after report_deadline
+    # Late interest (docs/specs/repayment_schedule/late-interest.md, D-041): 150% of r on overdue principal, never above
+    # 30% a year, plus 10% a year on overdue interest; calendar days on a 365-day year.
+    late_principal_rate_pct_of_r: int = 150
+    late_principal_rate_cap_pct: int = 30
+    late_interest_on_interest_pct: int = 10
+    late_interest_basis_days: int = 365
     # --- disputes ---
-    dispute_response_working_days: int = 2  # placeholder
+    dispute_response_days: int = 2  # placeholder
     # --- fees (docs/specs/direct_transfer/fees.md); LIVE by default, E1 / D-023 ---
     fees_enabled: bool = True
     sme_fee_bps: int = 300
@@ -55,6 +71,12 @@ class DirectTransferParams:
     max_evidence_bytes: int = 10 * 1024 * 1024
     allowed_evidence_types: tuple[str, ...] = ("application/pdf", "image/png", "image/jpeg", "image/webp")
     receipt_future_skew_minutes: int = 5
+    # --- Day-14 transfer rule (docs/specs/direct_transfer/day14-transfer-rule.md, Loc 18 Nov 2026) ---
+    qr_validity_minutes: int = 15  # each QR, and its code, is valid this long
+    qr_min_interval_seconds: int = 60  # a new QR at most once a minute (QR_TOO_SOON)
+    day14_pay_cutoff: dt.time = dt.time(14, 45)  # Day 14, ICT: signing and new QRs close
+    day14_no_show_at: dt.time = dt.time(15, 0)  # Day 14, ICT: no-shows and late money are locked
+    day14_receipt_cutoff: dt.time = dt.time(15, 30)  # Day 14, ICT: last receipt upload
 
 
 DEFAULT_PARAMS = DirectTransferParams()

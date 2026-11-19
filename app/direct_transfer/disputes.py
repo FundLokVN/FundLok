@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.direct_transfer import cic
-from app.direct_transfer.calendar_utils import working_deadline
+from app.direct_transfer.calendar_utils import calendar_deadline
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event
@@ -62,7 +62,7 @@ async def open_tranche_dispute(
         raise bad_request("Invalid dispute cause")
     window = await db.get(FundingWindow, tranche.window_id)
     if cause == "SME_DISPUTE":
-        next_party, deadline = "INVESTOR", working_deadline(now, p.dispute_response_working_days)
+        next_party, deadline = "INVESTOR", calendar_deadline(now, days=p.dispute_response_days)
     else:
         next_party, deadline = "STAFF", None
     dispute = Dispute(
@@ -80,7 +80,7 @@ async def open_tranche_dispute(
     )
     if claim_statement or claim_file_id:
         await _add_evidence(
-            db, dispute, party="SME" if cause == "SME_DISPUTE" else "STAFF", kind="CLAIM", statement=claim_statement,
+            db, dispute, party="SME" if raised_by == window.sme_user_id else "STAFF", kind="CLAIM", statement=claim_statement,
             file_id=claim_file_id, submitted_by=raised_by or window.sme_user_id, now=now,
         )
     return dispute
@@ -102,7 +102,7 @@ async def open_missed_day_dispute(
         raise bad_request("Invalid dispute cause")
     tranche = await db.get(Tranche, day.tranche_id)
     if cause == "MISSED_DAY":
-        next_party, deadline = "SME", working_deadline(now, p.dispute_response_working_days)  # SME proves first
+        next_party, deadline = "SME", calendar_deadline(now, days=p.dispute_response_days)  # SME proves first
     else:
         next_party, deadline = "STAFF", None
     dispute = Dispute(
@@ -182,7 +182,7 @@ async def submit_dispute_evidence(
     first, second = _proof_order(dispute)
     if not proofs:
         dispute.required_next_party = second
-        dispute.response_deadline = working_deadline(now, p.dispute_response_working_days)
+        dispute.response_deadline = calendar_deadline(now, days=p.dispute_response_days)
     else:
         dispute.required_next_party = "STAFF"
         dispute.response_deadline = None
@@ -293,6 +293,11 @@ async def _apply_tranche_outcome(
     transfer = (
         await db.execute(select(Transfer).where(Transfer.tranche_id == tranche.id, Transfer.kind == "DISBURSEMENT"))
     ).scalars().first()
+    if tranche.status == "ACTIVE" or (tranche.status == "CONFIRMED" and outcome == "RECEIVED"):
+        # A 30-day dispute after an automatic confirmation (A5): RECEIVED leaves the ticket as it is.
+        # shortcut: NOT_RECEIVED on a ticket already in a loan is only recorded (there is no ACTIVE -> VOID); Finance
+        # unwinds it under its interim policy until that unwind is specified.
+        return
     if outcome == "NOT_RECEIVED":
         await transition_tranche(
             db, tranche, "VOID", now=now, actor_id=staff_id, actor_role="ADMIN", reason=reason, void_reason="NOT_RECEIVED"
@@ -324,7 +329,17 @@ async def _apply_day_outcome(
     params: DirectTransferParams, actor_role: str = "ADMIN",
 ) -> None:
     if outcome == "NOT_PAID":
-        return  # the day stays REPORTED_MISSED (no arrears states in MVP)
+        # The SME could not show bank proof: the day is LATE (late-status.md rule 5). A day reported after it settled
+        # (LATE_REPORT) keeps its status: the ledger is append-only.
+        day = await db.get(RepaymentDay, dispute.repayment_day_id)
+        if day.status == "REPORTED_MISSED":
+            day.status = "LATE"
+            day.late_marked_at = now
+            await log_event(
+                db, entity_type="REPAYMENT_DAY", entity_id=day.id, event_type="REPAYMENT_DAY_LATE", now=now,
+                actor_id=staff_id, actor_role=actor_role, reason=reason, payload={"dispute_id": str(dispute.id)},
+            )
+        return
     from app.direct_transfer.repayment import match_day  # local import: repayment imports this module
 
     await match_day(

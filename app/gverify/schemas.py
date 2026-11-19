@@ -55,6 +55,8 @@ class KycStatusResponse(BaseModel):
     person_number: str | None = None
     full_name: str | None = None
     updated_at: datetime | None = None
+    # Approved before a Day-14 lock: verify again to unlock (Contract 4 Art. 5.4; direct_transfer.standing).
+    reverify_required: bool = False
 
 
 class KybRepresentative(BaseModel):

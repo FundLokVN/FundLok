@@ -57,6 +57,34 @@ EVENT_REPAYMENT_RECEIPT_SUBMITTED = "REPAYMENT_RECEIPT_SUBMITTED"
 # investor's masked name and the amount.
 EVENT_REPAYMENT_RECEIPT_CONFIRMED = "REPAYMENT_RECEIPT_CONFIRMED"
 
+# Commit-then-accept flow (ADR-011, docs/specs/direct_transfer/commit-then-accept-flow.md section 3).
+EVENT_COMMITMENT_RECEIVED = "COMMITMENT_RECEIVED"
+EVENT_ACCEPTANCE_DUE_3D = "ACCEPTANCE_DUE_3D"
+EVENT_ACCEPTANCE_DUE_1D = "ACCEPTANCE_DUE_1D"
+EVENT_WINDOW_ACCEPTED = "WINDOW_ACCEPTED"
+EVENT_WINDOW_DECLINED = "WINDOW_DECLINED"
+EVENT_CONTRACT_SIGNING_OPEN = "CONTRACT_SIGNING_OPEN"
+EVENT_LENDER_LOCKED = "LENDER_LOCKED"
+EVENT_TRANCHE_CONFIRMED = "TRANCHE_CONFIRMED"
+EVENT_LOAN_FORMED = "LOAN_FORMED"
+
+# Automatic extension (automatic-extension.md). To the SME (also the guarantor) and every investor: `data` window_id,
+# period_month, delta_days, start_date, and for an investor its tranche_id, new_daily_vnd, extra_interest_vnd.
+EVENT_EXTENSION_APPLIED = "EXTENSION_APPLIED"
+
+# Day-14 transfer rule (docs/specs/direct_transfer/day14-transfer-rule.md 4.7). To the investor.
+# TRANSFER_DUE_TODAY: "sign and pay by 14:45"; `data`: tranche_id, listing_title, amount_vnd, pay_deadline_at.
+# TOP_UP_PLEDGE_RECORDED: late money became their top-up; `data`: pledge_id, window_id, listing_title, amount_vnd.
+# LENDER_LOCKED (above) carries `data`: window_id, listing_title, reason (NO_SHOW or LATE_MONEY).
+EVENT_TRANSFER_DUE_TODAY = "TRANSFER_DUE_TODAY"
+EVENT_TOP_UP_PLEDGE_RECORDED = "TOP_UP_PLEDGE_RECORDED"
+
+# Late status (docs/specs/repayment_schedule/late-status.md): a repayment day with no payment proof by 18:00 ICT on its
+# due date. To the investor, one per day: `data` tranche_id, repayment_day_id, due_date, net_vnd, memo.
+# To the business, one per run: `data` days, net_vnd, oldest_due_date.
+EVENT_REPAYMENT_DAY_LATE = "REPAYMENT_DAY_LATE"
+EVENT_REPAYMENT_DAY_OVERDUE_SME = "REPAYMENT_DAY_OVERDUE_SME"
+
 NOTIFICATION_EVENTS = frozenset(
     {
         EVENT_APPLICATION_APPROVED,
@@ -67,6 +95,20 @@ NOTIFICATION_EVENTS = frozenset(
         EVENT_REPAYMENT_RECEIPT_REJECTED,
         EVENT_REPAYMENT_RECEIPT_SUBMITTED,
         EVENT_REPAYMENT_RECEIPT_CONFIRMED,
+        EVENT_COMMITMENT_RECEIVED,
+        EVENT_ACCEPTANCE_DUE_3D,
+        EVENT_ACCEPTANCE_DUE_1D,
+        EVENT_WINDOW_ACCEPTED,
+        EVENT_WINDOW_DECLINED,
+        EVENT_CONTRACT_SIGNING_OPEN,
+        EVENT_LENDER_LOCKED,
+        EVENT_TRANCHE_CONFIRMED,
+        EVENT_LOAN_FORMED,
+        EVENT_EXTENSION_APPLIED,
+        EVENT_TRANSFER_DUE_TODAY,
+        EVENT_TOP_UP_PLEDGE_RECORDED,
+        EVENT_REPAYMENT_DAY_LATE,
+        EVENT_REPAYMENT_DAY_OVERDUE_SME,
     }
 )
 

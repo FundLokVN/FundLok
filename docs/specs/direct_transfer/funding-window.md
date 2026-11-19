@@ -62,7 +62,7 @@ funding_windows
 ├── status                   TEXT         NOT NULL CHECK IN ('OPEN','FULL','CLOSING','REPAYING','FAILED','REPAID','CANCELLED')
 ├── close_reason             TEXT         NULL     -- FULL | DAY_14 | SME_EARLY
 ├── closing_started_at       TIMESTAMPTZ  NULL
-├── close_wait_until         TIMESTAMPTZ  NULL     -- closing_started_at + 2 working days
+├── close_wait_until         TIMESTAMPTZ  NULL     -- closing_started_at + 2 calendar days
 ├── closed_at                TIMESTAMPTZ  NULL     -- when the wait ended (PROVISIONAL(Q-D4))
 ├── confirmed_total_vnd      BIGINT       NULL
 ├── repayment_start_date     DATE         NULL
@@ -129,9 +129,11 @@ Constraint: **one live tranche per investor per window**: partial unique `(windo
 | `min_raise_pct` | 50 | of target, rounded up to whole VND |
 | `min_ticket_vnd` | 10,000,000 | Q-021 |
 | `max_target_vnd` | 100,000,000 | per borrower per platform |
-| `cross_platform_cap_vnd` | 400,000,000 | PROVISIONAL(Q-D12) |
-| `dispute_working_days` | 2 | SME dispute window (placeholder) |
-| `close_wait_working_days` | 2 | PROVISIONAL(Q-D4) |
+| `cross_platform_cap_vnd` | 100,000,000 | D-054 (per legal entity) |
+| `sme_confirm_hours` | 24 | SME checks a receipt within 24 calendar hours (AM-E20; was `dispute_working_days = 2`) |
+| `close_wait_days` | 2 | calendar days, PROVISIONAL(Q-D4) (was `close_wait_working_days`) |
+| `refund_days` | 2 | calendar days, Q-020 (was `refund_working_days`) |
+| `dispute_response_days` | 2 | calendar days per dispute step, placeholder (was `dispute_response_working_days`) |
 | `working_days_per_month` | 21 | Q-011 resolved A |
 | `stub_basis_days` | 252 | I-10 |
 | `rate_cap_pct` | 20 | INV-5 |
@@ -241,19 +243,19 @@ OPEN|FULL --[admin cancel before any CONFIRMED; KYB/fraud]--> CANCELLED
 
 1. **Open.** A window opens only if: the listing is `DRAFT` or `OPEN` (the legacy `create_listing` opens immediately) with no `FILLED` legacy orders, and its `Contract` is `ACTIVE_PENDING_FUNDING` with a LOCKED score run; the SME payment account is `APPROVED`; the SME has no live window (partial unique index); the SME has no unpaid `fee_invoice` (status `ISSUED` or `OVERDUE`) (`SME_INVOICE_UNPAID`, `fees.md`); `target <= 100,000,000`; and the cap check passes (rule 3). The standing offer is signed with `Signer` and stored with hash and certificate; the window is `OPEN` for 14 days from `window_start`. The listing is set `OPEN`.
 2. **Immutability of terms.** `annual_rate_pct`, `term_months` and the engine/params versions come from the locked score run (`score_runs.interest_rate_pct`, `engine_version`, `params_version`) and the application's `duration_months` (`contract.final_terms` is currently empty) and are copied into `offer_terms`; they are never recomputed (INV-5). The rate is within the 20% cap (INV-1).
-3. **Borrower cap (I-25, D-022).** Before the window opens and at each reservation, FundLok checks: `target + declared_outside_debt_vnd <= cross_platform_cap_vnd (400M)` (PROVISIONAL(Q-D12)), and own records: no other live window for the project. A `CAP_CHECK` evidence row logs the basis (`OWN_RECORDS_PLUS_DECLARATION`); when CIC connects only the source changes.
+3. **Borrower cap (I-25, D-022).** Before the window opens and at each reservation, FundLok checks: `target + declared_outside_debt_vnd <= cross_platform_cap_vnd (100M, D-054)`, and own records: no other live window for the project. A `CAP_CHECK` evidence row logs the basis (`OWN_RECORDS_PLUS_DECLARATION`); when CIC connects only the source changes.
 4. **Capacity (I-7, PROVISIONAL(Q-D3)).** `capacity = target - SUM(amount of tranches in RESERVED, SIGNED, ATTESTED, CONFIRMED, or UNDER_REVIEW with a cause other than LATE_RECEIPT)`. A late-receipt tranche does not hold capacity until staff revive it (otherwise re-entering review could overbook the window); reviving re-checks capacity. Reservation locks the window row `SELECT ... FOR UPDATE`; capacity never goes below 0 under concurrent reservations.
 5. **Reserve.** Allowed only when the window is `OPEN` and `now < window_end`, `ack_risk_disclosure` is true, `amount >= min_ticket` and `amount <= capacity`, except the **last-ticket rule** (I-6): if `capacity < min_ticket`, a reservation of exactly `capacity` is allowed. One live tranche per investor per window. Blocked if the investor has any unpaid `INVESTOR_SERVICE` `fee_invoice` (status `ISSUED` or `OVERDUE`; credit model, `fees.md`) (`INVESTOR_FEE_UNPAID`). The investor's payment account must be `APPROVED`. A 2 hour hold starts (`hold_expires_at = now + 2h`). If capacity reaches 0 the window becomes `FULL`. An investor who is also the SME's user cannot reserve.
 6. **Idempotency.** Same `Idempotency-Key` returns the same tranche and changes nothing; a different request body with the same key is `IDEMPOTENCY_CONFLICT`.
 7. **Reference code.** `FL` + 8 characters from `A-Z0-9` drawn from a CSPRNG, unique in `tranches.reference_code`; no diacritics (`transfer-and-evidence.md`).
 8. **Sign.** `RESERVED -> SIGNED` requires `now <= hold_expires_at`; the acceptance is signed with `Signer`; the contract is concluded when the acceptance reaches the SME through the platform and takes effect when funds are confirmed (Civil Code Art. 400.1, 401.1). The hold continues until `hold_expires_at`; a tranche with a submitted receipt (`receipt_submitted_at` not null) does **not** expire (it awaits staff).
 9. **Hold lapse.** `expire_holds(now)` moves `RESERVED` and `SIGNED` tranches with `hold_expires_at <= now` and no submitted receipt to `EXPIRED` and frees capacity; a `FULL` window with `now < window_end` returns to `OPEN`. Idempotent.
-10. **SME confirmation.** `attested_at` sets `confirm_deadline = end of the 2nd working day after attested_at` (ICT). `sme_confirm` or `confirm_lapsed_tranches(now)` (silence counts as received) moves `ATTESTED -> CONFIRMED`. Only the SME of the window may confirm or dispute.
-11. **Window close trigger.** `advance_window(now)`: (a) `OPEN`/`FULL` starts closing when `now >= window_end`, or when `FULL` and no tranche is `RESERVED` or `SIGNED`, or on SME early close (confirmed >= min_raise). Starting close sets `closing_started_at`, `close_wait_until = 2 working days later`, `close_reason`, and at `window_end` / early close expires any `RESERVED`/`SIGNED` tranche (acceptance after the window forms no contract, Art. 394.1). (b) `CLOSING` finalizes when no tranche is `ATTESTED` or `UNDER_REVIEW`, or `now >= close_wait_until`; lapsed `ATTESTED` tranches are confirmed first.
+10. **SME confirmation.** `attested_at` sets `confirm_deadline = attested_at + sme_confirm_hours` (24 calendar hours; weekends and holidays do not extend it). `sme_confirm` or `confirm_lapsed_tranches(now)` (silence counts as received) moves `ATTESTED -> CONFIRMED`. Only the SME of the window may confirm or dispute.
+11. **Window close trigger.** `advance_window(now)`: (a) `OPEN`/`FULL` starts closing when `now >= window_end`, or when `FULL` and no tranche is `RESERVED` or `SIGNED`, or on SME early close (confirmed >= min_raise). Starting close sets `closing_started_at`, `close_wait_until = closing_started_at + close_wait_days` (2 calendar days), `close_reason`, and at `window_end` / early close expires any `RESERVED`/`SIGNED` tranche (acceptance after the window forms no contract, Art. 394.1). (b) `CLOSING` finalizes when no tranche is `ATTESTED` or `UNDER_REVIEW`, or `now >= close_wait_until`; lapsed `ATTESTED` tranches are confirmed first.
 12. **Finalize** sets `closed_at = now` and:
     1. A tranche still `UNDER_REVIEW` is `excluded_at_close` (PROVISIONAL(Q-D7)); it never joins.
     2. `confirmed_total = SUM(CONFIRMED)` (always <= target by rule 4).
-    3. **If `confirmed_total < min_raise_vnd` (below 50%):** every `CONFIRMED` tranche -> `VOID(BELOW_MIN_RAISE)` with a tracked refund `transfer` (kind `REFUND`, due in `refund_working_days = 2`); window `FAILED`; listing `CANCELLED`; **no fee invoice**; CIC `VOID` events. PROVISIONAL(Q-D8).
+    3. **If `confirmed_total < min_raise_vnd` (below 50%):** every `CONFIRMED` tranche -> `VOID(BELOW_MIN_RAISE)` with a tracked refund `transfer` (kind `REFUND`, due in `refund_days = 2` calendar days); window `FAILED`; listing `CANCELLED`; **no fee invoice**; CIC `VOID` events. PROVISIONAL(Q-D8).
     4. **Else:** `repayment_start_date` = first working day **after** `closed_at`'s date (PROVISIONAL(Q-D4)); per-tranche stub interest (rule 13); the facility is originated for `principal = confirmed_total` at the contract's rate and term with `working_days_per_month = 21` (reuse `originate_facility`, `docs/specs/repayment_schedule/origination-schedule-generation.md`), then moved `DRAFT -> APPROVED -> DISBURSED -> ACTIVE`; a `Holding` is created per confirmed tranche (`principal = amount`, `share_ratio = amount / total`); every confirmed tranche -> `ACTIVE`; repayment rows are generated (`repayment-collection.md`); the SME activation `fee_invoice` is issued (`fees.md`); ledger claim legs are posted (`ledger-amendment.md`); CIC `ATTESTED` events already exist, `DAILY_BALANCE` starts at the first instalment day; window `REPAYING`; listing `FUNDED` if `confirmed_total == target` else `CLOSED`; `contract.funded_amount = confirmed_total`, contract `ACTIVE_FUNDED`.
 13. **Stub interest (E3, I-10, PROVISIONAL(Q-D5)).** Per tranche: `stub_days` = number of **business days** `d` with `receipt_date <= d < repayment_start_date` (receipt date = ICT date of the transfer; business days per `business-day-calendar.md`); `stub_interest = round_half_up(amount * rate_pct/100 * stub_days / 252)`. It is a **separate dated obligation** due on `repayment_start_date`, outside `T0`; it never changes the facility schedule or `T0`. **Cap test (INV-5), both ways**: `implied = ((T0 + SUM(stub)) / P - 1) * 12 / term` and the same with the 3% activation fee included in the numerator; both results are logged as evidence rows; if the no-fee test would exceed `rate_cap_pct`, stubs are reduced (largest-remainder) to the headroom and the reduction is logged.
 14. **Early close and early window (Q-D4).** An SME may close early only when confirmed >= `min_raise_vnd`. "Extend once" does not exist.
@@ -268,12 +270,12 @@ OPEN|FULL --[admin cancel before any CONFIRMED; KYB/fraud]--> CANCELLED
 | Timer | Value | Fires | Service function | ARQ job (ICT cron) |
 |---|---|---|---|---|
 | Ticket hold | 2 hours | `RESERVED`/`SIGNED` without a receipt -> `EXPIRED`, capacity freed, `FULL` may reopen | `expire_holds` | `expire_holds_job`, every 5 min |
-| SME dispute window | end of the 2nd working day after attestation (placeholder) | `ATTESTED -> CONFIRMED` | `confirm_lapsed_tranches` | `advance_windows_job`, every 10 min |
+| SME dispute window | 24 calendar hours after attestation (`sme_confirm_hours`) | `ATTESTED -> CONFIRMED` | `confirm_lapsed_tranches` | `advance_windows_job`, every 10 min |
 | Funding window | up to 14 days; early when full / SME early close | `OPEN`/`FULL -> CLOSING` | `advance_window` | `advance_windows_job` |
-| Close wait | end of the 2nd working day after close begins (PROVISIONAL(Q-D4)) | `CLOSING -> REPAYING`/`FAILED` | `advance_window` | `advance_windows_job` |
-| Dispute response | end of the 2nd working day per step (placeholder) | turn passes to staff | `advance_dispute_deadlines` | `advance_windows_job` |
-| Missed-day report | end of the 2nd working day after the due date | day settles | `presume_paid_days`, `settle_days` | `repayment_day_job`, 00:10 |
-| Refund | 2 working days (Q-020) | tracked `REFUND` transfer `due_by` | `create_refund_transfer` | n/a (due date only) |
+| Close wait | 2 calendar days after close begins (PROVISIONAL(Q-D4)) | `CLOSING -> REPAYING`/`FAILED` | `advance_window` | `advance_windows_job` |
+| Dispute response | 2 calendar days per step (placeholder) | turn passes to staff | `advance_dispute_deadlines` | `advance_windows_job` |
+| Missed-day report | 24 hours after the due date ends (`lender_report_hours`) | day settles | `presume_paid_days`, `settle_days` | `repayment_day_job`, 00:10 |
+| Refund | 2 calendar days (Q-020) | tracked `REFUND` transfer `due_by` | `create_refund_transfer` | n/a (due date only) |
 | SME fee invoice | due 7 days after issue (proposed) | `OVERDUE`, late fee, block | `mark_overdue_invoices` | `invoice_job`, 00:20 |
 | Investor fee invoice | monthly; due 7 days (PROVISIONAL(Q-D15)) | accrual and invoice | `accrue_investor_fees`, `issue_investor_invoices` | `invoice_job`, 00:20 |
 | CIC daily balance | previous business day | log event | `emit_daily_balances` | `cic_daily_balance_job`, 00:30 |
@@ -326,7 +328,7 @@ Each maps 1:1 to a test in `tests/direct_transfer/test_funding_window.py` (and t
 - [ ] `test_expire_holds_expires_reserved_and_signed_without_receipt`
 - [ ] `test_expire_holds_skips_tranche_with_submitted_receipt`
 - [ ] `test_sme_confirm_attested_tranche`
-- [ ] `test_confirm_deadline_is_two_working_days` [uses calendar with a weekend]
+- [ ] `test_sme_confirm_window_is_24_calendar_hours_across_a_weekend`
 - [ ] `test_lapsed_dispute_window_auto_confirms`
 - [ ] `test_only_window_sme_can_confirm_or_dispute`
 - [ ] `test_sme_dispute_moves_to_under_review_with_cause`
@@ -334,7 +336,7 @@ Each maps 1:1 to a test in `tests/direct_transfer/test_funding_window.py` (and t
 - [ ] `test_close_early_blocked_below_min_raise_and_allowed_above`
 - [ ] `test_window_closes_when_full_and_no_unsigned_tranches`
 - [ ] `test_window_closes_on_day_14_and_expires_unsigned`
-- [ ] `test_close_waits_up_to_two_working_days_for_open_review`
+- [ ] `test_close_waits_up_to_two_days_for_open_review`, `test_close_wait_is_calendar_days`
 - [ ] `test_close_below_50_percent_voids_everything_with_refunds_and_no_fee`
 - [ ] `test_close_success_creates_facility_holdings_and_activates_tranches`
 - [ ] `test_close_start_date_is_first_working_day_after_close` (weekend/holiday case)
@@ -367,3 +369,4 @@ Each maps 1:1 to a test in `tests/direct_transfer/test_funding_window.py` (and t
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-10-28 | Edward / Claude | Initial draft from HANDOFF-04 |
+| 0.2 | 2026-11-16 | Edward / Claude | AM-E20 (SCRUM-625, D-046/D-049): every deadline counts calendar time. `dispute_working_days` -> `sme_confirm_hours = 24`; `close_wait_working_days` -> `close_wait_days = 2`; `refund_working_days` -> `refund_days = 2`; `dispute_response_working_days` -> `dispute_response_days = 2`. Daily repayments stay Monday to Friday; `working_days_per_month` stays. |

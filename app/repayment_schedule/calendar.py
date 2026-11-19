@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-DEFAULT_WORKING_DAYS_PER_MONTH = 22  # T5 -- matches pricing.py's params_version bump to 22
+DEFAULT_WORKING_DAYS_PER_MONTH = 21  # HANDOFF-06 T1 (D14) -- matches grading_params_v1.yaml and direct_transfer config
 
 _DATA_PATH = Path(__file__).parent / "data" / "vn_public_holidays.yaml"
 
@@ -66,8 +66,21 @@ class BusinessDayCalendar:
     future per-SME/per-province override.
     """
 
-    def __init__(self, extra_holidays: frozenset[datetime.date] | None = None):
+    def __init__(
+        self,
+        extra_holidays: frozenset[datetime.date] | None = None,
+        observe_public_holidays: bool = False,
+    ):
+        """`observe_public_holidays=False` (default, D-046 / TD-01, Loc 14 Nov 2026):
+        Vietnamese public holidays are ignored -- a holiday is a normal repayment
+        day and no deadline moves for it; only weekends are skipped (21 business
+        days a month, 252 a year). The holiday table stays loaded and untouched;
+        flipping this default to True restores the earlier holiday-skipping
+        behaviour (and the loud missing-year check). `extra_holidays` is an
+        explicit per-caller override and is honoured regardless of the flag.
+        """
         self._extra_holidays = extra_holidays or frozenset()
+        self._observe_public_holidays = observe_public_holidays
 
     def _year_is_known(self, year: int) -> bool:
         return year in known_calendar_years()
@@ -75,6 +88,8 @@ class BusinessDayCalendar:
     def _is_holiday(self, d: datetime.date) -> bool:
         if d in self._extra_holidays:
             return True
+        if not self._observe_public_holidays:
+            return False
         calendar = _load_holiday_calendar()
         year_entry = calendar.get(d.year)
         return year_entry is not None and d in year_entry["dates"]
@@ -85,7 +100,7 @@ class BusinessDayCalendar:
         the holiday table at all -- rather than silently assuming no
         holidays exist that year.
         """
-        if not self._year_is_known(d.year):
+        if self._observe_public_holidays and not self._year_is_known(d.year):
             raise MissingHolidayCalendarYearError(
                 f"No holiday calendar entry for {d.year} in {_DATA_PATH.name}. "
                 "A schedule cannot be generated into a year with no maintained "

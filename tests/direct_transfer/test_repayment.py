@@ -11,7 +11,7 @@ from app.direct_transfer.ledger_posting import contract_claim_summary
 from app.direct_transfer.models import CicEvent, Dispute, FundingWindow, RepaymentDay, Tranche
 from app.repayment_schedule.models import Facility, ScheduledPayment
 
-from .helpers import at, close_now, fund_window, make_investor, make_world, open_window
+from .helpers import at, close_now, fund_window, make_investor, make_world, open_window, pay_days_through, receipt_file
 
 M = 1_000_000
 
@@ -110,39 +110,36 @@ async def test_todays_payments_totals_match_rows(loan):
 
 async def test_mark_paid_sets_presumed_paid_and_is_idempotent(loan):
     world, window, _ = loan
-    day = (await day_rows(world.db, kind="INSTALMENT", day_index=1))[0]
+    rows = await day_rows(world.db, tranche_id=(await day_rows(world.db, kind="INSTALMENT", day_index=1))[0].tranche_id)
+    first = [d.id for d in rows if d.due_date == rows[0].due_date]  # the stub and day 1, both due Wed 4 Nov
     now = ict(2026, 11, 4, 16)
-    out = await repayment.mark_days_paid(world.db, sme_user_id=world.sme.id, repayment_day_ids=[day.id], receipt_file_id=None, idempotency_key="m1", now=now)
-    assert out[0].status == "PRESUMED_PAID" and out[0].marked_paid_at == now
-    again = await repayment.mark_days_paid(world.db, sme_user_id=world.sme.id, repayment_day_ids=[day.id], receipt_file_id=None, idempotency_key="m1", now=now + dt.timedelta(hours=1))
-    assert again[0].marked_paid_at == now
+    proof = (await receipt_file(world)).id
+    out = await repayment.mark_days_paid(world.db, sme_user_id=world.sme.id, repayment_day_ids=first, receipt_file_id=proof, idempotency_key="m1", now=now)
+    day = out[-1]
+    assert day.status == "PRESUMED_PAID" and day.marked_paid_at == now
+    again = await repayment.mark_days_paid(world.db, sme_user_id=world.sme.id, repayment_day_ids=first, receipt_file_id=proof, idempotency_key="m1", now=now + dt.timedelta(hours=1))
+    assert again[-1].marked_paid_at == now
     with pytest.raises(DirectTransferError) as info:
-        await repayment.mark_days_paid(world.db, sme_user_id=world.sme.id, repayment_day_ids=[(await day_rows(world.db, day_index=2))[0].id], receipt_file_id=None, idempotency_key="m2", now=now)
+        await repayment.mark_days_paid(world.db, sme_user_id=world.sme.id, repayment_day_ids=[(await day_rows(world.db, day_index=2))[0].id], receipt_file_id=proof, idempotency_key="m2", now=now)
     assert info.value.code == "NOT_DUE_YET"
+    with pytest.raises(DirectTransferError) as info:  # no receipt, no proof
+        await repayment.mark_days_paid(world.db, sme_user_id=world.sme.id, repayment_day_ids=[day.id], receipt_file_id=None, idempotency_key="m3", now=now)
+    assert info.value.code == "RECEIPT_REQUIRED"
 
 
 async def test_mark_paid_rejects_future_rows(loan):
     world, _, _ = loan
     future = (await day_rows(world.db, kind="INSTALMENT", day_index=30))[0]
     with pytest.raises(DirectTransferError) as info:
-        await repayment.mark_days_paid(world.db, sme_user_id=world.sme.id, repayment_day_ids=[future.id], receipt_file_id=None, idempotency_key="x", now=ict(2026, 11, 4, 9))
+        await repayment.mark_days_paid(world.db, sme_user_id=world.sme.id, repayment_day_ids=[future.id], receipt_file_id=(await receipt_file(world)).id, idempotency_key="x", now=ict(2026, 11, 4, 9))
     assert info.value.status_code == 409
 
 
-async def test_presume_paid_job_is_idempotent_and_clock_injected(loan):
+async def test_report_deadline_is_24_hours_after_the_proof(loan):
     world, _, _ = loan
-    n1 = await repayment.presume_paid_days(world.db, now=ict(2026, 11, 5, 0, 5))  # due Wed 4 Nov and earlier
-    assert n1 == 20  # 10 instalments + 10 stubs due on Wed 4 Nov
-    assert await repayment.presume_paid_days(world.db, now=ict(2026, 11, 5, 0, 5)) == 0
-    assert await repayment.presume_paid_days(world.db, now=ict(2026, 11, 4, 12)) == 0
-
-
-async def test_report_deadline_is_two_working_days(loan):
-    world, _, _ = loan
+    await pay_days_through(world, ict(2026, 11, 5))  # Wed 4 Nov's days paid at 10:00 that day
     day = (await day_rows(world.db, kind="INSTALMENT", day_index=1))[0]
-    assert day.report_deadline == ict(2026, 11, 7)  # end of Fri 6 Nov (2nd working day after Wed 4 Nov)
-    friday = (await day_rows(world.db, kind="INSTALMENT", day_index=3))[0]  # due Fri 6 Nov
-    assert friday.report_deadline == ict(2026, 11, 11)  # Mon 9, Tue 10 -> end of Tue
+    assert day.report_deadline == ict(2026, 11, 5, 10)
 
 
 async def test_report_missing_before_deadline_marks_reported_missed_and_opens_dispute(loan):
@@ -169,7 +166,7 @@ async def test_report_by_other_investor_is_404(loan):
 
 async def test_late_report_within_cap_goes_to_reconciliation_without_changing_status(loan):
     world, _, tr = loan
-    await repayment.presume_paid_days(world.db, now=ict(2026, 11, 9, 0, 5))
+    await pay_days_through(world, ict(2026, 11, 9, 0, 5))
     day = (await day_rows(world.db, tranche_id=tr[0].id, kind="INSTALMENT", day_index=1))[0]
     assert day.status == "PRESUMED_PAID"
     out = await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="late", file_id=None, now=ict(2026, 11, 10, 10), params=world.params)
@@ -181,17 +178,17 @@ async def test_late_report_within_cap_goes_to_reconciliation_without_changing_st
 async def test_late_report_beyond_cap_refused(loan):
     world, _, tr = loan
     day = (await day_rows(world.db, tranche_id=tr[0].id, kind="INSTALMENT", day_index=1))[0]
-    # deadline end Fri 6 Nov; +5 working days = end of Fri 13 Nov (Sat 14 Nov 00:00 ICT)
+    # report_deadline Fri 6 Nov 00:00; +30 calendar days = Sun 6 Dec 00:00 ICT
     with pytest.raises(DirectTransferError) as info:
-        await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="too late", file_id=None, now=ict(2026, 11, 14), params=world.params)
+        await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="too late", file_id=None, now=ict(2026, 12, 6), params=world.params)
     assert info.value.code == "REPORT_WINDOW_CLOSED" and info.value.persist is True
 
 
 async def test_settle_days_posts_principal_ledger_legs_once(loan):
     world, window, tr = loan
-    await repayment.presume_paid_days(world.db, now=ict(2026, 11, 9, 0, 5))
+    await pay_days_through(world, ict(2026, 11, 9, 0, 5))
     assert await repayment.settle_days(world.db, now=ict(2026, 11, 5)) == 0  # deadline not reached
-    n = await repayment.settle_days(world.db, now=ict(2026, 11, 9))
+    n = await repayment.settle_days(world.db, now=ict(2026, 11, 6))
     assert n == 20  # Wed 4 Nov rows (10 instalments + 10 stubs) have passed their deadline
     summary = await contract_claim_summary(world.db, contract_id=world.contract.id)
     day1_principal = sum(
@@ -199,14 +196,14 @@ async def test_settle_days_posts_principal_ledger_legs_once(loan):
     )
     assert summary.borrower_obligation_vnd == 100 * M - day1_principal
     assert summary.lender_total_vnd == summary.borrower_obligation_vnd
-    assert await repayment.settle_days(world.db, now=ict(2026, 11, 9)) == 0
+    assert await repayment.settle_days(world.db, now=ict(2026, 11, 6)) == 0
     facility = await world.db.get(Facility, window.facility_id)
     assert int(facility.collected_to_date_vnd) == 1_253_968  # instalment gross only; the stub sits outside T0
 
 
 async def test_reported_missed_day_blocks_settlement_until_matched(loan):
     world, _, tr = loan
-    await repayment.presume_paid_days(world.db, now=ict(2026, 11, 5, 0, 5))
+    await pay_days_through(world, ict(2026, 11, 5, 0, 5))
     day = (await day_rows(world.db, tranche_id=tr[0].id, kind="INSTALMENT", day_index=1))[0]
     await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="missing", file_id=None, now=ict(2026, 11, 5, 9), params=world.params)
     await repayment.settle_days(world.db, now=ict(2026, 11, 20))
@@ -222,7 +219,7 @@ async def test_reported_missed_day_blocks_settlement_until_matched(loan):
 async def test_facility_settles_when_all_rows_settled_and_window_repaid_and_sme_unlocked(loan):
     world, window, tr = loan
     far = ict(2027, 6, 1)
-    await repayment.presume_paid_days(world.db, now=far)
+    await pay_days_through(world, far)
     n = await repayment.settle_days(world.db, now=far)
     assert n == 840 + 10
     facility = await world.db.get(Facility, window.facility_id)
@@ -245,9 +242,9 @@ async def test_facility_settles_when_all_rows_settled_and_window_repaid_and_sme_
 
 async def test_daily_balance_counts_presumed_paid_and_excludes_reported_missed(loan):
     world, _, tr = loan
-    await repayment.presume_paid_days(world.db, now=ict(2026, 11, 6, 0, 5))
+    await pay_days_through(world, ict(2026, 11, 6, 0, 5))
     day = (await day_rows(world.db, tranche_id=tr[0].id, kind="INSTALMENT", day_index=1))[0]
-    await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="missing", file_id=None, now=ict(2026, 11, 6, 9), params=world.params)
+    await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="missing", file_id=None, now=ict(2026, 11, 5, 9, 59), params=world.params)  # inside the 24 hours from the proof
     created = await cic.emit_daily_balances(world.db, on_date=dt.date(2026, 11, 5), now=ict(2026, 11, 6, 1))
     assert created == 10
     ev0 = (await world.db.execute(select(CicEvent).where(CicEvent.emit_key == f"daily:{tr[0].id}:2026-11-05"))).scalar_one()

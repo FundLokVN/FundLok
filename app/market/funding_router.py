@@ -14,6 +14,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     File,
+    Form,
     Header,
     HTTPException,
     Query,
@@ -30,6 +31,9 @@ from app.direct_transfer.config import DEFAULT_PARAMS
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.models import FundingWindow, RepaymentDay, Tranche, Transfer
+from app.direct_transfer import day14
+from app.direct_transfer.day14_times import window_cutoffs
+from app.direct_transfer import standing as lender_standing
 from app.direct_transfer.receipts import ManualEntryExtractor
 from app.direct_transfer.schemas import FundingWindowOut, PaymentOut, ReceiptResultOut
 from app.direct_transfer.tranches import (
@@ -37,7 +41,9 @@ from app.direct_transfer.tranches import (
     list_window_tranches,
     mask_name,
     payment_instructions,
+    sme_dispute_after_confirmation,
     sme_dispute_tranche,
+    sme_receipt_check,
     submit_receipt,
 )
 from app.direct_transfer.windows import get_window_progress
@@ -62,6 +68,7 @@ from app.market.schemas import (
     InvestorAgreementOut,
     InvestorAnalyticsOut,
     InvestorTrancheOut,
+    LenderStandingOut,
     PartyBOut,
     SignatureCheckOut,
     SignedInvestmentConfirmationOut,
@@ -71,6 +78,7 @@ from app.market.schemas import (
     SmeRoundOut,
     SmeTicketOut,
     TransactionOut,
+    UnlockStandingIn,
 )
 from app.market.service import _require_eligible_investor
 from app.notifications import realtime
@@ -491,7 +499,70 @@ async def read_payment(
         instructions = await payment_instructions(db, tranche_id=tranche_id, investor_id=current_user.id, now=_now())
     except DirectTransferError as exc:
         await _raise_mapped(db, exc)
+    await db.commit()  # the first read after signing issues the first QR code (day14.current_qr)
     return PaymentOut.model_validate(instructions)
+
+
+@router.post("/tranches/{tranche_id}/qr", response_model=PaymentOut, status_code=201)
+async def new_payment_qr(
+    tranche_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """"Get a new QR" (Day-14 transfer rule): a new code, valid 15 minutes, replacing the last one. At most once a
+    minute (429 QR_TOO_SOON with Retry-After). 409 PAY_DEADLINE_PASSED after 14:45 on disbursement day,
+    TRANCHE_NOT_PAYABLE once a receipt is in, HOLD_EXPIRED after the hold."""
+    if await investor_agreement.current_signature(db, current_user.id) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm the Investor Service Agreement with this commitment before paying",
+            headers={"X-Error-Code": "INVESTOR_AGREEMENT_REQUIRED"},
+        )
+    now = _now()
+    try:
+        await day14.issue_new_qr(db, tranche_id=tranche_id, investor_id=current_user.id, now=now)
+        instructions = await payment_instructions(db, tranche_id=tranche_id, investor_id=current_user.id, now=now)
+    except DirectTransferError as exc:
+        await db.rollback()
+        await _raise_mapped(db, exc)
+    await db.commit()
+    return PaymentOut.model_validate(instructions)
+
+
+@router.get("/me/standing", response_model=LenderStandingOut)
+async def read_my_standing(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """Whether the lender is locked after a Day-14 no-show or late money, what unlocking needs, and their top-up
+    pledges (late money the SME kept for them)."""
+    return LenderStandingOut.model_validate(await lender_standing.get_standing(db, current_user.id))
+
+
+@router.post("/me/standing/unlock", response_model=LenderStandingOut)
+async def unlock_my_standing(
+    body: UnlockStandingIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_investor),
+):
+    """Unlock after a Day-14 lock (Contract 4 Art. 5.4): needs an approved eKYC done after the lock (409
+    EKYC_REQUIRED) and the undertaking sentence typed as shown (422 ACKNOWLEDGEMENT_MISMATCH)."""
+    try:
+        view = await lender_standing.unlock(
+            db, investor_id=current_user.id, acknowledgement=body.acknowledgement, now=_now(),
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    except DirectTransferError as exc:
+        await db.rollback()
+        await _raise_mapped(db, exc)
+    append_audit(
+        db, entity_type="USER", entity_id=current_user.id, action="LENDER_UNLOCKED", actor_id=current_user.id,
+        after_state={"status": view.status},
+    )
+    await db.commit()
+    return LenderStandingOut.model_validate(view)
 
 
 @router.get("/me/transactions", response_model=list[TransactionOut])
@@ -546,28 +617,61 @@ async def read_my_tranches(
     """The caller's tickets, newest first, each with the project it is in."""
     tranches = await list_investor_tranches(db, investor_id=current_user.id)
     windows = {
-        window_id: (project, term_months)
-        for window_id, project, term_months in (
+        window.id: (project, window.term_months, window_cutoffs(window) is not None)
+        for window, project in (
             await db.execute(
-                select(FundingWindow.id, Project, FundingWindow.term_months)
+                select(FundingWindow, Project)
                 .join(Project, Project.id == FundingWindow.project_id)
                 .where(FundingWindow.id.in_({t.window_id for t in tranches}))
             )
         ).all()
     } if tranches else {}
+    # The latest receipt of each ticket, for the Day-14 payment timing (oldest first, so the newest wins).
+    receipts = {
+        transfer.tranche_id: transfer
+        for transfer in (
+            await db.execute(
+                select(Transfer)
+                .where(Transfer.tranche_id.in_({t.id for t in tranches}), Transfer.kind == "DISBURSEMENT")
+                .order_by(Transfer.created_at)
+            )
+        ).scalars()
+    } if tranches else {}
     out = []
     for tranche in tranches:
-        project, term_months = windows.get(tranche.window_id, (None, None))
+        project, term_months, day14 = windows.get(tranche.window_id, (None, None, False))
+        # The Day-14 timing only means something on a round with Day-14 cut-offs; on LEGACY rounds it is a staff
+        # note (a code past its 15 minutes inside the 2-hour hold is fine there).
+        receipt = receipts.get(tranche.id) if day14 else None
+        timing = receipt.payment_timing if receipt else None
+        if receipt is not None and timing is None and receipt.check_status == "AWAITING_FIELDS":
+            timing = "PENDING_CHECK"
         out.append(
             InvestorTrancheOut.model_validate(tranche).model_copy(
                 update={
                     "project_id": project.id if project else None,
                     "project_name": project.legal_name if project else None,
                     "term_months": term_months,
+                    "payment_timing": timing,
+                    "late_reason": receipt.late_reason if receipt else None,
                 }
             )
         )
     return out
+
+
+async def _read_evidence(file: UploadFile) -> tuple[bytes, str]:
+    """A PDF, PNG, JPEG or WEBP of at most 10 MB, typed by its bytes."""
+    limit = DEFAULT_PARAMS.max_evidence_bytes
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
+    content_type = funding.sniff_receipt_type(content)
+    if content_type is None:
+        raise HTTPException(
+            status_code=415, detail="Upload a PDF, PNG, JPEG or WEBP", headers={"X-Error-Code": "UNSUPPORTED_TYPE"}
+        )
+    return content, content_type
 
 
 @router.post("/tranches/{tranche_id}/receipt", response_model=ReceiptResultOut, status_code=202)
@@ -589,15 +693,7 @@ async def upload_receipt(
     taken, for staff to review (LATE_RECEIPT), since the money may already have moved. The business is emailed to
     look for the money under the memo (once, not on a replay, not for a rejected receipt); its bell rings when the
     transfer is approved."""
-    limit = DEFAULT_PARAMS.max_evidence_bytes
-    content = await file.read(limit + 1)
-    if len(content) > limit:
-        raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
-    content_type = funding.sniff_receipt_type(content)
-    if content_type is None:
-        raise HTTPException(
-            status_code=415, detail="Upload a PDF, PNG, JPEG or WEBP", headers={"X-Error-Code": "UNSUPPORTED_TYPE"}
-        )
+    content, content_type = await _read_evidence(file)
     replay = idempotency_key is not None and (
         await db.execute(select(Transfer.id).where(Transfer.idempotency_key == idempotency_key))
     ).first() is not None
@@ -710,6 +806,10 @@ async def report_missing_transfer(
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
+    return await _sme_ticket(db, tranche)
+
+
+async def _sme_ticket(db: AsyncSession, tranche: Tranche) -> SmeTicketOut:
     investor = await db.get(User, tranche.investor_id)
     return SmeTicketOut(
         id=tranche.id,
@@ -721,7 +821,93 @@ async def report_missing_transfer(
         attested_at=tranche.attested_at,
         confirm_deadline=tranche.confirm_deadline,
         review_cause=tranche.review_cause,
+        dispute_until=tranche.dispute_until,
     )
+
+
+@router.post("/tranches/{tranche_id}/sme-receipt", response_model=SmeTicketOut, status_code=202)
+async def upload_sme_receipt(
+    tranche_id: UUID,
+    request: Request,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+    ocr: ReceiptOcr | None = Depends(receipt_ocr),
+):
+    """The business confirms an investor's transfer with its own screenshot of the money arriving, within 24 hours
+    of the investor's receipt being checked (commit-then-accept-flow.md 4.6). Same amount, reference and bank
+    transaction id as the investor's: CONFIRMED. A difference: UNDER_REVIEW (RECEIPT_MISMATCH) for staff. With
+    RECEIPT_OCR_ENABLED off nothing is read, and the upload confirms on the business's word."""
+    content, content_type = await _read_evidence(file)
+    reading = await ocr.reader.read(content=content, content_type=content_type) if ocr else None
+    try:
+        tranche = await sme_receipt_check(
+            db,
+            tranche_id=tranche_id,
+            sme_user_id=current_user.id,
+            content=content,
+            content_type=content_type,
+            filename=(file.filename or "")[:255] or None,
+            fields=reading.fields if reading is not None and reading.confident else None,
+            storage=funding.evidence_storage(),
+            now=_now(),
+        )
+    except DirectTransferError as exc:
+        await _raise_mapped(db, exc)
+    append_audit(
+        db,
+        entity_type="TRANCHE",
+        entity_id=tranche.id,
+        action="INVESTMENT_RECEIPT_CHECKED_BY_SME",
+        actor_id=current_user.id,
+        after_state={"tranche_status": tranche.status, "review_cause": tranche.review_cause},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return await _sme_ticket(db, tranche)
+
+
+@router.post("/tranches/{tranche_id}/dispute", response_model=SmeTicketOut, status_code=202)
+async def dispute_confirmed_transfer(
+    tranche_id: UUID,
+    request: Request,
+    statement: str = Form(..., min_length=1, max_length=2000),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The business disputes a transfer that was confirmed by its silence, with its bank statement, until
+    `dispute_until` (30 days after the confirmation; commit-then-accept-flow.md 4.6). Opens a dispute for staff; the
+    ticket keeps its state. After the 30 days: 409 DISPUTE_WINDOW_CLOSED. Multipart (`statement`, `file`): the
+    statement is uploaded here, as there is no separate evidence upload for the business."""
+    content, content_type = await _read_evidence(file)
+    try:
+        dispute = await sme_dispute_after_confirmation(
+            db,
+            tranche_id=tranche_id,
+            sme_user_id=current_user.id,
+            statement=statement,
+            content=content,
+            content_type=content_type,
+            filename=(file.filename or "")[:255] or None,
+            storage=funding.evidence_storage(),
+            now=_now(),
+        )
+    except DirectTransferError as exc:
+        await _raise_mapped(db, exc)
+    append_audit(
+        db,
+        entity_type="TRANCHE",
+        entity_id=tranche_id,
+        action="INVESTMENT_DISPUTED_AFTER_CONFIRMATION",
+        actor_id=current_user.id,
+        after_state={"dispute_id": str(dispute.id), "reason": statement.strip()},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return await _sme_ticket(db, await db.get(Tranche, tranche_id))
+
+
 @router.get("/me/rounds", response_model=list[SmeRoundOut])
 async def read_my_rounds(
     db: AsyncSession = Depends(get_db),

@@ -5,6 +5,7 @@ from uuid import UUID
 from app.core.database import get_db
 from app.utils.jwt import get_current_user
 from app.projects.schemas import (
+    LoanApplicationCreateInline,
     MarketplaceLoanApplicationOut,
     MarketplaceProjectOut,
     ProjectCreate,
@@ -20,6 +21,7 @@ from app.projects.service import (
     display_projects,
     locked_business_scores,
     marketplace_listings,
+    repeat_project,
     verified_document_types,
 )
 from app.users.models import User
@@ -38,6 +40,22 @@ async def create_project_endpoint(
     out = ProjectWithApplicationOut.model_validate(new_project)
     if loan_app is not None:
         out.loan_application = ProjectLoanApplicationOut.model_validate(loan_app)
+    await db.commit()
+    return out
+
+
+@router.post("/repeat", response_model=ProjectWithApplicationOut, status_code=201)
+async def repeat_project_endpoint(
+    loan: LoanApplicationCreateInline,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """A business whose last request has ended borrows again: only the amount and term are asked; the company, its
+    documents and figures come from its last approved request, and the request is submitted for review (409
+    NO_APPROVED_REQUEST when there is none to copy, SME_HAS_OPEN_PROJECT while one is in progress)."""
+    project, application = await repeat_project(db, loan, current_user)
+    out = ProjectWithApplicationOut.model_validate(project)
+    out.loan_application = ProjectLoanApplicationOut.model_validate(application)
     await db.commit()
     return out
 

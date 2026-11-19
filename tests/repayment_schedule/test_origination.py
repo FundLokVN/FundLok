@@ -118,6 +118,7 @@ def test_originate_facility_generates_full_schedule_and_sets_backstop():
         principal_vnd=300_000_000,
         annual_rate_pct=Decimal("12"),
         contractual_term_months=4,
+        working_days_per_month=22,  # the spec's §12.1 example; the default is 21 (HANDOFF-06 T1)
         payment_reference=f"FL-{uuid.uuid4().hex[:10]}",
         start_date=datetime.date(2026, 9, 21),
         calendar=cal,
@@ -159,8 +160,9 @@ def test_originate_facility_generates_full_schedule_and_sets_backstop():
 def test_originate_facility_schedule_spans_tet_with_no_gap():
     """The generated schedule for a facility originated right before Tết
     2026 must still produce exactly N0 scheduled business days, skipping
-    the holiday block entirely (T8 EC-01), not shifting amounts around it."""
-    cal = BusinessDayCalendar()
+    the holiday block entirely (T8 EC-01), not shifting amounts around it.
+    Runs with observe_public_holidays=True (D-046: ignored by default)."""
+    cal = BusinessDayCalendar(observe_public_holidays=True)
     db = _FakeDB()
     facility = originate_facility(
         db,

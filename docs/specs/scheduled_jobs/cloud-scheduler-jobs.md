@@ -205,6 +205,65 @@ gcloud scheduler jobs create http fee-invoice-emails --location $REGION --projec
 # Run one now to check: gcloud scheduler jobs run repayment-reminders --location $REGION --project $PROJECT
 ```
 
+### Day-14 transfer rule jobs (docs/specs/direct_transfer/day14-transfer-rule.md rules 9-10)
+
+`POST /internal/jobs/day14-cutoff` (no body) locks unpaid and late lenders at 15:00 on rounds paying out today; the
+15:35 run, after the 15:30 receipt cut-off, decides (no-show, a top-up pledge for clean late money, or unlocking a
+lender whose receipt proved them in time). `POST
+/internal/jobs/day14-transfer-reminders` with `{"kind": "DAY14_MORNING" | "DAY14_AFTERNOON"}` sends "sign and pay by
+14:45" in the app, by email and (with `ZALO_ZBS_DAY14_TEMPLATE_ID`) on Zalo. Both are idempotent and touch only rounds
+with Day-14 cut-offs. The Zalo template is registered in the ZBS console with the parameters `company_name`,
+`amount`, `deadline` and a button to FundLok (app/scheduled_jobs/day14.py `zalo_template_data`). It deliberately
+carries no reference code: a Day-14 transfer must use a QR's own code.
+
+```bash
+gcloud scheduler jobs create http day14-cutoff --location $REGION --project $PROJECT \
+  --schedule "0,35 15 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
+  --uri "$URL/internal/jobs/day14-cutoff" \
+  --oidc-service-account-email $SA --oidc-token-audience "$URL" \
+  --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 2m
+gcloud scheduler jobs create http day14-reminders-morning --location $REGION --project $PROJECT \
+  --schedule "0 8 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
+  --uri "$URL/internal/jobs/day14-transfer-reminders" --headers "Content-Type=application/json" \
+  --message-body '{"kind": "DAY14_MORNING"}' \
+  --oidc-service-account-email $SA --oidc-token-audience "$URL" \
+  --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 5m
+gcloud scheduler jobs create http day14-reminders-afternoon --location $REGION --project $PROJECT \
+  --schedule "0 14 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
+  --uri "$URL/internal/jobs/day14-transfer-reminders" --headers "Content-Type=application/json" \
+  --message-body '{"kind": "DAY14_AFTERNOON"}' \
+  --oidc-service-account-email $SA --oidc-token-audience "$URL" \
+  --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 5m
+```
+
+### Day 13 of a commit-then-accept round (docs/specs/direct_transfer/day13-loan-contracts.md)
+
+`POST /internal/jobs/funding-advance` (no body) runs at 00:00 and 15:00 ICT, and again at 15:40 (`funding-advance-day14`,
+after the 15:35 `day14-cutoff` run): at 00:00 on Day 13 the pledge list is final and each lender's loan contract is
+generated; at 15:00 the silence rule decides a round the SME did not decide; from 15:40 on Day 14 the round closes and
+its pooled loan forms with everyone who paid, once no ticket is pending or 2 days after the 14:45 pay deadline.
+`POST /internal/jobs/acceptance-reminders` (no body) runs at 09:00 ICT and reminds the SME 3 days and 1 day before the
+15:00 Day-13 deadline (in the app, by email, and on Zalo once `ZALO_ZBS_ACCEPTANCE_TEMPLATE_ID` is set). Both are
+idempotent and only touch commit-then-accept rounds (`FUNDING_WINDOW_FLOW=COMMIT_THEN_ACCEPT`).
+
+```bash
+gcloud scheduler jobs create http funding-advance --location $REGION --project $PROJECT \
+  --schedule "0 0,15 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
+  --uri "$URL/internal/jobs/funding-advance" \
+  --oidc-service-account-email $SA --oidc-token-audience "$URL" \
+  --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 2m
+gcloud scheduler jobs create http funding-advance-day14 --location $REGION --project $PROJECT \
+  --schedule "40 15 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
+  --uri "$URL/internal/jobs/funding-advance" \
+  --oidc-service-account-email $SA --oidc-token-audience "$URL" \
+  --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 2m
+gcloud scheduler jobs create http acceptance-reminders --location $REGION --project $PROJECT \
+  --schedule "0 9 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
+  --uri "$URL/internal/jobs/acceptance-reminders" \
+  --oidc-service-account-email $SA --oidc-token-audience "$URL" \
+  --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 5m
+```
+
 ## 10. Open Questions
 
 - Edward: expose the worker's jobs (round advancing, repayment-day presume and

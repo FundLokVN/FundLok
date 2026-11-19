@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.database import engine
 from app.core.timezone import ICT
 from app.direct_transfer import close, reservation, tranches, windows
+from app.direct_transfer.config import DirectTransferParams
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.models import (
     CicEvent,
@@ -159,8 +160,23 @@ async def test_open_window_requires_declaration_and_borrower_cap(world):
             storage=world.storage, params=world.params,
         )
     assert info.value.code == "DECLARATION_REQUIRED"
-    # PROVISIONAL(Q-D12): target + declared outside debt may not exceed the 400M cross-platform cap
-    await expect_error(open_window(world, declared=301 * M), "BORROWER_CAP_EXCEEDED", 409)
+    await expect_error(open_window(world, declared=1 * M), "BORROWER_CAP_EXCEEDED", 409)  # 100M target + 1M > 100M
+
+
+async def test_borrower_cap_is_100m_including_declared_outside_debt(db_session):
+    # D-054: target plus the SME's declared outside debt may not exceed 100M per legal entity.
+    world = await make_world(db_session, target=60 * M)
+    await expect_error(open_window(world, declared=50 * M), "BORROWER_CAP_EXCEEDED", 409)
+    window = await open_window(world, declared=40 * M)
+    assert window.status == "OPEN" and window.declared_outside_debt_vnd == 40 * M
+
+
+async def test_per_listing_cap_unchanged(db_session):
+    # D-054 leaves the per-listing cap (max_target_vnd) at 100M: a full 100M listing with no outside debt opens.
+    assert DirectTransferParams().max_target_vnd == 100 * M
+    await expect_error(open_window(await make_world(db_session, target=101 * M)), "TARGET_ABOVE_CAP", 400)
+    window = await open_window(await make_world(db_session, target=100 * M))
+    assert window.target_vnd == 100 * M
 
 
 async def test_open_window_other_users_listing_returns_404(world, db_session):
@@ -240,7 +256,7 @@ async def test_reserve_blocked_when_investor_fee_unpaid(world):
         )
     )
     await world.db.flush()
-    await expect_error(reserve(world, inv, 10 * M), "INVESTOR_FEE_UNPAID", 409)
+    await expect_error(reserve(world, inv, 10 * M, now=T0 + dt.timedelta(days=7, hours=1)), "INVESTOR_FEE_UNPAID", 409)
 
 
 async def test_reserve_requires_risk_ack(world):
@@ -363,20 +379,18 @@ async def test_sme_confirm_attested_tranche(world):
     assert transfer.confirmation_level == "CONFIRMED"
 
 
-async def test_confirm_deadline_is_two_working_days(world):
+async def test_confirm_deadline_is_24_hours_after_the_receipt_is_checked(world):
     await open_window(world)
     inv = await make_investor(world)
-    friday = at(days=4)  # Fri 6 Nov 2026 10:00 ICT
-    t = await attested_tranche(world, inv, 10 * M, now=friday)
-    # 2nd working day after Friday = Tuesday 10 Nov; the window ends at the end of that day
-    assert t.confirm_deadline == dt.datetime(2026, 11, 11, 0, 0, tzinfo=ICT)
+    t = await attested_tranche(world, inv, 10 * M, now=at(days=4))  # Fri 6 Nov 2026 10:00 ICT
+    assert t.confirm_deadline == t.attested_at + dt.timedelta(hours=24)  # Saturday (AM-E20; weekend case in test_calendar_days.py)
 
 
 async def test_lapsed_dispute_window_auto_confirms(world):
     await open_window(world)
     inv = await make_investor(world)
-    t = await attested_tranche(world, inv, 10 * M)  # Monday: deadline end of Wednesday
-    assert t.confirm_deadline == dt.datetime(2026, 11, 5, 0, 0, tzinfo=ICT)
+    t = await attested_tranche(world, inv, 10 * M)  # Monday: deadline 24 hours later
+    assert t.confirm_deadline == t.attested_at + dt.timedelta(hours=24)
     assert await tranches.confirm_lapsed_tranches(world.db, now=t.confirm_deadline - dt.timedelta(seconds=1)) == 0
     assert await tranches.confirm_lapsed_tranches(world.db, now=t.confirm_deadline) == 1
     assert t.status == "CONFIRMED"
@@ -458,17 +472,17 @@ async def test_window_closes_on_day_14_and_expires_unsigned(world):
     assert window.confirmed_total_vnd == 60 * M
 
 
-async def test_close_waits_up_to_two_working_days_for_open_review(world):
+async def test_close_waits_up_to_two_days_for_open_review(world):
     await fund_window(world, [60 * M])
     inv = await make_investor(world)
     late_now = at(days=14, hours=-1)  # Mon 16 Nov 09:00 ICT
     t = await attested_tranche(world, inv, 10 * M, now=late_now)
     window = await close_now(world, now=at(days=14))
     assert window.status == "CLOSING"
-    assert window.close_wait_until == dt.datetime(2026, 11, 19, 0, 0, tzinfo=ICT)  # end of Wed 18 Nov
-    window = await close_now(world, now=at(days=15, hours=5))
+    assert window.close_wait_until == at(days=16)  # Wed 18 Nov 10:00 ICT, two calendar days after the close began
+    window = await close_now(world, now=at(days=14, hours=5))  # before the receipt's 24 hours are up
     assert window.status == "CLOSING"
-    window = await close_now(world, now=dt.datetime(2026, 11, 19, 0, 0, tzinfo=ICT))
+    window = await close_now(world, now=at(days=16))
     assert window.status == "REPAYING"  # the attested tranche lapsed into CONFIRMED and joined
     await world.db.refresh(t)
     assert t.status == "ACTIVE" and window.confirmed_total_vnd == 70 * M
@@ -580,7 +594,7 @@ async def test_under_review_at_close_is_excluded_and_never_joins(world):
     await tranches.sme_dispute_tranche(world.db, tranche_id=t.id, sme_user_id=world.sme.id, statement="not received", file_id=None, now=at(days=14, hours=-1, minutes=-30) + dt.timedelta(minutes=45), params=world.params)
     window = await close_now(world, now=at(days=14))
     assert window.status == "CLOSING"
-    window = await close_now(world, now=dt.datetime(2026, 11, 19, 0, 0, tzinfo=ICT))
+    window = await close_now(world, now=at(days=16))
     assert window.status == "REPAYING" and window.confirmed_total_vnd == 60 * M
     await world.db.refresh(t)
     assert t.status == "UNDER_REVIEW" and t.excluded_at_close is True and t.holding_id is None

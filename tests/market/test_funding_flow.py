@@ -10,6 +10,8 @@ import uuid
 from sqlalchemy import select
 
 from app.direct_transfer.models import FundingWindow, PaymentAccount, Tranche
+from app.direct_transfer.tranche_state import transition_tranche
+from app.direct_transfer.tranches import confirm_lapsed_tranches
 from app.direct_transfer.vietqr import parse_tlv, verify_crc
 from app.lending.models import AuditLog, Contract, Listing, LoanApplication, Project, ProjectOwnership, ScoreRun
 from app.market.funding import INVESTOR_TERMS_VERSION
@@ -560,6 +562,52 @@ async def test_the_business_reports_an_investment_transfer_not_received(
     ).scalar_one()
     assert str(audit.actor_id) == setup["sme"]["id"]
     assert audit.after_state["reason"] == "Checked Techcombank statement — nothing under this memo"
+
+
+async def test_the_business_checks_a_transfer_with_its_own_receipt_and_disputes_one_confirmed_by_silence(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    sme = setup["sme"]["headers"]
+    now = dt.datetime.now(dt.timezone.utc)
+
+    def shot():  # a different file each time: a stored file can only be used once
+        return {"file": ("arrived.png", PNG + uuid.uuid4().bytes, "image/png")}
+
+    async def checked_ticket():
+        investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+        tranche = (await _reserve(client, investor, setup["window"].id, 20_000_000)).json()
+        assert (await _upload(client, investor, tranche["id"], PNG + uuid.uuid4().bytes)).status_code == 202
+        row = await db_session.get(Tranche, uuid.UUID(tranche["id"]))
+        return investor, row
+
+    investor, row = await checked_ticket()
+    url = f"/funding/tranches/{row.id}"
+    # Business only; and only once the investor's receipt is checked.
+    assert (await client.post(f"{url}/sme-receipt", files=shot(), headers=investor["headers"])).status_code == 403
+    early = await client.post(f"{url}/sme-receipt", files=shot(), headers=sme)
+    assert early.status_code == 400 and early.headers["X-Error-Code"] == "INVALID_TRANSITION"
+
+    await transition_tranche(db_session, row, "ATTESTED", now=now, confirm_deadline=now + dt.timedelta(hours=24))
+    confirmed = await client.post(f"{url}/sme-receipt", files=shot(), headers=sme)
+    assert confirmed.status_code == 202, confirmed.text
+    assert confirmed.json()["status"] == "CONFIRMED" and confirmed.json()["dispute_until"] is None
+    # Confirmed by the business itself: nothing to dispute later.
+    refused = await client.post(f"{url}/dispute", data={"statement": "Not on our statement"}, files=shot(), headers=sme)
+    assert refused.status_code == 409 and refused.headers["X-Error-Code"] == "DISPUTE_WINDOW_CLOSED"
+
+    # Another ticket confirmed by 24 hours of silence: the business may dispute it with its bank statement.
+    _, silent = await checked_ticket()
+    await transition_tranche(db_session, silent, "ATTESTED", now=now - dt.timedelta(hours=25), confirm_deadline=now - dt.timedelta(hours=1))
+    assert await confirm_lapsed_tranches(db_session, now=now) == 1
+    disputed = await client.post(
+        f"/funding/tranches/{silent.id}/dispute", data={"statement": "Not on our statement"}, files=shot(), headers=sme
+    )
+    assert disputed.status_code == 202, disputed.text
+    assert disputed.json()["status"] == "CONFIRMED" and disputed.json()["dispute_until"] is not None
+    mine = (await client.get("/funding/me/rounds", headers=sme)).json()
+    [ticket] = [t for r in mine for t in r["tickets"] if t["id"] == str(silent.id)]
+    assert ticket["dispute_until"] == disputed.json()["dispute_until"]
 
 
 async def test_a_receipt_must_be_a_pdf_or_an_image(

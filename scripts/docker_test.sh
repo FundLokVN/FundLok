@@ -2,7 +2,8 @@
 # Run the test suite entirely in Docker, mirroring the CI "Run Test Suite" job
 # (.github/workflows/ci.yml): a throwaway postgres:15 + python:3.11 that runs
 # `alembic upgrade head` (psycopg2) then pytest (asyncpg). No local venv and no
-# published ports, so it never conflicts with the dev compose stack on :5433.
+# published ports, so it never conflicts with the dev compose stack on :5433. Names are suffixed with the
+# checkout folder, so several worktrees can run it at the same time.
 #
 # Usage:
 #   bun run docker:test                    # whole suite (tests/ -q)
@@ -10,8 +11,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NETWORK=fundlok-test
-PG_CONTAINER=fundlok-test-pg
+# One network and one postgres per checkout folder, so runs from different git worktrees (or parallel
+# agents) never collide on a fixed name. A rerun from the same folder still clears its own leftovers.
+SUFFIX="$(basename "$PWD" | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C tr -c 'a-z0-9\n' '-')"
+NETWORK="fundlok-test-${SUFFIX}"
+PG_CONTAINER="fundlok-test-pg-${SUFFIX}"
 PIP_CACHE_VOLUME=fundlok-test-pip-cache
 PG_URL_SYNC="postgresql+psycopg2://test_user:test_password@${PG_CONTAINER}:5432/test_db"
 PG_URL_ASYNC="postgresql+asyncpg://test_user:test_password@${PG_CONTAINER}:5432/test_db"

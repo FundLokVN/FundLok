@@ -34,7 +34,7 @@ async def sme_disputed(world, amount=10 * M, *, now=T0):
 async def test_sme_dispute_creates_dispute_with_investor_first(world):
     inv, t, d = await sme_disputed(world)
     assert (d.cause, d.status, d.required_next_party) == ("SME_DISPUTE", "OPEN", "INVESTOR")
-    assert d.response_deadline == ict(2026, 11, 5)  # 2 working days after Monday 2 Nov: end of Wed 4 Nov
+    assert d.response_deadline == at(days=2, minutes=30)  # 2 calendar days after the dispute at Mon 2 Nov 10:30
     claim = (await world.db.execute(select(DisputeEvidence).where(DisputeEvidence.dispute_id == d.id))).scalar_one()
     assert (claim.party, claim.kind, claim.statement) == ("SME", "CLAIM", "Nothing arrived in our account")
 
@@ -44,7 +44,7 @@ async def test_missed_day_dispute_has_sme_first(loan):
     day = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.tranche_id == tr[0].id, RepaymentDay.day_index == 1, RepaymentDay.kind == "INSTALMENT"))).scalar_one()
     await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="not received", file_id=None, now=ict(2026, 11, 5, 10), params=world.params)
     d = (await world.db.execute(select(Dispute).where(Dispute.repayment_day_id == day.id))).scalar_one()
-    assert d.cause == "MISSED_DAY" and d.required_next_party == "SME" and d.response_deadline == ict(2026, 11, 10)  # 2 working days after Thu 5 Nov: end of Mon 9 Nov
+    assert d.cause == "MISSED_DAY" and d.required_next_party == "SME" and d.response_deadline == ict(2026, 11, 7, 10)  # 2 calendar days after the report, Thu 5 Nov 10:00
     claim = (await world.db.execute(select(DisputeEvidence).where(DisputeEvidence.dispute_id == d.id))).scalar_one()
     assert (claim.party, claim.kind) == ("INVESTOR", "CLAIM")
 
@@ -184,13 +184,14 @@ async def test_paid_outcome_matches_repayment_day(loan):
     assert keys == {f"missed:{day.id}:reported", f"missed:{day.id}:resolved_paid"}
 
 
-async def test_not_paid_outcome_keeps_reported_missed(loan):
+async def test_not_paid_outcome_makes_the_day_late(loan):
     world, _, tr = loan
     day = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.tranche_id == tr[0].id, RepaymentDay.day_index == 1, RepaymentDay.kind == "INSTALMENT"))).scalar_one()
     await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="not received", file_id=None, now=ict(2026, 11, 5, 10), params=world.params)
     d = (await world.db.execute(select(Dispute).where(Dispute.repayment_day_id == day.id))).scalar_one()
     await disputes.decide_dispute(world.db, dispute_id=d.id, staff_id=world.admin.id, outcome="NOT_PAID", reason="no payment found", now=ict(2026, 11, 6, 12))
-    assert day.status == "REPORTED_MISSED" and day.settled_at is None and d.status == "DECIDED"
+    # No bank proof from the SME: the day is LATE (late-status.md rule 5), still unsettled.
+    assert day.status == "LATE" and day.settled_at is None and d.status == "DECIDED"
 
 
 async def test_bank_trace_escalation_recorded(world):

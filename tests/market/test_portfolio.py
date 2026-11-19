@@ -141,7 +141,7 @@ async def test_the_business_sees_its_loan_against_its_revenue_and_its_score(
     ).json()
     assert facility["principal"] == 30_000_000
     assert facility["total_obligation"] == sum(r["gross_vnd"] for r in schedule)  # tax included
-    assert facility["interest_rate_pct"] == 7.5 and facility["term_months"] == 4
+    assert facility["interest_rate_pct"] == 16.0 and facility["term_months"] == 4
     assert facility["days_remaining"] == 83  # the first day is paid
     assert facility["on_time_streak"] == 1
     repaid = sum(r["gross_vnd"] for r in schedule if r["repayment_day_id"] in s["day_ids"])

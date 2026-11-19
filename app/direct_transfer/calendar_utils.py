@@ -1,4 +1,4 @@
-"""Working-day helpers for windows, dispute deadlines and start dates (HANDOFF-04 B2).
+"""Calendar and working-day helpers for windows, deadlines and start dates (HANDOFF-04 B2; AM-E20).
 
 Reuses the Vietnamese business-day calendar (`app/repayment_schedule/calendar.py`) and ICT. Time is always
 injected by the caller; nothing here reads the wall clock.
@@ -16,7 +16,7 @@ _DEFAULT_CAL: BusinessDayCalendar | None = None
 def default_calendar() -> BusinessDayCalendar:
     global _DEFAULT_CAL
     if _DEFAULT_CAL is None:
-        _DEFAULT_CAL = BusinessDayCalendar()
+        _DEFAULT_CAL = BusinessDayCalendar(observe_public_holidays=False)  # D-046: holidays ignored; flip to True to restore
     return _DEFAULT_CAL
 
 
@@ -44,14 +44,14 @@ def first_working_day_after(d: dt.date, calendar: BusinessDayCalendar | None = N
     return add_working_days(d, 1, calendar)
 
 
-def working_deadline(moment: dt.datetime, n: int, calendar: BusinessDayCalendar | None = None) -> dt.datetime:
-    """End of the n-th working day after `moment`'s ICT date (exclusive upper bound = 00:00 ICT of the next day).
+def calendar_deadline(moment: dt.datetime, *, hours: int = 0, days: int = 0) -> dt.datetime:
+    """`moment` plus an exact calendar span (AM-E20, Loc 15 Nov 2026): weekends and holidays never extend a deadline.
 
-    "2 working days from notification" (Loc.md timers): a tranche attested on Friday 15:00 has until the end of
-    Tuesday (the 2nd working day after Friday) to be disputed.
+    Pure: the caller injects `moment`, nothing here reads the wall clock.
     """
-    last = add_working_days(ict_date(moment), n, calendar)
-    return start_of_day_ict(last + dt.timedelta(days=1))
+    if moment.tzinfo is None:
+        raise ValueError("timezone-aware datetime required")
+    return moment + dt.timedelta(days=days, hours=hours)
 
 
 def count_business_days(start: dt.date, end_exclusive: dt.date, calendar: BusinessDayCalendar | None = None) -> int:

@@ -40,7 +40,7 @@ def round_half_up_div(numerator: int, denominator: int) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Pure formulas (golden numbers: 100M -> 3,000,000; 10M x 4 months -> 83,333; 100M x 4 months -> 833,333)
+# Pure formulas (golden numbers: 100M -> 3,000,000; 10M x 4 months -> 83,333; 40M x 2 months -> 166,667)
 # --------------------------------------------------------------------------- #
 def sme_fee_parts(confirmed_total_vnd: int, params: DirectTransferParams | None = None) -> tuple[int, int, int]:
     """(fee, vat, total) for the SME activation fee. Fee = 3% of confirmed principal, VAT on top (PROVISIONAL(Q-D10))."""
@@ -51,9 +51,15 @@ def sme_fee_parts(confirmed_total_vnd: int, params: DirectTransferParams | None 
 
 
 def investor_fee_total(amount_vnd: int, term_months: int, params: DirectTransferParams | None = None) -> int:
-    """2.5%/yr fixed at signing: floor(amount * 2.5% * term/12) (PROVISIONAL(Q-D15))."""
+    """2.5%/yr fixed at signing: F = P * 2.5% * M / 12, to the nearest dong (40M x 2 months -> 166,667)."""
     p = resolve(params)
-    return (amount_vnd * p.investor_fee_bps_per_year * term_months) // (10_000 * 12)
+    return round_half_up_div(amount_vnd * p.investor_fee_bps_per_year * term_months, 10_000 * 12)
+
+
+def investor_fee_for_month(fee_total: int, charged: int, received: int, owed: int) -> int:
+    """(F - fee already charged) x instalments received in the month / balance owed at the start of the month (or
+    at disbursement if later), to the nearest dong. Collecting the whole balance charges exactly what is left of F."""
+    return round_half_up_div((fee_total - charged) * received, owed)
 
 
 # --------------------------------------------------------------------------- #
@@ -100,33 +106,49 @@ def invoice_vietqr(invoice: FeeInvoice, params: DirectTransferParams | None = No
     )
 
 
+def invoice_out(invoice: FeeInvoice, params: DirectTransferParams | None = None):
+    """The invoice as the API returns it, carrying the payment QR (None when the fee account is not configured)."""
+    from app.direct_transfer.schemas import FeeInvoiceOut
+
+    out = FeeInvoiceOut.model_validate(invoice)
+    return out.model_copy(update={"vietqr_payload": invoice_vietqr(invoice, params)})
+
+
 # --------------------------------------------------------------------------- #
 # Blocks
 # --------------------------------------------------------------------------- #
-async def sme_has_unpaid_invoice(db: AsyncSession, user_id: UUID, params: DirectTransferParams | None = None) -> bool:
-    if not resolve(params).fees_enabled:
-        return False
+async def _has_overdue_invoice(db: AsyncSession, user_id: UUID, kind: str, now: dt.datetime) -> bool:
+    """An unpaid invoice of `kind` whose 7 days (`due_at`) are over at `now`. Inside them nothing is blocked (D-047):
+    the block starts on day 8, not on the issue date. Time is injected, never read from the wall clock."""
     row = (
         await db.execute(
             select(FeeInvoice.id).where(
-                FeeInvoice.payer_user_id == user_id, FeeInvoice.kind == "SME_ACTIVATION", FeeInvoice.status.in_(UNPAID)
+                FeeInvoice.payer_user_id == user_id,
+                FeeInvoice.kind == kind,
+                FeeInvoice.status.in_(UNPAID),
+                FeeInvoice.due_at < now,
             )
         )
     ).first()
     return row is not None
 
 
-async def investor_has_unpaid_invoice(db: AsyncSession, user_id: UUID, params: DirectTransferParams | None = None) -> bool:
+async def sme_has_unpaid_invoice(
+    db: AsyncSession, user_id: UUID, params: DirectTransferParams | None = None, *, now: dt.datetime
+) -> bool:
+    """Blocks the SME's NEXT listing, and only after the 7 days from issue (D-047, Appendix M 5.7)."""
     if not resolve(params).fees_enabled:
         return False
-    row = (
-        await db.execute(
-            select(FeeInvoice.id).where(
-                FeeInvoice.payer_user_id == user_id, FeeInvoice.kind == "INVESTOR_SERVICE", FeeInvoice.status.in_(UNPAID)
-            )
-        )
-    ).first()
-    return row is not None
+    return await _has_overdue_invoice(db, user_id, "SME_ACTIVATION", now)
+
+
+async def investor_has_unpaid_invoice(
+    db: AsyncSession, user_id: UUID, params: DirectTransferParams | None = None, *, now: dt.datetime
+) -> bool:
+    """Blocks NEW commitments only, and only after the 7 days from issue (D-047, Appendix M 8.3)."""
+    if not resolve(params).fees_enabled:
+        return False
+    return await _has_overdue_invoice(db, user_id, "INVESTOR_SERVICE", now)
 
 
 async def blocked_parties(db: AsyncSession) -> dict[str, list[dict]]:
@@ -262,25 +284,27 @@ async def accrue_investor_fees(db: AsyncSession, *, now: dt.datetime, params: Di
             if month in existing or month >= this_month:
                 continue
             month_rows = [r for r in rows if _first_of_month(r.due_date) == month]
-            # A month is accruable when ended and every row in it is resolved (settled, or reported missed).
-            if not all(r.settled_at is not None or r.status == "REPORTED_MISSED" for r in month_rows):
+            # A month is accruable when ended and every row in it is resolved (settled, reported missed, or LATE: a
+            # late day is not received, so it counts for nothing until it settles; the final true-up picks it up).
+            if not all(r.settled_at is not None or r.status in ("REPORTED_MISSED", "LATE") for r in month_rows):
                 continue
             received = sum(r.gross_vnd for r in month_rows if r.settled_at is not None)
             if received <= 0:
                 continue
-            fee = tranche.investor_fee_total_vnd * received // scheduled_total
+            owed = scheduled_total - sum(a.received_gross_vnd for a in existing.values() if a.period_month < month)
+            fee = investor_fee_for_month(tranche.investor_fee_total_vnd, accrued_so_far, received, owed)
             if all_settled and month == last_month:
                 fee = tranche.investor_fee_total_vnd - accrued_so_far
             fee = max(0, fee)
-            db.add(
-                InvestorFeeAccrual(
-                    tranche_id=tranche.id,
-                    investor_id=tranche.investor_id,
-                    period_month=month,
-                    received_gross_vnd=received,
-                    fee_vnd=fee,
-                )
+            accrual = InvestorFeeAccrual(
+                tranche_id=tranche.id,
+                investor_id=tranche.investor_id,
+                period_month=month,
+                received_gross_vnd=received,
+                fee_vnd=fee,
             )
+            db.add(accrual)
+            existing[month] = accrual
             accrued_so_far += fee
             created += 1
     await db.flush()

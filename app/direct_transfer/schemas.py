@@ -9,7 +9,9 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 TrancheStatus = Literal["RESERVED", "SIGNED", "ATTESTED", "CONFIRMED", "ACTIVE", "EXPIRED", "UNDER_REVIEW", "VOID"]
-WindowStatus = Literal["OPEN", "FULL", "CLOSING", "REPAYING", "FAILED", "REPAID", "CANCELLED"]
+WindowStatus = Literal[
+    "OPEN", "FULL", "CLOSING", "AWAITING_SME", "AWAITING_PAYMENT", "REPAYING", "FAILED", "REPAID", "CANCELLED"
+]
 
 
 class _Out(BaseModel):
@@ -39,6 +41,30 @@ class FundingWindowOut(_Out):
     closing_started_at: dt.datetime | None = None
     close_wait_until: dt.datetime | None = None
     repayment_start_date: dt.date | None = None
+    # Day-14 transfer rule (day14-transfer-rule.md 4.3): null on LEGACY windows.
+    disbursement_date: dt.date | None = None
+    pay_deadline_at: dt.datetime | None = None
+    no_show_at: dt.datetime | None = None
+    receipt_deadline_at: dt.datetime | None = None
+    # Commit-then-accept (spec 4.2); all None on LEGACY windows.
+    flow: Literal["LEGACY", "COMMIT_THEN_ACCEPT"] | None = None
+    commit_closes_at: dt.datetime | None = None
+    sme_deadline_at: dt.datetime | None = None
+    committed_total_vnd: int | None = None
+    committed_pct: int | None = None
+    sme_decision: Literal["ACCEPTED", "DECLINED", "AUTO_ACCEPTED", "AUTO_DECLINED"] | None = None
+    sme_decided_at: dt.datetime | None = None
+
+
+class CommitmentOut(_Out):
+    id: UUID
+    window_id: UUID
+    amount_vnd: int
+    status: Literal["PLEDGED", "FOLDED", "VOID"]
+    committed_at: dt.datetime
+    my_committed_total_vnd: int
+    window_committed_total_vnd: int
+    window_target_vnd: int
 
 
 class TrancheOut(_Out):
@@ -95,6 +121,13 @@ class PaymentOut(_Out):
     vietqr_payload: str
     hold_expires_at: dt.datetime
     warning: str
+    # Day-14 transfer rule (day14-transfer-rule.md 4.1). qr_code is the memo the VietQR carries.
+    qr_code: str | None = None
+    qr_issued_at: dt.datetime | None = None
+    qr_expires_at: dt.datetime | None = None
+    pay_deadline_at: dt.datetime | None = None
+    receipt_deadline_at: dt.datetime | None = None
+    server_time: dt.datetime | None = None  # the server's clock, for the app's countdown
 
 
 class ReceiptResultOut(_Out):
@@ -123,7 +156,7 @@ class RepaymentRowOut(BaseModel):
     gross_vnd: int
     tax_withheld_vnd: int
     net_vnd: int
-    status: Literal["DUE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
+    status: Literal["DUE", "LATE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
     report_deadline: dt.datetime
     payee: PayeeOut | None
     reference_code: str
@@ -175,3 +208,5 @@ class FeeInvoiceOut(_Out):
     paid_at: dt.datetime | None = None
     invoice_number: str
     reference_code: str
+    # EMVCo VietQR to FundLok's own fee account for the amount due; None when the fee account is not configured.
+    vietqr_payload: str | None = None

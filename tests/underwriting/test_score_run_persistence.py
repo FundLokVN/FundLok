@@ -190,3 +190,30 @@ async def test_score_run_records_bank_rate_in_force_at_scoring_time(client, scor
     replayed = await client.get(f"/underwriting/score-runs/{started['id']}", headers=admin["headers"])
     assert replayed.status_code == 200
     assert replayed.json()["versions"]["bank_rate_pct"] == pytest.approx(original_rate)
+
+
+async def test_locked_score_run_stores_daily_repayment_rate(client, scored_setup, db_session):
+    """HANDOFF-06 T1: the locked run keeps the daily repayment rate (the
+    revenue share s the Offer and Loan Contract read), rounded once to 2
+    decimals of a percent (4 decimals of the fraction), and it is the rate
+    the engine priced the run at."""
+    from decimal import ROUND_HALF_UP, Decimal
+    from uuid import UUID
+
+    from app.lending.models import ScoreRun
+
+    admin = scored_setup["admin"]
+    application = scored_setup["application"]
+    await _put_financials(client, admin, application["id"])
+    started = await _start_score_run(client, admin, application["id"])
+    expected = Decimal(str(started["pricing"]["daily_repayment_rate"])).quantize(
+        Decimal("0.0001"), rounding=ROUND_HALF_UP
+    )
+
+    approve = await client.post(f"/underwriting/score-runs/{started['id']}/approve", headers=admin["headers"])
+    assert approve.status_code == 200, approve.text
+
+    row = (await db_session.execute(select(ScoreRun).where(ScoreRun.id == UUID(started["id"])))).scalar_one()
+    assert row.status == "LOCKED"
+    assert row.daily_repayment_rate is not None
+    assert row.daily_repayment_rate == expected

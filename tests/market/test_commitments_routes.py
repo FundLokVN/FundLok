@@ -1,0 +1,305 @@
+"""Commit-then-accept flow (slice S2) over the API: commit, my commitments, SME decision, window progress.
+
+Spec: docs/specs/direct_transfer/commit-then-accept-flow.md section 4.1 to 4.3, as amended by Money flow FINAL v1.0
+(no service agreement at pledge time, withdrawal until the end of Day 12).
+"""
+import datetime as dt
+import uuid
+
+from sqlalchemy import select, update
+
+from app.direct_transfer.models import Commitment, FundingWindow, Tranche
+from app.market.funding import INVESTOR_TERMS_VERSION
+
+from .test_funding_flow import _open_project, _reserve
+
+
+def _body(amount=10_000_000, **overrides):
+    return {
+        "amount_vnd": amount, "ack_risk_disclosure": True, "terms_version": INVESTOR_TERMS_VERSION,
+        "payment_account_id": None,
+    } | overrides
+
+
+async def _account_id(db_session, investor):
+    from app.direct_transfer.models import PaymentAccount
+
+    return str(
+        (await db_session.execute(select(PaymentAccount.id).where(PaymentAccount.user_id == investor["id"]))).scalar_one()
+    )
+
+
+async def _commit(client, db_session, investor, window_id, amount=10_000_000, *, key=None, **overrides):
+    body = _body(amount, **overrides)
+    if body["payment_account_id"] is None:
+        body["payment_account_id"] = await _account_id(db_session, investor)
+    headers = investor["headers"] | {"Idempotency-Key": key or str(uuid.uuid4())}
+    return await client.post(f"/funding/windows/{window_id}/commitments", json=body, headers=headers)
+
+
+async def _make_commit_window(db_session, window_id, *, status="OPEN", sme_deadline_in_hours=2):
+    now = dt.datetime.now(dt.timezone.utc)
+    await db_session.execute(
+        update(FundingWindow).where(FundingWindow.id == window_id).values(
+            flow="COMMIT_THEN_ACCEPT", status=status, commit_closes_at=now + dt.timedelta(days=3),
+            sme_deadline_at=now + dt.timedelta(hours=sme_deadline_in_hours),
+            pay_deadline_at=now + dt.timedelta(hours=sme_deadline_in_hours + 24),
+        )
+    )
+    await db_session.commit()
+    db_session.expire_all()
+
+
+async def test_commitment_needs_no_signed_service_agreement(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    """Money flow FINAL v1.0: a pledge is pressing Confirm. The Lender Service Agreement is signed with the Day-14
+    loan contract, so a lender without one can still pledge."""
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id = setup["window"].id
+    await _make_commit_window(db_session, window_id)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"), signed_agreement=False)
+
+    ok = await _commit(client, db_session, investor, window_id)
+    assert ok.status_code == 201, ok.text
+    assert ok.json()["status"] == "PLEDGED"
+
+
+async def test_withdraw_a_pledge_over_the_api(client, db_session, make_admin, make_user, make_eligible_investor):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id = setup["window"].id
+    await _make_commit_window(db_session, window_id)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    other = await make_eligible_investor(await make_user(role="INVESTOR"))
+    pledge = (await _commit(client, db_session, investor, window_id, 20_000_000)).json()
+
+    r = await client.post(f"/funding/commitments/{pledge['id']}/withdraw", headers=other["headers"])
+    assert r.status_code == 404, r.text
+    r = await client.post(f"/funding/commitments/{pledge['id']}/withdraw", headers=investor["headers"])
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "VOID" and r.json()["my_committed_total_vnd"] == 0
+
+    await _make_commit_window(db_session, window_id, status="AWAITING_SME")
+    again = (await _commit(client, db_session, other, window_id, 10_000_000))
+    assert again.status_code == 409 and again.headers["X-Error-Code"] == "WINDOW_NOT_OPEN"
+
+
+async def _signed_contracts(db_session, window_id, totals):
+    """Each lender's Day-13 loan contract, already signed by the SME (tests/market/test_day13_loan_contracts.py
+    covers the signing itself)."""
+    from app.direct_transfer.models import WindowLoanContract
+
+    now = dt.datetime.now(dt.timezone.utc)
+    for seq, (investor_id, amount) in enumerate(totals.items(), start=1):
+        db_session.add(
+            WindowLoanContract(
+                window_id=window_id, investor_id=uuid.UUID(str(investor_id)), contract_no=f"T{uuid.uuid4().hex[:6]}-{seq:02d}/HĐCV-FL",
+                amount_vnd=amount, status="SME_SIGNED", file_key="k", sha256="s", check_code="c", generated_at=now,
+                sme_signed_at=now,
+            )
+        )
+    await db_session.commit()
+
+
+async def test_commit_decide_and_progress_over_the_api(client, db_session, make_admin, make_user, make_eligible_investor):
+    setup = await _open_project(client, db_session, make_admin, make_user)  # 80M target
+    sme = setup["sme"]
+    window = setup["window"]
+    window_id, listing_id = window.id, window.listing_id
+    await _make_commit_window(db_session, window_id)
+    a = await make_eligible_investor(await make_user(role="INVESTOR"))
+    b = await make_eligible_investor(await make_user(role="INVESTOR"))
+
+    first = await _commit(client, db_session, a, window_id, 30_000_000)
+    assert first.status_code == 201, first.text
+    body = first.json()
+    assert body["status"] == "PLEDGED" and body["amount_vnd"] == 30_000_000
+    assert body["my_committed_total_vnd"] == 30_000_000
+    assert body["window_committed_total_vnd"] == 30_000_000 and body["window_target_vnd"] == 80_000_000
+    second = await _commit(client, db_session, a, window_id, 20_000_000)
+    assert second.json()["my_committed_total_vnd"] == 50_000_000
+    await _commit(client, db_session, b, window_id, 10_000_000)
+
+    mine = await client.get(f"/funding/me/commitments?window_id={window_id}", headers=a["headers"])
+    assert mine.status_code == 200 and [c["amount_vnd"] for c in mine.json()] == [20_000_000, 30_000_000]  # newest first
+
+    progress = await client.get(f"/funding/listings/{listing_id}/window", headers=a["headers"])
+    assert progress.status_code == 200
+    out = progress.json()
+    assert out["flow"] == "COMMIT_THEN_ACCEPT" and out["committed_total_vnd"] == 60_000_000 and out["committed_pct"] == 75
+    assert out["sme_decision"] is None and out["sme_decided_at"] is None
+    assert out["commit_closes_at"] and out["sme_deadline_at"] and out["pay_deadline_at"]
+
+    # The commit phase ends (the job would do it); the SME decides. Accepting means signing every lender's loan
+    # contract (Money flow FINAL v1.0, Day 13): refused until each one carries the SME's signature.
+    await _make_commit_window(db_session, window_id, status="AWAITING_SME")
+    unsigned = await client.post(
+        f"/funding/windows/{window_id}/decision", json={"decision": "ACCEPT"},
+        headers=sme["headers"] | {"Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert unsigned.status_code == 409 and unsigned.headers["X-Error-Code"] == "CONTRACTS_NOT_SIGNED"
+    await _signed_contracts(db_session, window_id, {a["id"]: 50_000_000, b["id"]: 10_000_000})
+    key = str(uuid.uuid4())
+    decision = await client.post(
+        f"/funding/windows/{window_id}/decision", json={"decision": "ACCEPT"}, headers=sme["headers"] | {"Idempotency-Key": key}
+    )
+    assert decision.status_code == 200, decision.text
+    assert decision.json()["status"] == "AWAITING_PAYMENT" and decision.json()["sme_decision"] == "ACCEPTED"
+    replay = await client.post(
+        f"/funding/windows/{window_id}/decision", json={"decision": "ACCEPT"}, headers=sme["headers"] | {"Idempotency-Key": key}
+    )
+    assert replay.status_code == 200
+    db_session.expire_all()
+    assert len((await db_session.execute(select(Tranche))).scalars().all()) == 2
+
+    late = await client.post(
+        f"/funding/windows/{window_id}/decision", json={"decision": "DECLINE"},
+        headers=sme["headers"] | {"Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert late.status_code == 409 and late.headers["X-Error-Code"] == "DECISION_NOT_OPEN"
+
+
+async def test_commitment_idempotency_key_over_the_api(client, db_session, make_admin, make_user, make_eligible_investor):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id = setup["window"].id
+    await _make_commit_window(db_session, window_id)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    key = str(uuid.uuid4())
+    one = await _commit(client, db_session, investor, window_id, 20_000_000, key=key)
+    two = await _commit(client, db_session, investor, window_id, 20_000_000, key=key)
+    assert one.status_code == two.status_code == 201 and one.json()["id"] == two.json()["id"]
+    clash = await _commit(client, db_session, investor, window_id, 30_000_000, key=key)
+    assert clash.status_code == 409 and clash.headers["X-Error-Code"] == "IDEMPOTENCY_CONFLICT"
+    missing = await client.post(
+        f"/funding/windows/{window_id}/commitments",
+        json=_body(payment_account_id=await _account_id(db_session, investor)), headers=investor["headers"],
+    )
+    assert missing.status_code == 400 and missing.headers["X-Error-Code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+
+async def test_reservations_route_refused_for_commit_then_accept_windows_over_the_api(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id = setup["window"].id
+    await _make_commit_window(db_session, window_id)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    resp = await _reserve(client, investor, window_id)
+    assert resp.status_code == 409 and resp.headers["X-Error-Code"] == "USE_COMMITMENTS"
+
+
+async def test_rejects_wrong_role_on_every_new_route(client, db_session, make_admin, make_user, make_eligible_investor):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id = setup["window"].id
+    await _make_commit_window(db_session, window_id)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    sme, admin = setup["sme"], setup["admin"]
+    commit_body = _body(payment_account_id=str(uuid.uuid4()))
+    key = {"Idempotency-Key": str(uuid.uuid4())}
+
+    for who in (sme, admin):
+        r = await client.post(f"/funding/windows/{window_id}/commitments", json=commit_body, headers=who["headers"] | key)
+        assert r.status_code == 403, (who["role"] if "role" in who else "", r.text)
+        r = await client.get(f"/funding/me/commitments?window_id={window_id}", headers=who["headers"])
+        assert r.status_code == 403
+        r = await client.post(f"/funding/commitments/{uuid.uuid4()}/withdraw", headers=who["headers"])
+        assert r.status_code == 403
+    for who in (investor, admin):
+        r = await client.post(
+            f"/funding/windows/{window_id}/decision", json={"decision": "ACCEPT"}, headers=who["headers"] | key
+        )
+        assert r.status_code == 403
+    client.cookies.clear()  # the login cookies would otherwise authenticate these calls
+    assert (await client.post(f"/funding/windows/{window_id}/commitments", json=commit_body, headers=key)).status_code == 401
+    assert (await client.get(f"/funding/me/commitments?window_id={window_id}")).status_code == 401
+    assert (await client.post(f"/funding/commitments/{uuid.uuid4()}/withdraw")).status_code == 401
+    assert (await client.post(f"/funding/windows/{window_id}/decision", json={"decision": "ACCEPT"}, headers=key)).status_code == 401
+
+    # An SME that does not own the window gets 403 on the decision.
+    other_sme = await make_user(role="SME")
+    await _make_commit_window(db_session, window_id, status="AWAITING_SME")
+    r = await client.post(
+        f"/funding/windows/{window_id}/decision", json={"decision": "ACCEPT"}, headers=other_sme["headers"] | key
+    )
+    assert r.status_code == 403
+
+
+async def test_staff_advance_runs_the_commit_flow_and_live_state_sets_include_the_new_states(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    from app.admin.funding import OPEN_ROUND_STATUSES
+    from app.admin.repayments import _REPAYING_ROUNDS as admin_repaying
+    from app.direct_transfer import repayment
+    from app.direct_transfer.models import WINDOW_LIVE_STATES
+    from app.market.funding import LIVE_WINDOW_STATUSES
+    from app.projects.borrower import LIVE_WINDOW_STATUSES as borrower_live
+    from app.scheduled_jobs.reminders import _REPAYING_ROUNDS as reminder_rounds
+
+    for live in (LIVE_WINDOW_STATUSES, borrower_live, reminder_rounds, admin_repaying):
+        assert set(live) == set(WINDOW_LIVE_STATES) and {"AWAITING_SME", "AWAITING_PAYMENT"} <= set(live)
+    assert {"AWAITING_SME", "AWAITING_PAYMENT"} <= set(OPEN_ROUND_STATUSES) and "REPAYING" not in OPEN_ROUND_STATUSES
+    assert repayment.WINDOW_LIVE_STATES is WINDOW_LIVE_STATES
+
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id = setup["window"].id
+    await _make_commit_window(db_session, window_id)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    assert (await _commit(client, db_session, investor, window_id, 30_000_000)).status_code == 201
+    # The commit phase is over (by the clock); staff press Advance.
+    await db_session.execute(
+        update(FundingWindow).where(FundingWindow.id == window_id).values(
+            commit_closes_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)
+        )
+    )
+    await db_session.commit()
+    resp = await client.post(f"/admin/funding/rounds/{window_id}/advance", headers=setup["admin"]["headers"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "AWAITING_SME"
+    again = await client.post(f"/admin/funding/rounds/{window_id}/advance", headers=setup["admin"]["headers"])
+    assert again.status_code == 200 and again.json()["status"] == "AWAITING_SME"
+
+
+async def test_day13_loan_contract_routes_are_the_owning_smes(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    window_id = setup["window"].id
+    await _make_commit_window(db_session, window_id)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    other_sme = await make_user(role="SME")
+    path = f"/funding/windows/{window_id}/loan-contracts"
+
+    assert (await client.get(path, headers=investor["headers"])).status_code == 403
+    assert (await client.get(path, headers=other_sme["headers"])).status_code == 404
+    mine = await client.get(path, headers=setup["sme"]["headers"])
+    assert mine.status_code == 200, mine.text
+    assert mine.json()["contracts"] == [] and mine.json()["all_signed"] is False
+    # Before Day 13 there is nothing for the guarantor to sign.
+    early = await client.post(f"{path}/guarantor-code", headers=setup["sme"]["headers"])
+    assert early.status_code == 409 and early.headers["X-Error-Code"] == "CONTRACT_SIGNING_NOT_OPEN"
+    missing = await client.get(f"{path}/{uuid.uuid4()}/document", headers=setup["sme"]["headers"])
+    assert missing.status_code == 404
+
+
+async def test_day14_contract_routes_and_the_staff_waiver_check_roles(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    setup = await _open_project(client, db_session, make_admin, make_user)
+    investor = await make_eligible_investor(await make_user(role="INVESTOR"))
+    ticket = uuid.uuid4()
+    for path, method in (
+        (f"/funding/tranches/{ticket}/contract", "get"),
+        (f"/funding/tranches/{ticket}/contract/code", "post"),
+    ):
+        assert (await getattr(client, method)(path, headers=setup["sme"]["headers"])).status_code == 403
+        assert (await getattr(client, method)(path, headers=investor["headers"])).status_code == 404
+    signed = await client.post(
+        f"/funding/tranches/{ticket}/contract", json={"code": "123456", "click_to_sign": True}, headers=investor["headers"]
+    )
+    assert signed.status_code == 404
+
+    waive = f"/admin/funding/lenders/{investor['id']}/waive-lock"
+    body = {"window_id": str(setup["window"].id), "reason": "FORCE_MAJEURE", "note": "flood"}
+    assert (await client.post(waive, json=body, headers=investor["headers"])).status_code == 403
+    not_locked = await client.post(waive, json=body, headers=setup["admin"]["headers"])
+    assert not_locked.status_code == 409 and not_locked.headers["X-Error-Code"] == "NOT_LOCKED"

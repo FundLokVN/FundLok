@@ -138,6 +138,8 @@ async def failed_window_with_refunds(world):
     await world.db.refresh(world.window)
     assert world.window.status == "FAILED"
     refunds = (await world.db.execute(select(Transfer).where(Transfer.kind == "REFUND").order_by(Transfer.created_at))).scalars().all()
+    # Stamped with the injected close time, not the DB clock: the refund receipt's time check starts here.
+    assert [r.created_at for r in refunds] == [at(days=14)] * len(refunds)
     return tr, refunds
 
 
