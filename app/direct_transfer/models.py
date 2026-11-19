@@ -446,6 +446,37 @@ class PaymentQr(Base):
     )
 
 
+class ExtensionFiling(Base):
+    """The SME's revenue filing for one month, and the automatic extension it gave (D-042,
+    docs/specs/repayment_schedule/automatic-extension.md). `previous_rows` keeps the schedule rows it replaced."""
+
+    __tablename__ = "extension_filings"
+
+    id = _uuid_pk()
+    window_id = Column(UUID(as_uuid=True), ForeignKey("funding_windows.id", ondelete="RESTRICT"), nullable=False)
+    sme_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    period_month = Column(Date, nullable=False)
+    evidence_kind = Column(Text, nullable=False)
+    evidence_file_id = Column(UUID(as_uuid=True), ForeignKey("evidence_files.id", ondelete="RESTRICT"), nullable=False)
+    revenue_vnd = Column(BigInteger, nullable=False)
+    revenue_share = Column(Numeric(7, 4), nullable=False)
+    due_vnd = Column(BigInteger, nullable=False)
+    shortfall_vnd = Column(BigInteger, nullable=False)
+    delta_days = Column(Integer, nullable=False, server_default="0")
+    start_date = Column(Date, nullable=True)
+    previous_rows = Column(JSONB, nullable=True)
+    status = Column(Text, nullable=False)
+    filed_at = _ts(nullable=False)
+    created_at = _ts(server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("evidence_kind IN ('TAX_DECLARATION','BANK_INFLOW')", name="ck_extension_filings_evidence_kind"),
+        CheckConstraint("status IN ('EXTENDED','NO_SHORTFALL','NO_ROOM')", name="ck_extension_filings_status"),
+        CheckConstraint("revenue_vnd >= 0 AND delta_days >= 0", name="ck_extension_filings_amounts"),
+        UniqueConstraint("window_id", "period_month", name="uq_extension_filings_window_month"),
+    )
+
+
 class TopUpPledge(Base):
     """Late money on Day 14 (an expired code, no code, or after 14:45) becomes the lender's top-up: the SME keeps
     it, and the lender signs the top-up after unlocking (Day-14 transfer rule). One per late ticket."""

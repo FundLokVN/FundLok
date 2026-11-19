@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.direct_transfer import extension
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.config import DEFAULT_PARAMS
 from app.direct_transfer.errors import DirectTransferError
@@ -37,6 +38,7 @@ from app.market.repayment_receipt_check import (
     record_refused,
 )
 from app.market.schemas import (
+    ExtensionFilingOut,
     InvestmentDueOut,
     MarkDaysPaidCreate,
     ProjectedScheduleOut,
@@ -429,3 +431,49 @@ async def confirm_repayment_receipt(
     return await repayment_receipts.confirm_receipt(
         db, receipt_id, investor=current_user, ip_address=request.client.host if request.client else None
     )
+
+
+@router.post("/rounds/{window_id}/extension-filings", response_model=ExtensionFilingOut, status_code=201)
+async def file_extension(
+    window_id: UUID,
+    request: Request,
+    period_month: str = Form(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    revenue_vnd: int = Form(..., ge=0),
+    evidence_kind: Literal["TAX_DECLARATION", "BANK_INFLOW"] = Form(...),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The business files a month's revenue (`period_month`, YYYY-MM) by the 5th of the next month, with that month's
+    tax declaration or bank inflow statement (automatic-extension.md, D-042). Decided at once, with no staff step:
+    EXTENDED (every investor's loan is the same Δ working days longer, the daily amount never rises), NO_SHORTFALL or
+    NO_ROOM. 409 FILING_CLOSED outside the 1st to the 5th, LATE_DAY_BLOCKS_FILING while a day is late or in dispute."""
+    limit = DEFAULT_PARAMS.max_evidence_bytes
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
+    content_type = funding.sniff_receipt_type(content)
+    if content_type is None:
+        raise HTTPException(
+            status_code=415, detail="Upload a PDF, PNG, JPEG or WEBP", headers={"X-Error-Code": "UNSUPPORTED_TYPE"}
+        )
+    try:
+        filing = await extension.file_extension(
+            db, window_id=window_id, sme_user_id=current_user.id,
+            period_month=dt.date.fromisoformat(f"{period_month}-01"), revenue_vnd=revenue_vnd,
+            evidence_kind=evidence_kind, content=content, content_type=content_type,
+            filename=(file.filename or "")[:255] or None, storage=funding.evidence_storage(), now=_now(),
+        )
+    except DirectTransferError as exc:
+        _raise_mapped(exc)
+    append_audit(
+        db,
+        entity_type="FUNDING_WINDOW",
+        entity_id=window_id,
+        action="EXTENSION_FILED",
+        actor_id=current_user.id,
+        after_state={"filing_id": str(filing.id), "status": filing.status, "delta_days": filing.delta_days},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return ExtensionFilingOut.model_validate(filing)

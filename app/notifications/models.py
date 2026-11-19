@@ -68,6 +68,10 @@ EVENT_LENDER_LOCKED = "LENDER_LOCKED"
 EVENT_TRANCHE_CONFIRMED = "TRANCHE_CONFIRMED"
 EVENT_LOAN_FORMED = "LOAN_FORMED"
 
+# Automatic extension (automatic-extension.md). To the SME (also the guarantor) and every investor: `data` window_id,
+# period_month, delta_days, start_date, and for an investor its tranche_id, new_daily_vnd, extra_interest_vnd.
+EVENT_EXTENSION_APPLIED = "EXTENSION_APPLIED"
+
 # Day-14 transfer rule (docs/specs/direct_transfer/day14-transfer-rule.md 4.7). To the investor.
 # TRANSFER_DUE_TODAY: "sign and pay by 14:45"; `data`: tranche_id, listing_title, amount_vnd, pay_deadline_at.
 # TOP_UP_PLEDGE_RECORDED: late money became their top-up; `data`: pledge_id, window_id, listing_title, amount_vnd.
@@ -94,6 +98,7 @@ NOTIFICATION_EVENTS = frozenset(
         EVENT_LENDER_LOCKED,
         EVENT_TRANCHE_CONFIRMED,
         EVENT_LOAN_FORMED,
+        EVENT_EXTENSION_APPLIED,
         EVENT_TRANSFER_DUE_TODAY,
         EVENT_TOP_UP_PLEDGE_RECORDED,
     }
