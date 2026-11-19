@@ -90,8 +90,8 @@ LATE ──[SME marks paid with receipt]─────────────�
 
 ## 6. Business Rules
 
-1. **Late.** A day is LATE from 00:00 ICT of the day after its `due_date` if it has no proof. The job `mark_late_days` (daily 00:05 ICT, idempotent) sets `status = LATE`, `late_marked_at`, and sends the notifications. Calendar days; no holiday exceptions (D-046).
-2. **Presumed paid needs proof.** `presume_paid_days` changes to select only days with `marked_paid_at IS NOT NULL`, still `DUE`, and `report_deadline < now`. It never touches a day without proof.
+1. **Late.** A day is LATE if it has no proof by **18:00 ICT on its `due_date`** (open question 2, answered by Phat's P1 brief, 19 Nov). The job `mark_late_days` (worker, 00:10 and 18:10 ICT, idempotent) sets `status = LATE`, `late_marked_at`, and sends the notifications (one per day to the lender, one per run to the SME). Calendar days; no holiday exceptions (D-046).
+2. **Presumed paid needs proof.** `presume_paid_days` is removed. Proof is the SME's bank receipt: `mark_days_paid` refuses a payment without one (`400 RECEIPT_REQUIRED`) and sets `PRESUMED_PAID` with `marked_paid_at`; `settle_days` settles it once `report_deadline` passes with no report. A day without proof never becomes `PRESUMED_PAID`.
 3. **Report window.** `report_deadline` = proof time + 24 calendar hours for the lender's "Not received" (A5; was 2 working days). The 30-day dispute with a bank statement after silence-confirmation is the same route as in `commit-then-accept-flow.md` rule 8, on the repayment side: `POST /repayment/days/{id}/report-missing` stays open until `settled_at + 30 days` with a bank statement attached, and staff decide.
 4. **Never paid.** A LATE day is shown as overdue to SME, lender and staff, in the schedule and projection. It is never shown or counted as paid, never settles, and posts no ledger leg.
 5. **Staff decision.** `NOT_PAID` on a reported day makes it LATE (it was previously unresolved); `RECEIVED` makes it MATCHED.
@@ -140,7 +140,7 @@ LATE ──[SME marks paid with receipt]─────────────�
 | # | Question | Owner | Default used |
 |---|---|---|---|
 | 1 | Does a day under staff review (`REPORTED_MISSED`) block extension filing like a Late day? | Loc | Yes, until staff decide |
-| 2 | Is "end of due date" 00:00 ICT of the next calendar day, or a cut-off such as 18:00 ICT on the due date (banks stop crediting)? | Loc | 00:00 ICT of the next calendar day |
+| 2 | Is "end of due date" 00:00 ICT of the next calendar day, or a cut-off such as 18:00 ICT on the due date (banks stop crediting)? | Loc | **18:00 ICT on the due date** (Phat's P1 brief, 19 Nov; `late_cutoff` in config) |
 | 3 | When a LATE day is paid late and confirmed, is the original ledger date the due date or the settlement date? | Edward | Settlement date; late interest (Phase 3) covers the gap |
 
 ---
@@ -150,3 +150,4 @@ LATE ──[SME marks paid with receipt]─────────────�
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 1.0 | 2026-11-15 | Edward / Claude | First draft, from D-041, D-055 and the Appendix M findings 7.3, 7.4, 7.6, 8.1 |
+| 1.1 | 2026-11-19 | Phat / Claude | Implemented (AM-P8): 18:00 cut-off, proof = receipt, `presume_paid_days` removed |

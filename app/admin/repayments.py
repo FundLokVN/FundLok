@@ -6,9 +6,9 @@ One receipt pays one investor for one or more days, a REPAYMENT transfer per day
 `pay_with_receipt`). A day the investor says never arrived is reported from their schedule and decided by staff
 through the dispute queue, as before.
 
-Late repayments (`overdue_summary`, `list_overdue`): a day the business has not marked paid (still DUE: uploading a
-receipt makes it PRESUMED_PAID) after its due date. Display only, for staff: no arrears state, no late interest
-(lateness handling is out of MVP scope, CLAUDE.md).
+Late repayments (`overdue_summary`, `list_overdue`): a day the business has not marked paid (DUE, or LATE once the
+18:00 cut-off on its due date passed with no proof: uploading a receipt makes it PRESUMED_PAID) after its due date.
+Display only, for staff: no late interest yet (late-interest.md).
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def is_overdue(day: _Day, today: dt.date) -> bool:
     """Not marked paid and past its due date. The business may pay a day at any hour of its due date
     (`mark_days_paid` has no cut-off; the 15:00 ICT reminder only says what is due today), so it is late from the
     next ICT calendar day. A day the investor reported missing, or staff matched, is not "not submitted"."""
-    return day.status == "DUE" and day.settled_at is None and day.due_date < today
+    return day.status in ("DUE", "LATE") and day.settled_at is None and day.due_date < today
 
 
 def overdue_summary(
@@ -285,7 +285,7 @@ async def list_overdue(
             .join(Tranche, Tranche.id == RepaymentDay.tranche_id)
             .join(FundingWindow, FundingWindow.id == Tranche.window_id)
             .where(
-                RepaymentDay.status == "DUE",
+                RepaymentDay.status.in_(("DUE", "LATE")),
                 RepaymentDay.settled_at.is_(None),
                 RepaymentDay.due_date < today,
                 FundingWindow.status.in_(_REPAYING_ROUNDS),

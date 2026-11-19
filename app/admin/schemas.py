@@ -970,7 +970,7 @@ class AdminRepaymentDayOut(BaseModel):
     gross_vnd: int
     tax_withheld_vnd: int
     net_vnd: int
-    status: Literal["DUE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
+    status: Literal["DUE", "LATE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
     check_status: str
 
 

@@ -17,7 +17,7 @@ from app.direct_transfer.models import RepaymentDay
 from app.ledger.models import LedgerAccount, LedgerEntry, LedgerTransaction
 from app.ledger.service import get_account_balance
 
-from .helpers import at, make_investor, open_window, reserve
+from .helpers import at, make_investor, open_window, pay_days_through, reserve
 
 M = 1_000_000
 
@@ -55,7 +55,7 @@ async def test_tranche_claims_are_idempotent(loan):
 
 async def test_no_new_path_leg_touches_omnibus_cash(loan):
     world, _, _ = loan
-    await repayment.presume_paid_days(world.db, now=ict(2026, 11, 9))
+    await pay_days_through(world, ict(2026, 11, 9))
     await repayment.settle_days(world.db, now=ict(2026, 11, 9))
     entries = (await world.db.execute(select(LedgerEntry))).scalars().all()
     assert entries
@@ -67,7 +67,7 @@ async def test_no_new_path_leg_touches_omnibus_cash(loan):
 
 async def test_repayment_day_posts_principal_legs_only(loan):
     world, _, _ = loan
-    await repayment.presume_paid_days(world.db, now=ict(2026, 11, 9))
+    await pay_days_through(world, ict(2026, 11, 9))
     await repayment.settle_days(world.db, now=ict(2026, 11, 6))  # only day 1 (due Wed 4 Nov) is past its deadline
     repay = (await world.db.execute(select(LedgerEntry).where(LedgerEntry.type.in_(("REPAYMENT", "DISTRIBUTION"))))).scalars().all()
     day1 = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.day_index == 1, RepaymentDay.kind == "INSTALMENT"))).scalars().all()
@@ -86,7 +86,7 @@ async def test_zero_principal_day_posts_nothing(loan):
 async def test_lender_claims_sum_equals_borrower_obligation_throughout(loan):
     world, _, _ = loan
     for day in (ict(2026, 11, 9), ict(2026, 11, 20), ict(2026, 12, 15)):
-        await repayment.presume_paid_days(world.db, now=day)
+        await pay_days_through(world, day)
         await repayment.settle_days(world.db, now=day)
         s = await contract_claim_summary(world.db, contract_id=world.contract.id)
         assert s.lender_total_vnd == s.borrower_obligation_vnd and 0 < s.borrower_obligation_vnd < 100 * M
@@ -95,7 +95,7 @@ async def test_lender_claims_sum_equals_borrower_obligation_throughout(loan):
 async def test_full_repayment_returns_borrower_and_lender_balances_to_zero(loan):
     world, _, _ = loan
     far = ict(2027, 6, 1)
-    await repayment.presume_paid_days(world.db, now=far)
+    await pay_days_through(world, far)
     await repayment.settle_days(world.db, now=far)
     s = await contract_claim_summary(world.db, contract_id=world.contract.id)
     assert s.borrower_obligation_vnd == 0 and set(s.lender_claims_vnd.values()) == {0}
