@@ -323,6 +323,26 @@ class RepaymentRejectionOut(BaseModel):
     decided_at: dt.datetime
 
 
+class ExtensionFilingOut(BaseModel):
+    """The business's monthly revenue filing and the automatic extension it gave (automatic-extension.md)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    window_id: UUID
+    period_month: dt.date
+    evidence_kind: Literal["TAX_DECLARATION", "BANK_INFLOW"]
+    revenue_vnd: int
+    due_vnd: int
+    shortfall_vnd: int
+    # EXTENDED: every investor's loan is Δ working days longer from start_date; NO_SHORTFALL: revenue covered the
+    # month; NO_ROOM: no days left before the backstop.
+    status: Literal["EXTENDED", "NO_SHORTFALL", "NO_ROOM"]
+    delta_days: int
+    start_date: dt.date | None = None
+    filed_at: dt.datetime
+
+
 class InvestmentDueOut(BaseModel):
     """What the business owes one investor on one investment now: every day due today or earlier that it has not
     marked paid, as one transfer to the investor's account (one VietQR for the whole amount, under the
