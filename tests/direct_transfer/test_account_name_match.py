@@ -21,7 +21,7 @@ from app.direct_transfer.accounts import (
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.models import EvidenceLog
 from app.direct_transfer.name_lookup import NoLookup
-from app.gverify.models import GVerifyKybVerification
+from app.gverify.models import GVerifyKybVerification, GVerifyVerification
 
 from .helpers import T0, make_user
 
@@ -35,6 +35,11 @@ async def _register(db, user, *, role, name, number="900100200300", lookup=None,
 
 async def _kyb(db, user, *, status="APPROVED", business_name="CÔNG TY TNHH ABC", at=T0):
     db.add(GVerifyKybVerification(user_id=user.id, status=status, document_type="COMPANY", business_name=business_name, created_at=at))
+    await db.flush()
+
+
+async def _kyc(db, user, *, full_name="NGUYỄN VĂN A"):
+    db.add(GVerifyVerification(user_id=user.id, verification_type="KYC", status="APPROVED", full_name=full_name))
     await db.flush()
 
 
@@ -73,6 +78,15 @@ def test_names_match_ignores_case_accents_and_punctuation():
 def test_names_match_is_none_when_there_is_no_verified_name():
     assert names_match("NGUYEN VAN A", None) is None
     assert names_match("NGUYEN VAN A", "") is None
+
+
+def test_a_verified_name_with_nothing_left_after_normalization_matches_nothing():
+    # "." or a non-Latin name normalizes to "", which used to equal an empty bank name (security review 2026-11-20).
+    for expected in (".", "-", "李明", "Иван"):
+        assert names_match("", expected) is None
+        assert names_match("NGUYEN VAN A", expected) is None
+    assert names_match("", "Nguyễn Văn A") is False
+    assert names_match("李明", "Nguyễn Văn A") is False
 
 
 # --- saving: everyone waits ------------------------------------------------------------
@@ -211,8 +225,33 @@ async def test_no_lookup_means_everything_waits_for_staff(world):
     assert (await _register(world.db, inv, role="INVESTOR", name="NGUYEN VAN A", lookup=NoLookup())).status == "PENDING"
 
 
+async def test_a_name_with_no_latin_letters_never_approves_an_account(world):
+    # Without a lookup the bank name is empty; "." / "Иван" normalized to "" too and auto-approved (review 2026-11-20).
+    for number, full_name in (("1110", "."), ("2220", "Иван")):
+        inv = await make_user(world.db, role="INVESTOR", full_name=full_name)
+        account = await _register(world.db, inv, role="INVESTOR", name="TRAN THI B", number=number)
+        assert (account.status, account.approved_at) == ("PENDING", None)
+        event = (await _events(world.db, account, "PAYMENT_ACCOUNT_REGISTERED"))[0]
+        assert event.payload["auto_approved"] is False
+
+
+async def test_a_lookup_never_approves_against_the_self_set_full_name(world):
+    inv = await make_user(world.db, role="INVESTOR", full_name="Trần Thị B")  # no eKYC: the name is self-declared
+    lookup = _FakeLookup({"1110": "TRAN THI B"})
+    assert (await _register(world.db, inv, role="INVESTOR", name="TRAN THI B", number="1110", lookup=lookup)).status == "PENDING"
+
+
+async def test_a_lookup_returning_no_comparable_name_does_not_approve(world):
+    inv = await make_user(world.db, role="INVESTOR", full_name="Nguyễn Văn A")
+    await _kyc(world.db, inv)
+    lookup = _FakeLookup({"1110": "", "2220": "."})
+    for number in ("1110", "2220"):
+        assert (await _register(world.db, inv, role="INVESTOR", name="NGUYEN VAN A", number=number, lookup=lookup)).status == "PENDING"
+
+
 async def test_a_lookup_approves_only_on_an_exact_match_of_the_name_the_bank_returns(world):
     inv = await make_user(world.db, role="INVESTOR", full_name="Nguyễn Văn A")
+    await _kyc(world.db, inv)
     lookup = _FakeLookup({"1110": "NGUYEN VAN A", "2220": "TRAN THI B"})
     ok = await _register(world.db, inv, role="INVESTOR", name="whatever the user typed", number="1110", lookup=lookup)
     assert ok.status == "APPROVED" and ok.approved_by is None and ok.approved_at == T0
