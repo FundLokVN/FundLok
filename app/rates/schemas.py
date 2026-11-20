@@ -330,28 +330,193 @@ class RateCalculationResponse(BaseModel):
     data: RateCalculationData
 
 
+# --------------------------------------------------------------------------- #
+# SME quiz (illustrative) — see docs/specs/rates/sme-rate-quiz.md
+#
+# The quiz rate is computed in the browser from a short published formula
+# (fundlok-front-end lib/rate-quiz.ts). The backend never prices it and never
+# calls the underwriting engine: it stores the answers, the rate the visitor
+# saw and their contact, after checking the rate is one the formula can produce.
+# --------------------------------------------------------------------------- #
+
+SME_QUIZ_PARAMS_VERSIONS = ("sme-quiz-v1",)
+# The amount chips. 100M is the per-legal-entity cap (D-040).
+SME_QUIZ_AMOUNTS_VND = (20_000_000, 30_000_000, 50_000_000, 80_000_000, 100_000_000)
+SME_QUIZ_TENORS = (1, 2, 3, 4, 5, 6)
+# The 15 industry codes the page offers, plus "Other" (Khác).
+SME_QUIZ_INDUSTRIES = (
+    "IT Services",
+    "Healthcare & Pharmacy",
+    "Professional Services",
+    "Education & Training",
+    "Beauty & Personal Care",
+    "Retail Trade",
+    "Food & Beverage",
+    "Manufacturing",
+    "Electronics Retail",
+    "Logistics & Transport",
+    "Tourism & Hospitality",
+    "Furniture & Woodwork",
+    "Textile & Garment",
+    "Agriculture & Farming",
+    "Construction Materials",
+    "Other",
+)
+# The formula's floor (14.0%/yr = 1.1667) and ceiling (16.9%/yr = 1.4083) per
+# month, with room for rounding to 2 decimals.
+SME_QUIZ_MONTHLY_RATE_MIN = 1.16
+SME_QUIZ_MONTHLY_RATE_MAX = 1.41
+
+# Column widths for the tracking fields. Longer values are cut, not rejected:
+# a lead is worth more than a tidy utm_campaign.
+_TRACKING_LIMITS = {
+    "utm_source": 100,
+    "utm_medium": 100,
+    "utm_campaign": 100,
+    "utm_content": 100,
+    "utm_term": 100,
+    "fbclid": 255,
+}
+
+
+class SmeQuizTracking(BaseModel):
+    utm_source: str | None = None
+    utm_medium: str | None = None
+    utm_campaign: str | None = None
+    utm_content: str | None = None
+    utm_term: str | None = None
+    fbclid: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _truncate(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        cleaned: dict[str, Any] = {}
+        for key, limit in _TRACKING_LIMITS.items():
+            value = data.get(key)
+            if value is None:
+                cleaned[key] = None
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"{key} must be text")
+            value = _CONTROL_CHARS.sub("", value).strip()
+            cleaned[key] = value[:limit] or None
+        return cleaned
+
+
+class SmeQuizLeadCreate(BaseModel):
+    requested_amount: int
+    tenor_months: int
+    operating_band: Literal["LT_1Y", "Y1_3", "GT_3Y"]
+    industry: str = Field(..., max_length=100)
+    monthly_revenue: int = Field(..., gt=0, le=FIGURE_MAX_VND)
+    quiz_params_version: str = Field(..., max_length=20)
+    outcome: Literal["QUOTED", "DECLINED"]
+    monthly_rate_pct: float | None = None
+
+    full_name: str = Field(..., min_length=2, max_length=120)
+    phone: str = Field(..., max_length=20)
+    # Decree 13/2023: storing a name and phone needs consent, literally true.
+    consent_contact: Literal[True]
+
+    session_id: str | None = Field(default=None, max_length=128)
+    turnstile_token: str | None = Field(default=None, max_length=4096)
+    tracking: SmeQuizTracking | None = None
+
+    @field_validator("requested_amount", mode="before")
+    @classmethod
+    def _amount(cls, v: Any) -> int:
+        amount = _sanitize_money_value(v)
+        if amount not in SME_QUIZ_AMOUNTS_VND:
+            raise ValueError("requested_amount must be one of the quiz amounts")
+        return amount
+
+    @field_validator("tenor_months")
+    @classmethod
+    def _tenor(cls, v: int) -> int:
+        if v not in SME_QUIZ_TENORS:
+            raise ValueError("tenor_months must be 1 to 6")
+        return v
+
+    @field_validator("monthly_revenue", mode="before")
+    @classmethod
+    def _revenue(cls, v: Any) -> int:
+        return _sanitize_money_value(v)
+
+    @field_validator("industry")
+    @classmethod
+    def _industry(cls, v: str) -> str:
+        # Never echo the value back: this endpoint is public.
+        if v not in SME_QUIZ_INDUSTRIES:
+            raise ValueError("industry is not one of the quiz industries")
+        return v
+
+    @field_validator("quiz_params_version")
+    @classmethod
+    def _version(cls, v: str) -> str:
+        if v not in SME_QUIZ_PARAMS_VERSIONS:
+            raise ValueError("quiz_params_version is not a known version")
+        return v
+
+    @field_validator("monthly_rate_pct", mode="before")
+    @classmethod
+    def _rate_finite(cls, v: Any) -> Any:
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError("monthly_rate_pct must be a finite number")
+        return v
+
+    @field_validator("full_name")
+    @classmethod
+    def _clean_full_name(cls, v: str) -> str:
+        return clean_plain_name(v, "full_name")
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def _validate_phone(cls, v: Any) -> str:
+        return validate_contact_phone(v)
+
+    @model_validator(mode="after")
+    def _rate_matches_outcome(self) -> "SmeQuizLeadCreate":
+        if self.outcome == "DECLINED":
+            if self.monthly_rate_pct is not None:
+                raise ValueError("a declined quiz carries no rate")
+            return self
+        rate = self.monthly_rate_pct
+        if rate is None:
+            raise ValueError("a quoted quiz must carry monthly_rate_pct")
+        if not SME_QUIZ_MONTHLY_RATE_MIN <= rate <= SME_QUIZ_MONTHLY_RATE_MAX:
+            raise ValueError("monthly_rate_pct is outside what the quiz formula can produce")
+        return self
+
+
+class SmeQuizLeadResponse(BaseModel):
+    inquiry_id: UUID
+
+
 class RateInquiryAdminItem(BaseModel):
     id: UUID
     created_at: datetime
     created_at_formatted: str
     industry: str
     industry_display: str
-    operating_months: int
-    employee_count: int
+    source: Literal["CALCULATOR", "QUIZ"] = "CALCULATOR"
+    operating_months: int | None
+    employee_count: int | None
     tenure_staff_display: str
-    revenue_l12m: int
+    revenue_l12m: int | None
     revenue_l12m_formatted: str
-    revenue_prev_12m: int
-    cogs_l12m: int
-    fixed_costs_l12m: int
-    variable_costs_l12m: int
-    yoy_growth_pct: float
+    revenue_prev_12m: int | None
+    cogs_l12m: int | None
+    fixed_costs_l12m: int | None
+    variable_costs_l12m: int | None
+    yoy_growth_pct: float | None
     yoy_growth_display: str
     requested_amount: int
     tenor_months: int
     loan_ask_display: str
-    estimated_rate_min: float
-    estimated_rate_max: float
+    estimated_rate_min: float | None
+    estimated_rate_max: float | None
     calculated_rate_display: str
     risk_tier: str | None
     tier_display: str
@@ -366,6 +531,18 @@ class RateInquiryAdminItem(BaseModel):
     email: str | None = None
     phone: str | None = None
     consented_contact_at: datetime | None = None
+    # Quiz rows only (source = QUIZ).
+    monthly_revenue: int | None = None
+    operating_band: str | None = None
+    quiz_outcome: str | None = None
+    quiz_params_version: str | None = None
+    # Ad tracking parameters, when the landing URL carried them.
+    utm_source: str | None = None
+    utm_medium: str | None = None
+    utm_campaign: str | None = None
+    utm_content: str | None = None
+    utm_term: str | None = None
+    fbclid: str | None = None
 
     model_config = {"from_attributes": True}
 
