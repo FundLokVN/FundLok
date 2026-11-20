@@ -11,6 +11,7 @@ import asyncio
 import datetime as dt
 import io
 import re
+from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -98,11 +99,13 @@ async def _guarantor_sign(client, case, code):
 
 @pytest.fixture
 def approved(client, db_session, make_user, make_admin, attach_required_documents):
-    """An SME whose request FundLok approved, with locked terms (14.5% a year), its KYB, an approved bank account,
-    its owner's eKYC and the Guarantor's address (entered on the signing step: the eKYC carries none): everything
-    signing needs, nothing signed yet."""
+    """An SME whose request FundLok approved, with locked terms (14.5% a year, a daily repayment rate of 8.5%: the
+    revenue share s), its KYB, an approved bank account, its owner's eKYC and the Guarantor's address (entered on the
+    signing step: the eKYC carries none): everything signing needs, nothing signed yet."""
 
-    async def _make(*, lock=True, kyc=True, approve=True, tax_id=TAX, guarantor_address=True, phone=True):
+    async def _make(
+        *, lock=True, kyc=True, approve=True, tax_id=TAX, guarantor_address=True, phone=True, drr=Decimal("0.0850")
+    ):
         sme = await make_user(role="SME")
         if phone:
             await _verified_phone(db_session, sme)
@@ -136,6 +139,7 @@ def approved(client, db_session, make_user, make_admin, attach_required_document
                     locked_at=dt.datetime.now(dt.timezone.utc),
                     final_grade_precise=72.0,
                     interest_rate_pct=14.5,
+                    daily_repayment_rate=drr,
                 )
             )
             await db_session.commit()
@@ -293,16 +297,37 @@ async def test_the_agreement_and_the_offer_carry_the_approved_terms(client, appr
     # The whole offer, not a stub: the last article and the Annex.
     assert "Điều 8." in offer and "văn bản số 5" in offer
     # Laid out as a Vietnamese contract: the national title and motto, the date, the title and its number; every
-    # party's details filled in (the one dotted blank left is the revenue share, which nothing sets yet), and who
-    # signs under each box.
+    # party's details and the revenue share s (the locked run's daily repayment rate) filled in, no dotted blank
+    # left, and who signs under each box.
     for expected in ("CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM", "Độc lập - Tự do - Hạnh phúc",
                      "THE SOCIALIST REPUBLIC OF VIETNAM", "Independence - Freedom - Happiness",
                      "ĐỀ NGHỊ GIAO KẾT HỢP ĐỒNG CHO VAY", f"Số / No.: {ref}/ĐNGK-FL", "tháng", "năm",
                      GUARANTOR_ADDRESS, "12 Nguyen Hue", "Tran Van Owner (Giam doc)"):
         assert expected in offer, expected
-    assert offer.count(agreement_text.BLANK) == 1
+    assert "8,5% – do hệ thống điền riêng cho từng Khoản gọi vốn" in offer
+    assert offer.count(agreement_text.BLANK) == 0
     assert "HỢP ĐỒNG DỊCH VỤ DÀNH CHO DOANH NGHIỆP" in agreement and f"Số / No.: {ref}/HĐDV-FL" in agreement
     assert agreement.count(agreement_text.BLANK) == 0 and agreement_text.PARTY_A_SIGNER in agreement
+
+
+async def test_a_locked_run_without_a_stored_rate_leaves_s_blank(client, approved):
+    """A run scored before the daily repayment rate was stored (#99) has no s to print: the Offer keeps its dotted
+    blank rather than inventing one."""
+    case = await approved(drr=None)
+    offer = _text(await _download(client, case, "standing-offer"))
+    assert f"{agreement_text.BLANK}{standing_offer_text.REVENUE_SHARE_SUFFIX}" in offer
+    assert offer.count(agreement_text.BLANK) == 1
+
+
+async def test_s_is_covered_by_the_check_code(client, db_session, approved, stored, fake_neac):
+    """A copy downloaded before s changed no longer matches: s is part of what the SME signs."""
+    case = await approved()
+    copy = await _signed(client, case, "standing-offer", signers=(TAX, GUARANTOR_ID))
+    run = (await db_session.execute(select(ScoreRun).where(ScoreRun.application_id == UUID(case.app_id)))).scalar_one()
+    run.daily_repayment_rate = Decimal("0.0900")
+    await db_session.commit()
+    resp = await _upload(client, case, "standing-offer", copy)
+    assert resp.status_code == 422 and resp.headers["X-Error-Code"] == "SIGNING_DOCUMENT_OUTDATED", resp.text
 
 
 async def test_the_loan_contract_template_carries_the_parties_and_the_approved_terms(
@@ -328,8 +353,9 @@ async def test_the_loan_contract_template_carries_the_parties_and_the_approved_t
                      "không vượt 80.000.000 VND", "P × 14,5% × 4 / 12", "483.333 VND", "10.483.333 VND",
                      "124.801 VND", "124.850 VND", "Ngày đăng + 14 ngày", "thời điểm cam kết"):
         assert expected in contract, expected
-    # The one dotted blank left is the revenue share, which nothing sets yet.
-    assert contract.count(agreement_text.BLANK) == 1
+    # The revenue share s as the Offer prints it; no dotted blank left.
+    assert "8,5% – theo Thông tin Khoản gọi vốn" in contract
+    assert contract.count(agreement_text.BLANK) == 0
     # One empty signature field per signer: the SME and the Guarantor sign this template now.
     assert signature_fields(contract_pdf) == {"SME_Signature": False, "Guarantor_Signature": False}
 
@@ -522,6 +548,25 @@ async def test_signing_all_three_publishes_the_project(client, db_session, appro
     )
     assert copy.status_code == 200
     assert copy.content == stored[signed["sme_standing_offer"].file_key]
+
+
+async def test_the_investor_listing_shows_drr_s_and_the_guarantor(client, approved, stored, fake_neac, make_user):
+    """The offer screen's figures (SCRUM-637): DRR and s from the locked run, and the Personal Guarantor the signed
+    Standing Offer names (the name only, never the ID number or address)."""
+    case = await approved()
+    for kind, signers in (("service-agreement", (TAX,)), ("standing-offer", (TAX, GUARANTOR_ID)),
+                          ("loan-contract", (TAX, GUARANTOR_ID))):
+        resp = await _upload(client, case, kind, await _signed(client, case, kind, signers=signers))
+        assert resp.status_code == 200, (kind, resp.text)
+    assert resp.json()["published"] is True
+
+    investor = await make_user(role="INVESTOR")
+    listed = await client.get("/projects/public", headers=auth_headers(investor))
+    assert listed.status_code == 200, listed.text
+    [card] = [p["loan_application"] for p in listed.json() if p["loan_application"]["id"] == case.app_id]
+    assert card["daily_repayment_rate"] == 0.085 and card["revenue_share"] == 0.085
+    assert card["guarantor_name"] == GUARANTOR_NAME
+    assert GUARANTOR_ID not in listed.text and GUARANTOR_ADDRESS not in listed.text
 
 
 async def test_the_guarantor_signs_by_zalo_code_and_that_publishes_the_project(

@@ -319,6 +319,54 @@ async def locked_business_scores(db: AsyncSession, application_ids: list[UUID]) 
     return {application_id: round(float(grade), 2) for application_id, grade in rows}
 
 
+async def locked_repayment_rates(db: AsyncSession, application_ids: list[UUID]) -> dict[UUID, float]:
+    """Each application's daily repayment rate (DRR, a fraction) from its
+    LOCKED score run, in one query for the whole marketplace list: the figure
+    the Standing Offer prints as the revenue share s (agreement/terms.py).
+    Applications whose run has no rate stored are left out."""
+    from app.lending.models import ScoreRun
+
+    if not application_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(ScoreRun.application_id, ScoreRun.daily_repayment_rate).where(
+                ScoreRun.application_id.in_(application_ids),
+                ScoreRun.status == "LOCKED",
+                ScoreRun.daily_repayment_rate.is_not(None),
+            )
+        )
+    ).all()
+    return {application_id: float(rate) for application_id, rate in rows}
+
+
+async def listed_guarantor_names(db: AsyncSession, projects) -> dict[UUID, str]:
+    """The Personal Guarantor each request's signed Standing Offer names, by
+    application id: the user whose details the Offer was filled in with (the
+    one who uploaded the signed copy, as the NEAC re-check finds them), named
+    as their approved eKYC has it. Requests with no signed Offer on file are
+    left out. The name only: the ID number and address stay on the document."""
+    from app.loans.agreement.neac_check import STANDING_OFFER_TYPE, signing_user
+    from app.loans.agreement.standing_offer import guarantor_for
+
+    names: dict[UUID, str] = {}
+    for project in projects:
+        for application in project.loan_applications[:1]:
+            offer = next(
+                (d for d in application.documents if d.document_type == STANDING_OFFER_TYPE),
+                None,
+            )
+            if offer is None:
+                continue
+            user = await signing_user(db, offer, project)
+            if user is None:
+                continue
+            name = (await guarantor_for(db, user, application)).name
+            if name:
+                names[application.id] = name
+    return names
+
+
 async def bank_rate_in_force(db: AsyncSession) -> float | None:
     """bank_rate_config.rate_pct in force today, as the marketplace's target
     return. None rather than a 500 if the seed row was ever removed: the

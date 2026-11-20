@@ -10,7 +10,8 @@ which text it was; bump it whenever a word here changes.
 
 # v0.4: laid out as a Vietnamese contract (national header, date, number); filled in with the Standing Offer's
 # number and date and, where each Investor's copy fills a value in, the rule it follows (`PER_INVESTOR`).
-VERSION = "loan-contract-v0.4"
+# v0.5: the revenue share s is filled in, as on the Standing Offer, and covered by the check code.
+VERSION = "loan-contract-v0.5"
 
 TITLE = ("5. Hợp đồng cho vay", "Loan Contract")
 

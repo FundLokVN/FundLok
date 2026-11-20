@@ -19,7 +19,9 @@ from app.projects.service import (
     create_project,
     get_my_projects,
     display_projects,
+    listed_guarantor_names,
     locked_business_scores,
+    locked_repayment_rates,
     marketplace_listings,
     repeat_project,
     verified_document_types,
@@ -92,6 +94,8 @@ async def list_projects(
     projects = await display_projects(db, current_user)
     application_ids = [p.loan_applications[0].id for p in projects if p.loan_applications]
     scores = await locked_business_scores(db, application_ids)
+    repayment_rates = await locked_repayment_rates(db, application_ids)
+    guarantors = await listed_guarantor_names(db, projects)
     listings = await marketplace_listings(db, application_ids)
     bank_rate_pct = await bank_rate_in_force(db)
     results = []
@@ -104,5 +108,9 @@ async def list_projects(
             out.loan_application.business_score = scores.get(application.id)
             out.loan_application.listing = listings.get(application.id)
             out.loan_application.bank_rate_pct = bank_rate_pct
+            # DRR and s are one figure today (D-044): the locked run's rate.
+            out.loan_application.daily_repayment_rate = repayment_rates.get(application.id)
+            out.loan_application.revenue_share = repayment_rates.get(application.id)
+            out.loan_application.guarantor_name = guarantors.get(application.id)
         results.append(out)
     return results
