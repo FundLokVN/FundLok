@@ -1,7 +1,16 @@
 """Admins approve or reject the bank accounts users save; each decision is in the audit log."""
+import uuid
+
 from sqlalchemy import select
 
+from app.gverify.models import GVerifyVerification
 from app.lending.models import AuditLog
+
+
+async def _kyc(db_session, user, full_name="Test User"):
+    """An approved eKYC: an investor's account is checked against this name, never the self-set full_name."""
+    db_session.add(GVerifyVerification(user_id=uuid.UUID(user["id"]), verification_type="KYC", status="APPROVED", full_name=full_name))
+    await db_session.commit()
 
 
 async def _save(client, user, number="19036789012"):
@@ -15,8 +24,8 @@ async def _save(client, user, number="19036789012"):
 
 
 async def _decide(client, admin, account_id, decision, note=None, holder="Test User", accept=True):
-    """`holder` is the account holder name as the bank shows it (an investor's must equal their KYC name, which
-    make_user sets to "Test User"); `accept` accepts a difference for an SME with no verified company name."""
+    """`holder` is the account holder name as the bank shows it (an investor's must equal their approved eKYC
+    name, which _kyc sets to "Test User"); `accept` accepts a difference for an SME with no verified company name."""
     body = {"decision": decision} | ({"note": note} if note is not None else {})
     if decision == "APPROVED":
         body |= {"verified_holder_name": holder, "accept_difference": accept}
@@ -41,6 +50,7 @@ async def test_queue_lists_accounts_waiting_for_a_decision(client, make_admin, m
 async def test_approving_records_who_approved_it_in_the_audit_log(client, make_admin, make_user, db_session):
     admin = await make_admin()
     investor = await make_user(role="INVESTOR")
+    await _kyc(db_session, investor)
     account = await _save(client, investor)
 
     resp = await _decide(client, admin, account["id"], "APPROVED", note="Statement matches")
@@ -93,9 +103,10 @@ async def test_rejecting_needs_a_reason_the_user_then_sees(client, make_admin, m
     assert audit.after_state["note"] == "Name does not match the KYC record"
 
 
-async def test_a_decision_is_final(client, make_admin, make_user):
+async def test_a_decision_is_final(client, make_admin, make_user, db_session):
     admin = await make_admin()
     investor = await make_user(role="INVESTOR")
+    await _kyc(db_session, investor)
     account = await _save(client, investor)
     assert (await _decide(client, admin, account["id"], "APPROVED", note="Checked at the bank")).status_code == 200
 
@@ -140,9 +151,11 @@ async def test_approving_needs_the_holder_name_as_the_bank_shows_it(client, make
     assert resp.status_code == 422 and resp.headers["X-Error-Code"] == "HOLDER_NAME_REQUIRED"
 
 
-async def test_an_investor_account_cannot_be_approved_when_the_bank_name_differs_from_kyc(client, make_admin, make_user):
+async def test_an_investor_account_cannot_be_approved_when_the_bank_name_differs_from_kyc(client, make_admin, make_user, db_session):
     admin = await make_admin()
-    account = await _save(client, await make_user(role="INVESTOR", full_name="Nguyen Van A"))
+    investor = await make_user(role="INVESTOR", full_name="Nguyen Van A")
+    await _kyc(db_session, investor, full_name="Nguyễn Văn A")
+    account = await _save(client, investor)
     resp = await _decide(client, admin, account["id"], "APPROVED", note="checked", holder="TRAN THI B", accept=True)
     assert resp.status_code == 409 and resp.headers["X-Error-Code"] == "HOLDER_NAME_MISMATCH"  # accept is ignored
     ok = await _decide(client, admin, account["id"], "APPROVED", note="checked at the bank", holder="NGUYEN VAN A")
@@ -158,9 +171,20 @@ async def test_an_sme_difference_needs_to_be_accepted_explicitly(client, make_ad
     assert ok.status_code == 200, ok.text
 
 
-async def test_the_queue_shows_the_name_to_check_against(client, make_admin, make_user):
+async def test_the_queue_shows_the_name_to_check_against(client, make_admin, make_user, db_session):
     admin = await make_admin()
-    await _save(client, await make_user(role="INVESTOR", full_name="Nguyen Van A"))
+    investor = await make_user(role="INVESTOR", full_name="Nguyen Van A")
+    await _save(client, investor)
     row = (await client.get("/admin/payment-accounts", headers=admin["headers"])).json()[0]
-    assert row["expected_name"] == "Nguyen Van A"
+    assert (row["expected_name"], row["name_match"]) == (None, None)  # the self-set full_name is not a KYC name
+    await _kyc(db_session, investor, full_name="Nguyễn Văn A")
+    row = (await client.get("/admin/payment-accounts", headers=admin["headers"])).json()[0]
+    assert row["expected_name"] == "Nguyễn Văn A"
     assert row["name_match"] is False  # typed "TEST": a hint only, nothing is approved by it
+
+
+async def test_an_investor_without_ekyc_cannot_be_approved(client, make_admin, make_user):
+    admin = await make_admin()
+    account = await _save(client, await make_user(role="INVESTOR", full_name="Tran Thi B"))
+    resp = await _decide(client, admin, account["id"], "APPROVED", note="checked at the bank", holder="TRAN THI B")
+    assert resp.status_code == 409 and resp.headers["X-Error-Code"] == "KYC_NAME_MISSING"
