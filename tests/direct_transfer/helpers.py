@@ -18,6 +18,7 @@ from app.direct_transfer.models import FundingWindow, RepaymentDay, Tranche
 from app.direct_transfer.receipts import ReceiptFields
 from app.direct_transfer.signing import MockSigner
 from app.direct_transfer.storage import InMemoryStorage
+from app.gverify.models import GVerifyVerification
 from app.lending.models import Contract, Listing, LoanApplication, Project, ProjectOwnership, ScoreRun
 from app.users.models import User
 from tests.tax_codes import fake_tax_code
@@ -84,6 +85,14 @@ async def make_account(
         account_number=number, account_name=name or user.full_name, evidence_file_id=None, now=T0,
     )
     if approve_by is not None:
+        if role == "INVESTOR":
+            # An investor's account is checked against the approved eKYC name, so the investor has passed eKYC.
+            # Dated well before T0, so it never counts as a "fresh" eKYC after a lock (standing._fresh_ekyc).
+            db.add(GVerifyVerification(
+                user_id=user.id, verification_type="KYC", status="APPROVED", full_name=name or user.full_name,
+                created_at=T0 - dt.timedelta(days=365),
+            ))
+            await db.flush()
         # Staff record the holder name seen at the bank. Here it equals the account name; for an SME with no
         # approved KYB (no verified name to compare with) the difference is accepted explicitly.
         await decide_payment_account(

@@ -3,7 +3,7 @@ import pytest
 from sqlalchemy import select
 
 from app.direct_transfer import vietqr
-from app.gverify.models import GVerifyKybVerification
+from app.gverify.models import GVerifyKybVerification, GVerifyVerification
 from app.lending.models import AuditLog
 
 TCB = "970407"  # Techcombank, in the bank list
@@ -80,6 +80,9 @@ async def test_saved_account_is_not_usable_until_an_admin_approves_it(make_user,
     from app.direct_transfer.errors import DirectTransferError
 
     investor = await make_user(role="INVESTOR")
+    # Staff check an investor's account against the approved eKYC name, so the investor has passed eKYC.
+    db_session.add(GVerifyVerification(user_id=UUID(investor["id"]), verification_type="KYC", status="APPROVED", full_name="Test User"))
+    await db_session.commit()
     body = (await _save(client, investor)).json()
     with pytest.raises(DirectTransferError) as pending:
         await get_usable_account(
@@ -315,6 +318,11 @@ async def _verified_company(db_session, sme, business_name):
     await db_session.commit()
 
 
+async def _verified_person(db_session, investor, full_name):
+    db_session.add(GVerifyVerification(user_id=investor["id"], verification_type="KYC", status="APPROVED", full_name=full_name))
+    await db_session.commit()
+
+
 async def test_an_sme_account_waits_for_verification_even_when_the_typed_name_matches(make_user, client, db_session):
     sme = await make_user(role="SME")
     await _verified_company(db_session, sme, "CÔNG TY TNHH ABC")
@@ -330,15 +338,24 @@ async def test_the_hint_says_when_the_typed_name_differs(make_user, client, db_s
     assert body["status"] == "PENDING" and body["name_match"] is False
 
 
-async def test_an_investor_account_also_waits_for_verification(make_user, client):
+async def test_an_investor_account_also_waits_for_verification(make_user, client, db_session):
     investor = await make_user(role="INVESTOR", full_name="Nguyen Van A")
+    await _verified_person(db_session, investor, "Nguyễn Văn A")
     body = (await _save(client, investor, account_name="TRAN THI B")).json()
     assert body["status"] == "PENDING"
-    assert body["name_match"] is False and body["expected_name"] == "Nguyen Van A"
+    assert body["name_match"] is False and body["expected_name"] == "Nguyễn Văn A"
 
 
-async def test_listing_shows_the_status_and_hint_to_the_owner(make_user, client):
+async def test_an_investor_without_ekyc_has_no_name_to_compare(make_user, client):
+    # The self-set full_name is not a KYC name (security review 2026-11-20).
     investor = await make_user(role="INVESTOR", full_name="Nguyen Van A")
+    body = (await _save(client, investor, account_name="NGUYEN VAN A")).json()
+    assert (body["status"], body["name_match"], body["expected_name"]) == ("PENDING", None, None)
+
+
+async def test_listing_shows_the_status_and_hint_to_the_owner(make_user, client, db_session):
+    investor = await make_user(role="INVESTOR", full_name="Nguyen Van A")
+    await _verified_person(db_session, investor, "Nguyễn Văn A")
     await _save(client, investor, account_name="NGUYEN VAN A")
     listed = (await client.get("/payment-accounts", headers=investor["headers"])).json()
     assert [(a["status"], a["name_match"]) for a in listed] == [("PENDING", True)]

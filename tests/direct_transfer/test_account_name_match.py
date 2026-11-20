@@ -93,6 +93,7 @@ def test_a_verified_name_with_nothing_left_after_normalization_matches_nothing()
 
 async def test_every_account_starts_pending_even_when_the_typed_name_matches(world):
     inv = await make_user(world.db, role="INVESTOR", full_name="Nguyễn Văn A")
+    await _kyc(world.db, inv)
     sme = await make_user(world.db, role="SME", full_name="Owner")
     await _kyb(world.db, sme)
     a = await _register(world.db, inv, role="INVESTOR", name="NGUYEN VAN A")
@@ -104,6 +105,7 @@ async def test_every_account_starts_pending_even_when_the_typed_name_matches(wor
 
 async def test_typed_name_mismatch_is_a_hint_and_a_log_entry_not_a_block(world):
     inv = await make_user(world.db, role="INVESTOR", full_name="Nguyễn Văn A")
+    await _kyc(world.db, inv, full_name="Nguyễn Văn A")
     account = await _register(world.db, inv, role="INVESTOR", name="TRAN THI B")
     assert account.status == "PENDING" and account.name_match is False and account.expected_name == "Nguyễn Văn A"
     assert len(await _events(world.db, account, "PAYMENT_ACCOUNT_NAME_MISMATCH")) == 1
@@ -138,6 +140,7 @@ async def test_approving_needs_the_holder_name_the_bank_shows(world):
 
 async def test_investor_account_is_approved_only_when_the_bank_name_equals_the_kyc_name(world):
     inv = await make_user(world.db, role="INVESTOR", full_name="Nguyễn Văn A")
+    await _kyc(world.db, inv)
     account = await _register(world.db, inv, role="INVESTOR", name="NGUYEN VAN A")
     with pytest.raises(DirectTransferError) as info:
         await _decide(world.db, account, world.admin, holder="TRAN THI B", accept=True)  # accept is ignored
@@ -156,6 +159,21 @@ async def test_investor_without_a_kyc_name_cannot_be_checked(world):
     with pytest.raises(DirectTransferError) as info:
         await _decide(world.db, account, world.admin, holder="NGUYEN VAN A")
     assert info.value.code == "KYC_NAME_MISSING"
+
+
+async def test_the_self_set_full_name_is_not_a_kyc_name(world):
+    # Before eKYC an investor could set full_name to a third party's name, and staff were shown it as the
+    # "KYC name" to approve that person's account against (security review 2026-11-20).
+    inv = await make_user(world.db, role="INVESTOR", full_name="Trần Thị B")
+    account = await _register(world.db, inv, role="INVESTOR", name="TRAN THI B")
+    assert (account.expected_name, account.name_match) == (None, None)
+    with pytest.raises(DirectTransferError) as info:
+        await _decide(world.db, account, world.admin, holder="TRAN THI B")
+    assert info.value.code == "KYC_NAME_MISSING"
+    await _kyc(world.db, inv, full_name="Nguyễn Văn A")  # eKYC later shows who the investor really is
+    with pytest.raises(DirectTransferError) as info:
+        await _decide(world.db, account, world.admin, holder="TRAN THI B")
+    assert info.value.code == "HOLDER_NAME_MISMATCH"
 
 
 async def test_sme_account_matching_the_kyb_name_is_approved_without_accepting_a_difference(world):
