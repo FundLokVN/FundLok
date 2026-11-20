@@ -55,8 +55,8 @@ DOCUMENT_TYPES = {
 # version's text, so there is nothing to compare it with today (terms_match None).
 EARLIER_VERSIONS = {
     DOCUMENT_TYPE: ("sme-agreement-v0.3",),
-    STANDING_OFFER_TYPE: ("standing-offer-v0.3.1",),
-    LOAN_CONTRACT_TYPE: (),
+    STANDING_OFFER_TYPE: ("standing-offer-v0.4", "standing-offer-v0.3.1"),
+    LOAN_CONTRACT_TYPE: ("loan-contract-v0.4",),
 }
 CHECK_CODE_LABEL = "Mã đối chiếu"  # printed before the check code on every page
 AUDIT_ENTITY = "LOAN_APPLICATION_DOCUMENT"
@@ -99,7 +99,7 @@ async def _company(db: AsyncSession, project: Project) -> tuple[str | None, str 
     return project.tax_id, project.legal_name, "PROJECT"
 
 
-async def _signing_user(db: AsyncSession, document: LoanApplicationDocument, project: Project) -> User | None:
+async def signing_user(db: AsyncSession, document: LoanApplicationDocument, project: Project) -> User | None:
     """Whose details the document was filled in with: the SME user who uploaded the signed copy (the actor of its
     upload check), else the project's first owner (an agreement uploaded in the old wizard)."""
     actor = (
@@ -143,7 +143,7 @@ async def check_signed_document(
     ref = application_ref(application.id)
     body = _text_of(content)
     expected_id, expected_name, expected_source = await _company(db, project)
-    user = await _signing_user(db, document, project)
+    user = await signing_user(db, document, project)
     expected_code = (
         await signing.expected_check_code(db, application, user, signing.KINDS_BY_TYPE[document.document_type])
         if user is not None

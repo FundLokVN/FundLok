@@ -65,6 +65,10 @@ class ListingTerms:
     # FundLok's assessment the terms rest on: the business score (0-100) and when the run was locked.
     business_score: float | None = None
     assessed_at: dt.datetime | None = None
+    # s, the revenue share for extensions, as a fraction (0.085 = 8.5%): the LOCKED run's daily repayment rate
+    # (D-044; Loc confirmed it on 16 Nov, D-060), the figure the automatic extension tests a month's revenue
+    # against (direct_transfer/extension.py). None on a run scored before the rate was stored (#99).
+    revenue_share: Decimal | None = None
 
     @property
     def estimate(self) -> RepaymentEstimate:
@@ -99,4 +103,14 @@ async def locked_terms(db: AsyncSession, application: LoanApplication) -> Listin
         score_run_id=run.id,
         business_score=float(run.final_grade_precise) if run.final_grade_precise is not None else None,
         assessed_at=run.locked_at,
+        revenue_share=Decimal(str(run.daily_repayment_rate)) if run.daily_repayment_rate is not None else None,
     )
+
+
+def share_pct(share: Decimal | None) -> str | None:
+    """0.0825 -> "8,25": s as a percentage the way the contracts write numbers (decimal comma, no trailing zeros),
+    or None when there is none."""
+    if share is None:
+        return None
+    pct = (Decimal(share) * 100).quantize(Decimal("0.01")).normalize()
+    return format(pct, "f").replace(".", ",")
