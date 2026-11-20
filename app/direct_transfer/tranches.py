@@ -71,6 +71,15 @@ async def _sme_tranche(db: AsyncSession, tranche_id: UUID, sme_user_id: UUID, *,
 
 async def resolve_kyc_name(db: AsyncSession, user_id: UUID) -> str:
     """The investor's KYC name: latest APPROVED eKYC full name, else the account's full name."""
+    name = await approved_kyc_name(db, user_id)
+    if name:
+        return name
+    user = await db.get(User, user_id)
+    return (user.full_name or "") if user else ""
+
+
+async def approved_kyc_name(db: AsyncSession, user_id: UUID) -> str | None:
+    """The latest APPROVED eKYC full name, or None. Unlike resolve_kyc_name, never the self-editable full_name."""
     from app.gverify.models import STATUS_APPROVED, GVerifyVerification
 
     row = (
@@ -86,10 +95,7 @@ async def resolve_kyc_name(db: AsyncSession, user_id: UUID) -> str:
             .limit(1)
         )
     ).scalar_one_or_none()
-    if row:
-        return row
-    user = await db.get(User, user_id)
-    return (user.full_name or "") if user else ""
+    return row or None
 
 
 # --------------------------------------------------------------------------- #
