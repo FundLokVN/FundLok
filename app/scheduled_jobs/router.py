@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.fee_notice.service import send_pending_fee_invoice_emails
 from app.core.database import get_db
-from app.scheduled_jobs import acceptance, day14, reminders, zalo_reminders
+from app.scheduled_jobs import acceptance, day14, money_timers, reminders, zalo_reminders
 from app.scheduled_jobs.auth import require_scheduler
 
 router = APIRouter(
@@ -134,3 +134,30 @@ async def run_acceptance_reminders(db: AsyncSession = Depends(get_db)):
     return AcceptanceReminderResult(
         job="acceptance-reminders", **{channel: ChannelResult(**value) for channel, value in counts.items()}
     )
+
+
+class RepaymentDayResult(BaseModel):
+    job: str
+    late: int  # days newly marked LATE by this run
+    settled: int  # days newly settled by this run
+
+
+class InvoicesResult(BaseModel):
+    job: str
+    overdue: int  # invoices newly marked OVERDUE
+    accrued: int  # investor fee accruals created
+    invoiced: int  # investor invoices issued
+
+
+@router.post("/repayment-day", response_model=RepaymentDayResult)
+async def run_repayment_day(db: AsyncSession = Depends(get_db)):
+    """Daily, 00:10 and 18:10 ICT: a day with no payment proof by 18:00 on its due date becomes LATE; a day with proof
+    settles once the investor's 24 hours pass with no report. Idempotent."""
+    return RepaymentDayResult(job="repayment-day", **await money_timers.run_repayment_day(db))
+
+
+@router.post("/invoices", response_model=InvoicesResult)
+async def run_invoices(db: AsyncSession = Depends(get_db)):
+    """Daily, 00:20 ICT: mark unpaid invoices overdue, accrue investor service fees for ended months and issue the
+    investors' invoices. Idempotent."""
+    return InvoicesResult(job="invoices", **await money_timers.run_invoices(db))

@@ -4,9 +4,9 @@
 |---|---|
 | **Status** | IMPLEMENTED |
 | **Owner** | Phat |
-| **Implementer(s)** | Phat (`app/scheduled_jobs/`, `app/admin/system_email.py`, `app/phone_verification/zalo.py`) |
+| **Implementer(s)** | Phat; Edward wrote the `repayment-day` and `invoices` routes (HANDOFF-07 E1, Phat reviews) (`app/scheduled_jobs/`, `app/admin/system_email.py`, `app/phone_verification/zalo.py`) |
 | **Module** | `app/scheduled_jobs/` |
-| **Version** | 1.1 (Zalo reminder) |
+| **Version** | 1.2 (repayment-day and invoice routes: HANDOFF-07 E1) |
 | **Date** | 2026-11-13 |
 | **Related ADR** | ADR-009 |
 | **Depends on** | `docs/specs/admin/internal-email.md` v2.1 (reminder sender), `docs/specs/admin/fee-invoice-email.md`, Edward's `app/direct_transfer/repayment.todays_payments` |
@@ -85,12 +85,18 @@ Not in the OpenAPI schema; the web app never calls them.
 |---|---|---|
 | POST | `/internal/jobs/repayment-reminders` | `JobResult` |
 | POST | `/internal/jobs/fee-invoice-emails` | `JobResult` |
+| POST | `/internal/jobs/repayment-day` | `RepaymentDayResult` |
+| POST | `/internal/jobs/invoices` | `InvoicesResult` |
 
 ```
 Authorization: Bearer <Google-signed OIDC ID token>
 JobResult { job: str, sent: int, failed: int, skipped: str | null,   -- skipped: NOT_A_WORKING_DAY
             zalo: { sent: int, failed: int, skipped: str | null } | null }
 -- zalo: repayment-reminders only; skipped NOT_CONFIGURED | NOT_A_WORKING_DAY
+```
+```
+RepaymentDayResult { job: "repayment-day", late: int, settled: int }
+InvoicesResult     { job: "invoices", overdue: int, accrued: int, invoiced: int }
 ```
 401 no/invalid token (an app session is not one), 403 a token for another
 account or unverified email, 503 not configured or maintenance mode.
@@ -144,6 +150,24 @@ while `attempts < 3`; `SENDING` left by a crash is never retried.
    Each message costs (400 đ by phone at approval), so it is claimed before it
    is sent, like the email.
 
+### Money timers (HANDOFF-07 E1: the ARQ jobs, run here because no worker is deployed)
+
+No body. Each is the same unit of work as the ARQ job of the same purpose in `app/direct_transfer/jobs.py`, run in one
+transaction (committed once; a failure rolls the whole call back and Cloud Scheduler retries). Both are idempotent.
+
+- `POST /internal/jobs/repayment-day` runs at 00:10 and 18:10 ICT (the worker's cron). `repayment.mark_late_days`:
+  a DUE day with no payment proof by 18:00 ICT on its due date becomes LATE (so the 18:10 run marks the same day, the
+  00:10 run catches anything missed). `repayment.settle_days`: a PRESUMED_PAID day whose investor 24-hour report window
+  has passed, with no open dispute, is settled and posted to the ledger. `late` and `settled` are the days changed by
+  this call; a second call changes none.
+- `POST /internal/jobs/invoices` runs at 00:20 ICT. `fees.mark_overdue_invoices`, `fees.accrue_investor_fees` (ended
+  months, pro rata to money received) and `fees.issue_investor_invoices`. `invoiced` is the investor invoices issued by
+  this call.
+- Not covered here, on purpose: `expire_holds_job` (a commit-then-accept ticket's hold runs to `pay_deadline_at` and
+  the Day-14 no-show step is `day14-cutoff`; expiring it earlier would pre-empt the lock), `advance_windows_job` (for
+  commit-then-accept rounds `funding-advance` already calls the same `close.advance_window`) and
+  `cic_daily_balance_job`. See Open Questions.
+
 ## 7. Error Cases
 
 | Case | Result |
@@ -166,6 +190,14 @@ while `attempts < 3`; `SENDING` left by a crash is never retried.
 - `test_days_marked_paid_are_not_reminded`
 - `test_only_earlier_days_still_get_a_reminder`
 - `test_a_failed_reminder_is_retried_by_the_next_run`
+- `test_the_money_timer_routes_need_the_scheduler_token`
+
+Money timers (`tests/direct_transfer/test_money_timers.py`, the rest above in the first file):
+- `test_repayment_day_marks_an_unpaid_day_late_after_18h_and_not_before`
+- `test_repayment_day_settles_a_paid_day_after_the_investor_s_24_hours`
+- `test_repayment_day_called_twice_changes_nothing_the_second_time`
+- `test_invoices_issues_an_investor_invoice_once`
+- `test_invoices_marks_an_unpaid_invoice_overdue`
 
 Zalo (`tests/scheduled_jobs/test_zalo_repayment_reminders.py`):
 - `test_the_template_gets_every_parameter_as_text`
@@ -264,9 +296,26 @@ gcloud scheduler jobs create http acceptance-reminders --location $REGION --proj
   --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 5m
 ```
 
+### Money timers (HANDOFF-07 E1)
+
+```bash
+gcloud scheduler jobs create http repayment-day --location $REGION --project $PROJECT \
+  --schedule "10 0,18 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
+  --uri "$URL/internal/jobs/repayment-day" \
+  --oidc-service-account-email $SA --oidc-token-audience "$URL" \
+  --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 5m
+gcloud scheduler jobs create http invoices --location $REGION --project $PROJECT \
+  --schedule "20 0 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
+  --uri "$URL/internal/jobs/invoices" \
+  --oidc-service-account-email $SA --oidc-token-audience "$URL" \
+  --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 5m
+```
+
 ## 10. Open Questions
 
-- Edward: expose the worker's jobs (round advancing, repayment-day presume and
-  settle) the same way? Until then rounds close only on an admin's Advance and
-  repayment days are never settled in production.
+- Resolved (v1.2): the worker's repayment-day presume/settle and invoice jobs are exposed as `repayment-day` and
+  `invoices`. Still ARQ-only: `advance_windows_job` (its dispute-deadline step `disputes.advance_dispute_deadlines` and
+  the legacy-flow window close are not run by any route), `expire_holds_job` and `cic_daily_balance_job` (Decree 94 CIC
+  daily balances: never logged in production today). Edward decides whether `cic-daily-balance` and `advance-windows`
+  get routes before launch.
 - Should investors get a reminder too (e.g. to report a missing payment)?
