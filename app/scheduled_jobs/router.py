@@ -149,6 +149,11 @@ class InvoicesResult(BaseModel):
     invoiced: int  # investor invoices issued
 
 
+class CicDailyBalanceResult(BaseModel):
+    job: str
+    events: int  # DAILY_BALANCE events newly logged
+
+
 @router.post("/repayment-day", response_model=RepaymentDayResult)
 async def run_repayment_day(db: AsyncSession = Depends(get_db)):
     """Daily, 00:10 and 18:10 ICT: a day with no payment proof by 18:00 on its due date becomes LATE; a day with proof
@@ -161,3 +166,10 @@ async def run_invoices(db: AsyncSession = Depends(get_db)):
     """Daily, 00:20 ICT: mark unpaid invoices overdue, accrue investor service fees for ended months and issue the
     investors' invoices. Idempotent."""
     return InvoicesResult(job="invoices", **await money_timers.run_invoices(db))
+
+
+@router.post("/cic-daily-balance", response_model=CicDailyBalanceResult)
+async def run_cic_daily_balance(db: AsyncSession = Depends(get_db)):
+    """Daily, 00:30 ICT: log the previous business day's outstanding balance for every active ticket in the CIC event
+    log (Decree 94). Nothing the morning after a weekend or holiday. Idempotent."""
+    return CicDailyBalanceResult(job="cic-daily-balance", **await money_timers.run_cic_daily_balance(db))

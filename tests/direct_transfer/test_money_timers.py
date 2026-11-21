@@ -72,3 +72,11 @@ async def test_invoices_marks_an_unpaid_invoice_overdue(loan):
     assert (await money_timers.run_invoices(world.db, now=inv.due_at - dt.timedelta(seconds=1)))["overdue"] == 0
     assert (await money_timers.run_invoices(world.db, now=inv.due_at + dt.timedelta(days=1)))["overdue"] == 1
     assert inv.status == "OVERDUE"
+
+
+async def test_cic_daily_balance_logs_the_previous_business_day_once(loan):
+    world, _, _ = loan
+    await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 6, 0, 10))
+    assert await money_timers.run_cic_daily_balance(world.db, now=ict(2026, 11, 6, 0, 30)) == {"events": 10}  # Thu 5 Nov
+    assert await money_timers.run_cic_daily_balance(world.db, now=ict(2026, 11, 6, 0, 30)) == {"events": 0}
+    assert await money_timers.run_cic_daily_balance(world.db, now=ict(2026, 11, 8, 0, 30)) == {"events": 0}  # Sat

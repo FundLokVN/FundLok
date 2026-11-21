@@ -6,7 +6,7 @@
 | **Owner** | Phat |
 | **Implementer(s)** | Phat; Edward wrote the `repayment-day` and `invoices` routes (HANDOFF-07 E1, Phat reviews) (`app/scheduled_jobs/`, `app/admin/system_email.py`, `app/phone_verification/zalo.py`) |
 | **Module** | `app/scheduled_jobs/` |
-| **Version** | 1.2 (repayment-day and invoice routes: HANDOFF-07 E1) |
+| **Version** | 1.2 (repayment-day, invoices and cic-daily-balance routes: HANDOFF-07 E1) |
 | **Date** | 2026-11-13 |
 | **Related ADR** | ADR-009 |
 | **Depends on** | `docs/specs/admin/internal-email.md` v2.1 (reminder sender), `docs/specs/admin/fee-invoice-email.md`, Edward's `app/direct_transfer/repayment.todays_payments` |
@@ -87,6 +87,7 @@ Not in the OpenAPI schema; the web app never calls them.
 | POST | `/internal/jobs/fee-invoice-emails` | `JobResult` |
 | POST | `/internal/jobs/repayment-day` | `RepaymentDayResult` |
 | POST | `/internal/jobs/invoices` | `InvoicesResult` |
+| POST | `/internal/jobs/cic-daily-balance` | `CicDailyBalanceResult` |
 
 ```
 Authorization: Bearer <Google-signed OIDC ID token>
@@ -97,6 +98,7 @@ JobResult { job: str, sent: int, failed: int, skipped: str | null,   -- skipped:
 ```
 RepaymentDayResult { job: "repayment-day", late: int, settled: int }
 InvoicesResult     { job: "invoices", overdue: int, accrued: int, invoiced: int }
+CicDailyBalanceResult { job: "cic-daily-balance", events: int }
 ```
 401 no/invalid token (an app session is not one), 403 a token for another
 account or unverified email, 503 not configured or maintenance mode.
@@ -163,10 +165,12 @@ transaction (committed once; a failure rolls the whole call back and Cloud Sched
 - `POST /internal/jobs/invoices` runs at 00:20 ICT. `fees.mark_overdue_invoices`, `fees.accrue_investor_fees` (ended
   months, pro rata to money received) and `fees.issue_investor_invoices`. `invoiced` is the investor invoices issued by
   this call.
+- `POST /internal/jobs/cic-daily-balance` runs at 00:30 ICT. `cic.emit_daily_balances` for the previous day when it was
+  a business day: one `DAILY_BALANCE` event per ACTIVE tranche (Decree 94 CIC event log; no sender). `events` is the
+  number newly logged; a second call logs none, and a call the morning after a weekend or holiday logs none.
 - Not covered here, on purpose: `expire_holds_job` (a commit-then-accept ticket's hold runs to `pay_deadline_at` and
   the Day-14 no-show step is `day14-cutoff`; expiring it earlier would pre-empt the lock), `advance_windows_job` (for
-  commit-then-accept rounds `funding-advance` already calls the same `close.advance_window`) and
-  `cic_daily_balance_job`. See Open Questions.
+  commit-then-accept rounds `funding-advance` already calls the same `close.advance_window`). See Open Questions.
 
 ## 7. Error Cases
 
@@ -198,6 +202,7 @@ Money timers (`tests/direct_transfer/test_money_timers.py`, the rest above in th
 - `test_repayment_day_called_twice_changes_nothing_the_second_time`
 - `test_invoices_issues_an_investor_invoice_once`
 - `test_invoices_marks_an_unpaid_invoice_overdue`
+- `test_cic_daily_balance_logs_the_previous_business_day_once`
 
 Zalo (`tests/scheduled_jobs/test_zalo_repayment_reminders.py`):
 - `test_the_template_gets_every_parameter_as_text`
@@ -311,11 +316,18 @@ gcloud scheduler jobs create http invoices --location $REGION --project $PROJECT
   --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 5m
 ```
 
+```bash
+gcloud scheduler jobs create http cic-daily-balance --location $REGION --project $PROJECT \
+  --schedule "30 0 * * *" --time-zone "Asia/Ho_Chi_Minh" --http-method POST \
+  --uri "$URL/internal/jobs/cic-daily-balance" \
+  --oidc-service-account-email $SA --oidc-token-audience "$URL" \
+  --attempt-deadline 300s --max-retry-attempts 3 --min-backoff 5m
+```
+
 ## 10. Open Questions
 
 - Resolved (v1.2): the worker's repayment-day presume/settle and invoice jobs are exposed as `repayment-day` and
   `invoices`. Still ARQ-only: `advance_windows_job` (its dispute-deadline step `disputes.advance_dispute_deadlines` and
-  the legacy-flow window close are not run by any route), `expire_holds_job` and `cic_daily_balance_job` (Decree 94 CIC
-  daily balances: never logged in production today). Edward decides whether `cic-daily-balance` and `advance-windows`
-  get routes before launch.
+  the legacy-flow window close are not run by any route) and `expire_holds_job`. `cic-daily-balance` was added in v1.2.
+  Edward decides whether `advance-windows` gets a route before launch.
 - Should investors get a reminder too (e.g. to report a missing payment)?

@@ -1,7 +1,7 @@
 """The direct-transfer money timers Cloud Scheduler runs (no ARQ worker is deployed).
 
 Each is the same unit of work as the ARQ job of the same purpose in `app/direct_transfer/jobs.py`
-(`repayment_day_job`, `invoice_job`), on the request's session and committed once: a failure rolls the whole call
+(`repayment_day_job`, `invoice_job`, `cic_daily_balance_job`), on the request's session and committed once: a failure rolls the whole call
 back and Cloud Scheduler retries. Idempotent. Spec: docs/specs/scheduled_jobs/cloud-scheduler-jobs.md (Money timers).
 """
 
@@ -9,7 +9,8 @@ import datetime as dt
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.direct_transfer import fees, repayment
+from app.direct_transfer import cic, fees, repayment
+from app.direct_transfer.calendar_utils import default_calendar, ict_date
 
 
 async def run_repayment_day(db: AsyncSession, *, now: dt.datetime | None = None) -> dict[str, int]:
@@ -30,3 +31,15 @@ async def run_invoices(db: AsyncSession, *, now: dt.datetime | None = None) -> d
     invoices = await fees.issue_investor_invoices(db, now=now)
     await db.commit()
     return {"overdue": overdue, "accrued": accrued, "invoiced": len(invoices)}
+
+
+async def run_cic_daily_balance(db: AsyncSession, *, now: dt.datetime | None = None) -> dict[str, int]:
+    """Log the previous business day's outstanding balances for the CIC event log. Nothing the morning after a
+    non-business day."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    yesterday = ict_date(now) - dt.timedelta(days=1)
+    if not default_calendar().is_business_day(yesterday):
+        return {"events": 0}
+    events = await cic.emit_daily_balances(db, on_date=yesterday, now=now)
+    await db.commit()
+    return {"events": events}

@@ -25,6 +25,7 @@ REMINDERS = "/internal/jobs/repayment-reminders"
 FEES = "/internal/jobs/fee-invoice-emails"
 REPAYMENT_DAY = "/internal/jobs/repayment-day"
 INVOICES = "/internal/jobs/invoices"
+CIC_DAILY_BALANCE = "/internal/jobs/cic-daily-balance"
 
 
 @pytest.fixture
@@ -211,7 +212,7 @@ async def test_a_failed_reminder_is_retried_by_the_next_run(db_session, outbox, 
     assert (row.status, row.attempts) == ("SENT", 2)
 
 
-@pytest.mark.parametrize("path", [REPAYMENT_DAY, INVOICES])
+@pytest.mark.parametrize("path", [REPAYMENT_DAY, INVOICES, CIC_DAILY_BALANCE])
 async def test_the_money_timer_routes_need_the_scheduler_token(client, monkeypatch, scheduler, path):
     client.cookies.clear()
     assert (await client.post(path)).status_code == 401
