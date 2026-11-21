@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin import analytics as admin_analytics
 from app.admin import fees as admin_fees
 from app.admin import funding as admin_funding
 from app.admin.fee_schemas import AdminFeeInvoiceOut, AdminFeeMarkPaidRequest, FeeInvoiceFilter
@@ -16,6 +17,7 @@ from app.admin.access_log import audit_admin_read
 from app.admin.schemas import (
     AdminSignatureCheck,
     AdminFundingActivityOut,
+    AdminFundingAnalyticsOut,
     AdminFundingRoundOut,
     AdminInvestorTransferOut,
     AdminPaymentAccountDecisionRequest,
@@ -517,6 +519,17 @@ async def mark_fee_invoice_paid(
         actor=current_user,
         ip_address=request.client.host if request.client else None,
     )
+
+
+@router.get("/funding/analytics", response_model=AdminFundingAnalyticsOut)
+async def read_funding_analytics(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Platform-wide totals for the admin overview: what investors have put into businesses and what businesses
+    have repaid them, with the last 12 months of each. Totals only, no names or accounts, so the read is not
+    access-logged (app/admin/analytics.py)."""
+    return await admin_analytics.funding_analytics(db)
 
 
 @router.get(

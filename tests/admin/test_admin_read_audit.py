@@ -18,6 +18,7 @@ from conftest import iter_endpoint_routes
 NOT_PERSONAL_DATA = {
     "/admin/email/settings": "the signed-in operator's own mailbox configuration",
     "/admin/email/policy": "sending limits and rules, no user data",
+    "/admin/funding/analytics": "platform-wide totals and counts, no names or accounts",
     "/admin/email/oauth/authorize": "Google's consent URL for the operator's own mailbox, no user data",
     "/admin/email/oauth/callback": "Google's redirect back; stores the operator's own token, audited as EMAIL_GMAIL_CONNECTED",
 }
