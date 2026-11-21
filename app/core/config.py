@@ -161,6 +161,11 @@ class Settings(BaseSettings):
     R2_VERIFICATION_BUCKET: str | None = None
     R2_REGION: str = "auto"
     R2_PRESIGN_EXPIRE_SECONDS: int = 15 * 60
+    # Publicly readable bucket for blog images (docs/specs/blog/blog-posts.md),
+    # served at R2_PUBLIC_BASE_URL (e.g. https://media.fundlok.com, no trailing
+    # slash). Blog image upload answers 503 while either is unset.
+    R2_PUBLIC_BUCKET: str | None = None
+    R2_PUBLIC_BASE_URL: str | None = None
 
     # SMTP Configuration
     SMTP_HOST: str = "localhost"
