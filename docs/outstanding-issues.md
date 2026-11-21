@@ -479,6 +479,7 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | TD-02 | **"Returned to SME" application state.** Staff can only approve or reject today. | An application can submit with a document missing and staff cannot return it. |
 | TD-03 | **Default, backstop, recovery, guarantor notice, loan sale (M10).** | Out of launch scope. |
 | TD-04 | **Extension fee (D27).** | Deferred. |
+| TD-05 | **Uploaded files are not malware-scanned (SEC-04).** ClamAV scanning was reverted in #73 and its re-land (#74, closed 2026-11-21 unmerged) was a draft on an old migration head. | Owner Phat (`app/uploads/`). The branch `fix/uploads/sec-04-malware-scan-reland` is kept: re-open it as a fresh PR rebased onto the current Alembic head, with `premerge_check.sh`. Not on Loc's launch list; Loc is told scanning is off at go-live. |
 
 ---
 
@@ -495,3 +496,4 @@ These are working rules built behind config and tagged `PROVISIONAL(Q-Dn)` in co
 | 2026-10-31 | Edward / Claude | Added D-033 (sandbox spike of a SePay bank feed), D-034 (idempotency ownership and day-1 sync design), Q-031 (Loc: amend D-018?), Q-032 (payer check under a feed) and Q-D19. |
 | 2026-11-03 | Edward / Claude | Added D-035: the account-verification task is delegated to Phat end to end; HANDOFF-05 gets ownership, sync rules, a definition of done and starting instructions. |
 | 2026-11-14 | Phat / Claude | Added Q-033: automatic verdict on receipts read by local OCR (`receipt-ocr.md`). |
+| 2026-11-21 | Edward / Claude | Added TD-05 (upload malware scanning off since #73; #74 closed, branch kept). |
