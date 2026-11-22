@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT (Edward, 2026-11-21) |
+| **Status** | IMPLEMENTED (Edward, 2026-11-22). Open Question 1 is reopened by Loc's reply of 22 Nov |
 | **Owner** | Edward |
-| **Implementer(s)** | Edward: the service function, the state transition and its tests (`app/direct_transfer/`). Phat: the admin route glue in `app/admin/funding.py` and `app/admin/router.py`, and the button |
+| **Implementer(s)** | Edward: the service function, the state transition, the thin admin route glue and the tests (Phat reviews `app/admin/`). Phat: the button |
 | **Module** | `app/direct_transfer/late_money.py` (new), `app/direct_transfer/tranche_state.py` (one transition), `app/admin/` (Phat's, calls the service) |
-| **Version** | 1.0 |
+| **Version** | 1.1 |
 | **Date** | 2026-11-21 |
 | **Related ADR** | ADR-011, ADR-009 |
 | **Depends on** | `day14-transfer-rule.md` (rules 5 to 7, 9), `commit-then-accept-flow.md`, `day14-investor-signing.md`, `transfer-and-evidence.md`, `ledger-amendment.md`, HANDOFF-07 task E3 |
@@ -43,7 +43,7 @@ One new tranche transition in `ALLOWED_TRANSITIONS` (`app/direct_transfer/tranch
 ("UNDER_REVIEW", "ATTESTED"): "13 staff approve late money before the receipt cut-off (late-money-approval.md)"
 ```
 
-It applies only to a ticket with `review_cause = "LATE_MONEY"`. `transition_tranche` already sets `attested_at` and `confirm_deadline` and clears nothing else; the service function clears `review_cause` itself (below).
+It applies only to a ticket with `review_cause = "LATE_MONEY"`: `transition_tranche` refuses `UNDER_REVIEW → ATTESTED` for any other cause (`INVALID_TRANSITION`). It sets `attested_at` and `confirm_deadline` and clears nothing else; the service function clears `review_cause` itself (below).
 
 One new evidence event: `LATE_MONEY_APPROVED` on `entity_type = "TRANCHE"`, payload `{ "transfer_id", "amount_vnd", "late_reason", "approved_before": receipt_deadline_at }`.
 
@@ -102,11 +102,11 @@ After approval the ticket is an ordinary paid ticket: the SME's 24-hour receipt 
    a. The ticket is `UNDER_REVIEW` with `review_cause = LATE_MONEY`.
    b. The latest receipt's `check_status` is `MATCHED` and its `payment_timing` is `LATE`.
    c. No open dispute on the ticket and no `TopUpPledge` for it.
-   d. The window is `COMMIT_THEN_ACCEPT`, in `AWAITING_PAYMENT`, and `now < receipt_deadline_at` (15:30 ICT on Day 14). The server clock decides; there is no override.
+   d. The window has Day-14 cut-offs (`window_cutoffs` is not None), is `OPEN` or `AWAITING_PAYMENT` (not yet closing), and `now < receipt_deadline_at` (15:30 ICT on Day 14). The server clock decides; there is no override.
    e. `capacity_left(window) >= tranche.amount_vnd`.
    f. `staff_id` is not the ticket's investor (the same rule as every receipt review).
    g. `reason` is not blank.
-2. **Effect**, in one transaction: claim the bank transaction so a duplicate is refused (the check `_claim_bank_txn` does in `app/admin/funding.py`; the build moves it into `app/direct_transfer/` and Phat's admin code calls it from there, so the service does not import from `app/admin/`); set `tranche.receipt_submitted_at` if empty; `transition_tranche(UNDER_REVIEW → ATTESTED, actor_role="ADMIN", reason, confirm_deadline = now + sme_confirm_hours)`; set `tranche.review_cause = None`; set `transfer.confirmation_level = "ATTESTED"`; `refresh_window_fullness`; log `LATE_MONEY_APPROVED`; append an audit row (`TRANCHE`, `LATE_MONEY_APPROVED`, actor, `reason`, `ip_address`).
+2. **Effect**, in one transaction: refuse a bank transaction that already funds another ticket (the same test as `receipt_auto.bank_txn_used_elsewhere`, repeated in `late_money.py` so `app/direct_transfer/` does not import from `app/market/`); set `tranche.receipt_submitted_at` if empty; `transition_tranche(UNDER_REVIEW → ATTESTED, actor_role="ADMIN", reason, confirm_deadline = now + sme_confirm_hours)`; set `tranche.review_cause = None`; set `transfer.confirmation_level = "ATTESTED"`; `refresh_window_fullness`; log `LATE_MONEY_APPROVED` and notify the lender. The admin wrapper `approve_late_money_transfer` (which has the IP) appends the audit row (`TRANCHE`, `LATE_MONEY_APPROVED`, actor, `reason`, `ip_address`), rings the business's bell and commits.
 3. **The lender's lock** is not lifted by this function. The 15:35 run already releases a lender whose ticket is `ATTESTED`, `CONFIRMED` or `ACTIVE` and who is in no other open round (`day14.process_day14_window`, the `decide` branch). Approval therefore only has to leave the ticket in one of those states. A lender locked at 15:00 stays locked between approval and 15:35.
 4. **No pledge is recorded** for an approved ticket: the 15:35 step records a pledge only for a ticket still `UNDER_REVIEW`.
 5. **Loan formation** waits for the approved ticket like any `ATTESTED` ticket (`close._pending_tranches` counts it) and never later than `close_wait_until` (2 calendar days after the 14:45 pay deadline).
@@ -133,7 +133,7 @@ After approval the ticket is an ordinary paid ticket: the SME's 24-hour receipt 
 ## 8. Acceptance Criteria (`tests/direct_transfer/test_late_money_approval.py`)
 
 - `test_staff_approve_late_money_before_1530_moves_it_to_attested_with_a_24_hour_sme_check`
-- `test_approved_late_money_joins_the_pooled_loan_with_the_lender_s_full_amount`
+- `test_approved_late_money_counts_toward_the_round_once_the_sme_check_lapses`
 - `test_approval_at_or_after_1530_is_refused_and_the_1535_run_records_the_pledge`
 - `test_approved_late_money_records_no_top_up_pledge`
 - `test_the_1535_run_unlocks_a_lender_whose_late_money_was_approved`
@@ -152,6 +152,6 @@ After approval the ticket is an ordinary paid ticket: the SME's 24-hour receipt 
 
 ## 9. Open Questions
 
-1. **Loc:** late money staff do **not** approve by 15:30 still becomes a `TopUpPledge` that nobody can sign. At launch, who returns it and how? Proposal: staff mark the pledge `VOID` with a reason and the SME refunds the lender by a normal bank transfer, recorded as a refund transfer (the existing `create_refund_transfer` path, as for `EXCLUDED_AT_CLOSE`); the lender stays locked until it is recorded. This needs a small second spec before launch if Loc agrees.
-2. **Loc:** should approval skip the SME's 24-hour receipt check (staff confirm straight to `CONFIRMED`)? This spec keeps the check, so approval cannot bypass the two-way confirmation (AM-E5). Skipping it is a one-line change to the transition target, but it removes the SME's say over money the SME already holds.
-3. **Edward / Phat:** is 15:30 enough time for staff in practice? Staff work from the `NEEDS_ACTION` queue; a late receipt can arrive until 15:30, so a receipt uploaded at 15:29 leaves one minute. Proposal: accept it (staff watch the queue from 14:45), and let the 15:35 pledge path catch the rest.
+1. **OPEN (Loc, 22 Nov: "really against" the SME refunding the lender).** Late money staff do **not** approve by 15:30 still becomes a `TopUpPledge` nobody can sign. Loc rejects the SME returning it and wants FundLok to "manage the money, manually at the start and automatically afterwards". That conflicts with the no-custody rule (ADR-009, Decree 94 Art. 11.1.b: FundLok never holds money), so before any refund spec is written Loc must say what "manage" means: staff approve it into the loan (this spec), staff instruct a return that the SME still makes, or FundLok itself moves money (custody, needs a legal answer). No `late-money-refund.md` is written until then. Until it is answered the launch rule is: staff approve before 15:30, and anything else is handled by staff case by case, off the platform.
+2. **Edward, 2026-11-21: approval keeps the SME's 24-hour receipt check; it does not skip it. Loc asked on 22 Nov what that check is; his own AM-E5 rule (SCRUM-610): after the lender's proof the SME has 24 calendar hours to upload its receipt or raise a concern, silence counts as received, and a loan takes effect only once confirmed.**
+3. **Resolved (Edward, 2026-11-21):** 15:30 stays. Staff watch the `NEEDS_ACTION` queue from 14:45, and the 15:35 pledge path catches the rest.
