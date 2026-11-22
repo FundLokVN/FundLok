@@ -28,6 +28,7 @@ from app.admin.schemas import (
     AdminOverdueRepaymentsOut,
     AdminRepaymentPreviewOut,
     AdminRepaymentReceiptOut,
+    AdminLateMoneyApprovalRequest,
     AdminTransferDecisionRequest,
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
@@ -655,6 +656,26 @@ async def decide_investor_receipt(
         db,
         transfer_id,
         outcome=body.outcome,
+        reason=body.reason,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.post("/funding/transfers/{transfer_id}/approve-late-money", response_model=AdminInvestorTransferOut)
+async def approve_late_money(
+    transfer_id: UUID,
+    body: AdminLateMoneyApprovalRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Approve a clean Day-14 late-money transfer into the round, until the 15:30 receipt cut-off. The ticket becomes
+    an ordinary paid one (the business still has 24 hours to check the money). 409: NOT_LATE_MONEY,
+    ALREADY_APPROVED, LATE_MONEY_APPROVAL_CLOSED, CAPACITY_EXCEEDED, DUPLICATE_BANK_TXN. Audited."""
+    return await admin_funding.approve_late_money_transfer(
+        db,
+        transfer_id,
         reason=body.reason,
         actor=current_user,
         ip_address=request.client.host if request.client else None,
