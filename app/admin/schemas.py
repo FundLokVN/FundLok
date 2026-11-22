@@ -878,6 +878,9 @@ class AdminInvestorTransferOut(BaseModel):
     attested_at: datetime | None = None
     confirmed_at: datetime | None = None
     needs_action: bool
+    # Late money (UNDER_REVIEW, LATE_MONEY) staff can still approve into the round, and until when (the round's 15:30).
+    can_approve_late_money: bool = False
+    approve_late_money_until: datetime | None = None
     transfer: AdminTransferReceiptOut | None = None
     dispute: AdminTransferDisputeOut | None = None
     expected: AdminTransferExpectedOut
@@ -917,6 +920,12 @@ class AdminTransferDecisionRequest(BaseModel):
     """Settle a ticket under review: whether the money reached the business's account."""
 
     outcome: Literal["RECEIVED", "NOT_RECEIVED"]
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class AdminLateMoneyApprovalRequest(BaseModel):
+    """Approve a Day-14 late-money ticket into the round before 15:30 (late-money-approval.md). A reason is required."""
+
     reason: str = Field(min_length=1, max_length=1000)
 
 
