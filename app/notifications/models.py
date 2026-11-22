@@ -78,6 +78,8 @@ EVENT_EXTENSION_APPLIED = "EXTENSION_APPLIED"
 # LENDER_LOCKED (above) carries `data`: window_id, listing_title, reason (NO_SHOW or LATE_MONEY).
 EVENT_TRANSFER_DUE_TODAY = "TRANSFER_DUE_TODAY"
 EVENT_TOP_UP_PLEDGE_RECORDED = "TOP_UP_PLEDGE_RECORDED"
+# LATE_MONEY_APPROVED: staff approved their late money into the loan before 15:30; `data`: window_id, amount_vnd.
+EVENT_LATE_MONEY_APPROVED = "LATE_MONEY_APPROVED"
 
 # Late status (docs/specs/repayment_schedule/late-status.md): a repayment day with no payment proof by 18:00 ICT on its
 # due date. To the investor, one per day: `data` tranche_id, repayment_day_id, due_date, net_vnd, memo.
@@ -107,6 +109,7 @@ NOTIFICATION_EVENTS = frozenset(
         EVENT_EXTENSION_APPLIED,
         EVENT_TRANSFER_DUE_TODAY,
         EVENT_TOP_UP_PLEDGE_RECORDED,
+        EVENT_LATE_MONEY_APPROVED,
         EVENT_REPAYMENT_DAY_LATE,
         EVENT_REPAYMENT_DAY_OVERDUE_SME,
     }

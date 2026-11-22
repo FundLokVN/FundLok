@@ -29,6 +29,7 @@ ALLOWED_TRANSITIONS: dict[tuple[str, str], str] = {
     ("SIGNED", "EXPIRED"): "10 hold lapses with no receipt (E4)",
     ("CONFIRMED", "VOID"): "11 below 50% / KYB fail / fraud before ACTIVE (E4, PROVISIONAL(Q-D8))",
     ("EXPIRED", "UNDER_REVIEW"): "12 late receipt (PROVISIONAL(Q-D3))",
+    ("UNDER_REVIEW", "ATTESTED"): "13 staff approve late money before the receipt cut-off (late-money-approval.md)",
 }
 
 TRACKED_STATES_FOR_CAPACITY = ("RESERVED", "SIGNED", "ATTESTED", "CONFIRMED")
@@ -55,6 +56,9 @@ async def transition_tranche(
 ) -> Tranche:
     from_status = tranche.status
     assert_transition_allowed(from_status, to_status)
+    if (from_status, to_status) == ("UNDER_REVIEW", "ATTESTED") and tranche.review_cause != "LATE_MONEY":
+        # Transition 13 exists only for staff-approved late money; every other review ends CONFIRMED or VOID.
+        raise DirectTransferError(400, f"Invalid state transition: {from_status} → {to_status}", "INVALID_TRANSITION")
 
     tranche.status = to_status
     if to_status == "SIGNED":

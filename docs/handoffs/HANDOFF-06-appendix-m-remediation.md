@@ -76,7 +76,7 @@ Corrected 2026-11-15 (Edward chose the stated rule): the first version of this t
 ### T7. Grading params: confirm one fact before T1 merges
 `pricing.py` reads `working_days_per_month` from the params, while `pricing.py`'s docstring says 21. Confirm that only the YAML value is wrong and nothing else hardcodes 22.
 
-## Phase 2: flow redesign (BLOCKED on spec `docs/specs/direct_transfer/commit-then-accept-flow.md`)
+## Phase 2: flow redesign (spec IMPLEMENTED: `docs/specs/direct_transfer/commit-then-accept-flow.md`; built as slices S1 to S6, merged)
 
 Edward writes the API contract section first; Phat reviews it and builds screens in parallel. Scope:
 - Commitments with no payment hold (a lender may commit several times; no `hold_expires_at`).
@@ -90,7 +90,7 @@ Edward writes the API contract section first; Phat reviews it and builds screens
 - Cloud Scheduler endpoints for the money jobs (round advance, Day-13 and Day-14 cut-offs, settlement, invoices, monthly lender fee), added **after** the Late status lands in this phase, so no job ever runs `presume_paid_days` on a schedule (D-049).
 - A migration for the new tranche fields; many current tests rewritten (they encode pay-at-commit).
 
-## Phase 3: late interest, automatic extension, rest (BLOCKED on specs)
+## Phase 3: late interest, automatic extension, rest (specs ACCEPTED; late interest #131 and automatic extension #132 merged; Phat's items below still open)
 
 - **Late-interest accrual and ledger legs** (D-041, D-055): spec `docs/specs/repayment_schedule/late-interest.md`. 150% of the loan rate on overdue principal (cap 30%) plus 10% a year on overdue interest, calendar days, paid by the SME to each lender; ledger claim legs per D-041. Needs Edward's confirmation of the spec before any ledger code. The Late status itself ships in Phase 2.
 - **Automatic extension** (D-042): spec `docs/specs/repayment_schedule/automatic-extension.md`. SME files by the 5th; shortfall test; a Late instalment blocks filing; days rounded up to 5 inside the backstop room; new schedule version; no fee, no staff step.
@@ -111,9 +111,9 @@ Tests green in `./scripts/docker_test.sh`; spec and register updated in the same
 - [ ] T6 one borrower follow-ups (after Edward's review)
 - [ ] T7 confirm no other hardcoded 22
 - [ ] T8 borrower cap to 100M
-- [ ] Spec: commit-then-accept flow ACCEPTED
-- [ ] Spec: late status ACCEPTED (Phase 2)
-- [ ] Spec: late-interest accrual and ledger legs ACCEPTED (Phase 3)
-- [ ] Spec: automatic extension ACCEPTED
-- [ ] Phase 2 built, Appendix M M3 to M6 rerun by Loc
+- [x] Spec: commit-then-accept flow ACCEPTED (now IMPLEMENTED)
+- [x] Spec: late status ACCEPTED (Phase 2) (now IMPLEMENTED, PR #130)
+- [x] Spec: late-interest accrual and ledger legs ACCEPTED (Phase 3) (PR #131)
+- [x] Spec: automatic extension ACCEPTED (PR #132)
+- [x] Phase 2 built, Appendix M M3 to M6 rerun by Loc (full Appendix M re-run on `main` 6977af7 passed, 2026-11-21)
 - [ ] Phase 3 built, Appendix M rerun after the smaller fixes

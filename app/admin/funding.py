@@ -37,6 +37,8 @@ from app.direct_transfer.close import advance_window, form_investment_loan
 from app.direct_transfer.config import resolve
 from app.direct_transfer.disputes import open_tranche_dispute
 from app.direct_transfer.calendar_utils import default_calendar, ict_date
+from app.direct_transfer import late_money
+from app.direct_transfer.day14_times import window_cutoffs
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.evidence import log_event
 from app.direct_transfer.models import (
@@ -145,10 +147,18 @@ def _system_accepted_unreviewed():
     )
 
 
+def _is_late_money_ticket(tranche: Tranche) -> bool:
+    return tranche.status == "UNDER_REVIEW" and tranche.review_cause == "LATE_MONEY"
+
+
 def _needs_action():
     # A ticket left ATTESTED waits on staff too: approval now means received, so staff settle it. So does one the
     # system confirmed: its loan starts when staff approve it.
-    return or_(_receipt_waiting(), _open_dispute(), Tranche.status == "ATTESTED", _system_accepted_unreviewed())
+    # Late money waits on staff until the 15:30 receipt cut-off (late-money-approval.md).
+    return or_(
+        _receipt_waiting(), _open_dispute(), Tranche.status == "ATTESTED", _system_accepted_unreviewed(),
+        and_(Tranche.status == "UNDER_REVIEW", Tranche.review_cause == "LATE_MONEY"),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -335,6 +345,10 @@ async def _row(db: AsyncSession, tranche: Tranche) -> AdminInvestorTransferOut:
     receipt_waiting = bool(transfer and file and transfer.check_status == "AWAITING_FIELDS")
     dispute_open = bool(dispute and dispute.status != "DECIDED")
     system = await _system_check_out(db, transfer, tranche) if transfer else None
+    late_money_open = (
+        transfer is not None
+        and await late_money.approval_blocker(db, tranche=tranche, window=window, transfer=transfer, now=_now()) is None
+    )
     return AdminInvestorTransferOut(
         id=tranche.id,
         window_id=window.id,
@@ -354,7 +368,11 @@ async def _row(db: AsyncSession, tranche: Tranche) -> AdminInvestorTransferOut:
         attested_at=tranche.attested_at,
         confirmed_at=tranche.confirmed_at,
         needs_action=receipt_waiting or dispute_open or tranche.status == "ATTESTED"
-        or bool(system and system.awaiting_review),
+        or bool(system and system.awaiting_review) or _is_late_money_ticket(tranche),
+        can_approve_late_money=late_money_open,
+        approve_late_money_until=(
+            cutoffs.receipt_deadline_at if late_money_open and (cutoffs := window_cutoffs(window)) else None
+        ),
         transfer=(
             AdminTransferReceiptOut(
                 id=transfer.id,
@@ -864,6 +882,29 @@ async def decide_transfer(
     if business is not None:
         await realtime.publish([business])
     db.expire_all()  # the decision moved the ticket, its transfer and the dispute
+    return await _row(db, await db.get(Tranche, tranche_id))
+
+
+async def approve_late_money_transfer(
+    db: AsyncSession, transfer_id: UUID, *, reason: str, actor: User, ip_address: str | None
+) -> AdminInvestorTransferOut:
+    """Approve a clean late-money ticket into the round before the receipt cut-off (late-money-approval.md): it
+    becomes an ordinary paid ticket and the business still has its 24 hours to check the money. Audited."""
+    try:
+        tranche = await late_money.approve_late_money(
+            db, transfer_id=transfer_id, staff_id=actor.id, reason=reason, now=_now()
+        )
+    except DirectTransferError as exc:
+        raise _http(exc) from exc
+    append_audit(
+        db, entity_type="TRANCHE", entity_id=tranche.id, action="LATE_MONEY_APPROVED", actor_id=actor.id,
+        after_state={"transfer_id": str(transfer_id), "reason": reason.strip()}, ip_address=ip_address,
+    )
+    business = await _notify_business_of_approval(db, tranche.id, "ATTESTED")
+    tranche_id, investor_id = tranche.id, tranche.investor_id
+    await db.commit()
+    await realtime.publish({investor_id} | ({business} if business is not None else set()))
+    db.expire_all()
     return await _row(db, await db.get(Tranche, tranche_id))
 
 
