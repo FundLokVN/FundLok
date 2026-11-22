@@ -74,7 +74,7 @@ async def list_my_projects(
         if project.loan_applications:
             application = project.loan_applications[0]
             out.loan_application = ProjectLoanApplicationOut.model_validate(application)
-            out.loan_application.approval = await approval_for(db, application)
+            out.loan_application.approval = await approval_for(db, application, current_user)
         results.append(out)
     return results
 

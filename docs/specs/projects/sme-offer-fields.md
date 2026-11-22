@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT (Edward, 2026-11-22) |
+| **Status** | IMPLEMENTED (Edward, 2026-11-22) |
 | **Owner** | Edward |
 | **Implementer(s)** | Edward (the three response fields, `app/projects/`); Phat (the screen, all wording) |
 | **Module** | `app/projects/` (`schemas.py`, `service.py`, `router.py`) |
-| **Version** | 1.0 |
+| **Version** | 1.1 |
 | **Date** | 2026-11-22 |
 | **Related ADR** | none |
 | **Depends on** | `docs/specs/loans/listing-signing.md` (v1.5: revenue share and guarantor on the signed documents and the investor listing), Handbook 2.4, D-043, D-044, D-060, HANDOFF-07 task E4 |

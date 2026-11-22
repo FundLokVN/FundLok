@@ -581,13 +581,16 @@ async def activate_project_if_approved(
     return True
 
 
-async def approval_for(db: AsyncSession, application):
+async def approval_for(db: AsyncSession, application, signer=None):
     """The applicant-facing summary of an operator approval, or None.
 
     Uses the score run the decision rests on: a LOCKED run when one exists,
     otherwise the latest run that produced a grade. Re-runs are refused once
     a request is decided, so that run is final. An approval made without any
     graded run still returns, with the score fields empty.
+
+    `signer` is the signed-in SME: the Personal Guarantor's name is theirs
+    (docs/specs/projects/sme-offer-fields.md). Without one the name is left out.
     """
     from decimal import Decimal
 
@@ -631,6 +634,13 @@ async def approval_for(db: AsyncSession, application):
         if estimate is not None:
             total, daily = estimate.total_vnd, estimate.daily_vnd
 
+    rate = float(run.daily_repayment_rate) if run is not None and run.daily_repayment_rate is not None else None
+    guarantor_name = None
+    if signer is not None:
+        from app.loans.agreement.standing_offer import guarantor_for
+
+        guarantor_name = (await guarantor_for(db, signer, application)).name or None
+
     return LoanApprovalOut(
         approved_at=application.decided_at,
         business_score=round(float(run.final_grade_precise), 2) if run else None,
@@ -640,4 +650,7 @@ async def approval_for(db: AsyncSession, application):
         estimated_daily_repayment_vnd=daily,
         engine_version=run.engine_version if run else None,
         params_version=run.params_version if run else None,
+        daily_repayment_rate=rate,
+        revenue_share=rate,
+        guarantor_name=guarantor_name,
     )

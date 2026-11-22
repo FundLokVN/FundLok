@@ -114,6 +114,14 @@ class LoanApprovalOut(BaseModel):
     estimated_daily_repayment_vnd: int | None
     engine_version: str | None
     params_version: str | None
+    # DRR: the run's daily repayment rate, a fraction (0.085 = 8.5%), as on the investor listing. Null on a run scored
+    # before it was stored (docs/specs/projects/sme-offer-fields.md).
+    daily_repayment_rate: float | None = None
+    # The revenue share the Standing Offer prints: today the same figure as DRR (D-044, D-060), its own field.
+    revenue_share: float | None = None
+    # The Personal Guarantor the Standing Offer will name: the signed-in SME as their approved eKYC names them. Name
+    # only, never the ID number or the address.
+    guarantor_name: str | None = None
 
 
 class ProjectLoanApplicationOut(BaseModel):
