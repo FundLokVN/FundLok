@@ -24,6 +24,7 @@ from tests.loans.test_listing_signing import (
     _kyc,
     _signed,
     _upload,
+    _verified_phone,
 )
 from tests.loans.test_service_agreement import TAX, _apply
 
@@ -228,6 +229,7 @@ async def test_manually_approved_sme_can_sign(
     client, db_session, manual_kyb, attach_required_documents, make_admin, stored_signed, fake_neac
 ):
     case = await _manually_approved_case(client, db_session, manual_kyb, attach_required_documents, make_admin)
+    await _verified_phone(db_session, case.sme)  # signing opens once the Personal Guarantor has a verified phone
     resp = await _upload(
         client, case, "standing-offer", await _signed(client, case, "standing-offer", signers=(TAX, GUARANTOR_ID))
     )
