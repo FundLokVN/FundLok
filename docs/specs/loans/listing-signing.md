@@ -6,7 +6,7 @@
 | **Owner** | Phat |
 | **Implementer(s)** | Phat (backend `app/loans/`, `app/projects/`, frontend) |
 | **Module** | `app/loans/signing.py`, `app/loans/agreement/` (`standing_offer*.py`, `terms.py`), `app/projects/service.py` (`activate_project_if_approved`) |
-| **Version** | 1.4 (1.4: the three documents are laid out as Vietnamese contracts (Quốc hiệu and Tiêu ngữ, the date, the title in capitals with its number, signer names under the boxes) in DejaVu Serif; every detail FundLok has is filled in, the company address falls back to the project's, the SME enters the Guarantor's address on the signing step, and no document can be signed while a party's details are blank; the Loan Contract cites the signed Offer by number and date, so it is signed after the Offer; it states what each Investor's copy fills in as a rule with a worked example at the minimum ticket; versions v0.4; 1.3: the Loan Contract template (Contract 5) is a third document, signed by the SME and the Personal Guarantor, and publishing needs all three; a fallback font covers the symbols Be Vietnam Pro lacks; 1.2: the admin panel shows and re-checks both signed documents with NEAC, the guarantor and the check code included; 1.1: the Standing Offer carries the assessment result and repayment estimate; both documents carry empty signature fields, one per signer, and a check code; the upload checks both automatically) |
+| **Version** | 1.5 (1.5, 2026-11-20: the revenue share *s* is filled in on the Standing Offer and the Loan Contract from the LOCKED score run's daily repayment rate (D-044; Loc, 16 Nov, D-060), covered by both check codes; versions v0.5, with v0.4 copies on file still accepted as an earlier version; the investor listing carries DRR, *s* and the Personal Guarantor's name (SCRUM-637); 1.4: the three documents are laid out as Vietnamese contracts (Quốc hiệu and Tiêu ngữ, the date, the title in capitals with its number, signer names under the boxes) in DejaVu Serif; every detail FundLok has is filled in, the company address falls back to the project's, the SME enters the Guarantor's address on the signing step, and no document can be signed while a party's details are blank; the Loan Contract cites the signed Offer by number and date, so it is signed after the Offer; it states what each Investor's copy fills in as a rule with a worked example at the minimum ticket; versions v0.4; 1.3: the Loan Contract template (Contract 5) is a third document, signed by the SME and the Personal Guarantor, and publishing needs all three; a fallback font covers the symbols Be Vietnam Pro lacks; 1.2: the admin panel shows and re-checks both signed documents with NEAC, the guarantor and the check code included; 1.1: the Standing Offer carries the assessment result and repayment estimate; both documents carry empty signature fields, one per signer, and a check code; the upload checks both automatically) |
 | **Date** | 2026-11-10 |
 | **Related ADR** | ADR-009 |
 | **Depends on** | `docs/specs/market/investor-service-agreement.md` (the NEAC check this reuses), `docs/specs/direct_transfer/funding-window.md` (rule 1: the standing offer), the Contract set (documents 2 and 3) |
@@ -22,7 +22,7 @@ So the wizard no longer asks for any signature. Once FundLok approves a request 
 ## 2. Out of Scope
 
 - Linking the funding window's `standing_offers` row to the SME's signed PDF. The window still stores the machine-readable terms snapshot, signed with the mock signer (`app/direct_transfer`, Edward's module; funding-window.md rule 1, I-25).
-- The revenue share for extensions (*s*), which the Standing Offer says the system fills in per Listing. Nothing computes it yet, so it prints as a dotted blank: the one blank left in the Offer and the Loan Contract, and the only one that does not stop signing (open question 2).
+- Computing *s* separately from the daily repayment rate. Since v1.5 the Standing Offer and the Loan Contract print *s* as the LOCKED score run's `daily_repayment_rate` (the figure the automatic extension already uses, `direct_transfer/extension.py`; D-044, confirmed by Loc on 16 Nov as D-060). A run scored before the rate was stored (#99) has none, so its documents keep the dotted blank, which does not stop signing.
 - Remote signing inside FundLok. The SME signs outside the platform (USB token or the CA's remote signing) and uploads the PDF.
 
 ## 3. Data Model
@@ -54,10 +54,22 @@ The SME's approval card uses the same estimate, so it shows the figures the SME 
 | Approved terms | Annex: amount, term, rate | Listing details: target, rate, term, N0, minimum ticket |
 | Assessment and estimate | — | business score, assessment date, principal, interest, total T0, daily A0 × N0 with the last day, backstop day |
 | Empty signature fields | `SME_Signature` (Party B). Party A, FundLok's countersignature, is not collected here | `SME_Signature`, `Guarantor_Signature` |
-| Contract 5 | filled at listing level: Borrower, Guarantor, the Standing Offer's number (`{ref}/ĐNGK-FL`) and the day its signed copy was accepted (ICT), rate, term, N0 and the backstop N_bs. What each Investor's copy fills in is stated as the rule it follows: the contract no. (`{ref}/HĐCV-FL`, numbered per Investor at commitment), the Lender (the Investor accepting the Offer), P (from the minimum ticket, all contracts together at most the approved amount), I = P × r × M / 12, T = P + I and A = floor(T / N0), each with its value at the minimum ticket, the Disbursement Date (listing date + 14 days, as in the Offer) and the Investor's signing time (at commitment). Blank: *s* | `SME_Signature`, `Guarantor_Signature` | over the SME, the Guarantor, the rate and term, N0 and N_bs, the approved amount, the minimum ticket and the Offer's date |
-| Check code (every page) | over everything it is filled in with except the date prepared | over the SME, the Guarantor, the terms, the assessment, the estimate and the minimum ticket |
+| Contract 5 | filled at listing level: Borrower, Guarantor, the Standing Offer's number (`{ref}/ĐNGK-FL`) and the day its signed copy was accepted (ICT), rate, term, N0 and the backstop N_bs. What each Investor's copy fills in is stated as the rule it follows: the contract no. (`{ref}/HĐCV-FL`, numbered per Investor at commitment), the Lender (the Investor accepting the Offer), P (from the minimum ticket, all contracts together at most the approved amount), I = P × r × M / 12, T = P + I and A = floor(T / N0), each with its value at the minimum ticket, the Disbursement Date (listing date + 14 days, as in the Offer) and the Investor's signing time (at commitment). *s* as the Offer prints it | `SME_Signature`, `Guarantor_Signature` | over the SME, the Guarantor, the rate and term, *s*, N0 and N_bs, the approved amount, the minimum ticket and the Offer's date |
+| Check code (every page) | over everything it is filled in with except the date prepared | over the SME, the Guarantor, the terms, *s*, the assessment, the estimate and the minimum ticket |
 
 The check code (`pdf.check_code`) is the first 12 hex digits of a SHA-256 over those values, printed as `XXXX-XXXX-XXXX`.
+
+A copy of an earlier version (`standing-offer-v0.4`, `loan-contract-v0.4`, both without *s*) is still the right document on a NEAC re-check, with `terms_match: null` (`neac_check.EARLIER_VERSIONS`). A new upload must be the current version (422 `SIGNING_WRONG_DOCUMENT`), so an SME holding a v0.4 copy downloads it again.
+
+### What the investor listing shows (`GET /projects/public`, v1.5, SCRUM-637)
+
+`MarketplaceLoanApplicationOut` adds three fields for the offer screen, each null until it exists:
+
+| Field | Value |
+|---|---|
+| `daily_repayment_rate` | DRR: the LOCKED run's `daily_repayment_rate`, a fraction (0.085 = 8.5%) |
+| `revenue_share` | *s* as the Standing Offer prints it. Today the same figure as DRR; a field of its own so the screen never assumes that |
+| `guarantor_name` | the Personal Guarantor the signed Standing Offer names (the uploader of the signed copy, as their approved eKYC names them; `neac_check.signing_user`, `standing_offer.guarantor_for`). The name only: the ID number and address stay on the document |
 
 ### Where each party detail comes from
 
@@ -201,7 +213,7 @@ Frontend: the wizard has four steps (legal, revenue and costs, CIC, review). App
 ## 9. Open Questions
 
 1. **Window length.** The Standing Offer says the window closes at the latest on day 12, with disbursement on day 14 and day 13 for the SME's decision. `DirectTransferParams.window_days` is 14. One of the two needs to change (Edward / Lok).
-2. **Revenue share *s*.** Who sets it per Listing, and when? Until something does, the signed Offer and Loan Contract carry a blank there, and it is the one blank that does not stop signing. Should signing wait for it?
+2. **Revenue share *s*.** Resolved in v1.5: *s* is the LOCKED run's daily repayment rate (D-044, D-060), printed on both documents. Still open: should signing wait for *s* on a run scored before the rate was stored, which prints a blank?
 3. **Listing ID.** No listing exists before publication, so the Offer prints the application reference as the Listing ID. Is that acceptable, or should the Listing be created at approval?
 4. **Guarantor identity.** The Guarantor is taken to be the signing user (the project owner, eKYC-verified). If the owner and the legal representative differ, should another person be able to sign as Guarantor?
 6. **Working days a month.** Contract 3, `DirectTransferParams.working_days_per_month` and this estimate use 21. The grading engine's `grading_params` (`repayment.working_days_per_month`) and `repayment_schedule.calendar.DEFAULT_WORKING_DAYS_PER_MONTH` are still 22. The schedule's own spec (v1.4 D14) says new work should default to 21. Align the engine and calendar defaults (Edward).

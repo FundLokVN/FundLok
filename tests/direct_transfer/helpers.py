@@ -10,13 +10,15 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.timezone import ICT
-from app.direct_transfer import close, reservation, tranches, windows
+from app.direct_transfer import close, repayment, reservation, tranches, windows
 from app.direct_transfer.accounts import decide_payment_account, register_payment_account
 from app.direct_transfer.config import DirectTransferParams
-from app.direct_transfer.models import FundingWindow, Tranche
+from app.direct_transfer.evidence import store_evidence_file
+from app.direct_transfer.models import FundingWindow, RepaymentDay, Tranche
 from app.direct_transfer.receipts import ReceiptFields
 from app.direct_transfer.signing import MockSigner
 from app.direct_transfer.storage import InMemoryStorage
+from app.gverify.models import GVerifyVerification
 from app.lending.models import Contract, Listing, LoanApplication, Project, ProjectOwnership, ScoreRun
 from app.users.models import User
 from tests.tax_codes import fake_tax_code
@@ -83,6 +85,14 @@ async def make_account(
         account_number=number, account_name=name or user.full_name, evidence_file_id=None, now=T0,
     )
     if approve_by is not None:
+        if role == "INVESTOR":
+            # An investor's account is checked against the approved eKYC name, so the investor has passed eKYC.
+            # Dated well before T0, so it never counts as a "fresh" eKYC after a lock (standing._fresh_ekyc).
+            db.add(GVerifyVerification(
+                user_id=user.id, verification_type="KYC", status="APPROVED", full_name=name or user.full_name,
+                created_at=T0 - dt.timedelta(days=365),
+            ))
+            await db.flush()
         # Staff record the holder name seen at the bank. Here it equals the account name; for an SME with no
         # approved KYB (no verified name to compare with) the difference is accepted explicitly.
         await decide_payment_account(
@@ -94,13 +104,13 @@ async def make_account(
 
 async def make_world(
     db: AsyncSession, *, target: int = 100_000_000, rate: float = 16.0, term: int = 4, params: DirectTransferParams | None = None,
-    listing_min_ticket: int = 10_000_000,
+    listing_min_ticket: int = 10_000_000, sme: User | None = None,
 ) -> World:
     # The spec's worked examples have one loan formed at close; repaying from approval (the product default) is
     # tested in tests/market.
     params = params or DirectTransferParams(repay_from_approval=False)
     admin = await make_user(db, role="ADMIN", full_name="Staff Admin")
-    sme = await make_user(db, role="SME", full_name="Cong Ty ABC")
+    sme = sme or await make_user(db, role="SME", full_name="Cong Ty ABC")  # pass one signed in over HTTP to drive the API
     project = Project(legal_name=f"ABC Co {uuid.uuid4().hex[:6]}", tax_id=fake_tax_code())
     db.add(project)
     await db.flush()
@@ -224,3 +234,35 @@ async def close_now(world: World, *, now: dt.datetime) -> FundingWindow:
     window = await close.advance_window(world.db, window_id=world.window.id, now=now, params=world.params)
     await world.db.refresh(window)
     return window
+
+
+async def receipt_file(world: World):
+    """A stored bank receipt of the SME's, the proof a repayment needs (late-status.md)."""
+    return await store_evidence_file(
+        world.db, world.storage, owner_user_id=world.sme.id, purpose="RECEIPT",
+        content=f"%PDF-1.4 receipt {uuid.uuid4()}".encode(), content_type="application/pdf", filename="receipt.pdf",
+    )
+
+
+async def pay_days_through(world: World, now: dt.datetime) -> int:
+    """The SME pays every day due before `now`'s ICT date at 10:00 on its due date, oldest first, each date's days with
+    one receipt: the days are PRESUMED_PAID and settle once the investor's 24 hours pass (repayment.settle_days)."""
+    from sqlalchemy import select
+
+    days = (
+        await world.db.execute(
+            select(RepaymentDay)
+            .where(RepaymentDay.status.in_(("DUE", "LATE")), RepaymentDay.due_date < now.astimezone(ICT).date())
+            .order_by(RepaymentDay.due_date, RepaymentDay.day_index)
+        )
+    ).scalars().all()
+    by_date: dict[dt.date, list] = {}
+    for day in days:
+        by_date.setdefault(day.due_date, []).append(day.id)
+    for due_date, ids in by_date.items():
+        await repayment.mark_days_paid(
+            world.db, sme_user_id=world.sme.id, repayment_day_ids=ids, receipt_file_id=(await receipt_file(world)).id,
+            idempotency_key=f"pay-{uuid.uuid4().hex}", now=dt.datetime.combine(due_date, dt.time(10), tzinfo=ICT),
+            params=world.params,
+        )
+    return len(days)

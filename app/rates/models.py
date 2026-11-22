@@ -17,7 +17,43 @@ from sqlalchemy.dialects.postgresql import INET, UUID
 from app.core.base import Base
 
 
+# The calculator's figures. Required on a CALCULATOR row, absent on a QUIZ row.
+_CALCULATOR_COLUMNS = (
+    "operating_months",
+    "employee_count",
+    "revenue_l12m",
+    "revenue_prev_12m",
+    "cogs_l12m",
+    "fixed_costs_l12m",
+    "variable_costs_l12m",
+    "estimated_rate_min",
+    "estimated_rate_max",
+)
+_CALCULATOR_COMPLETE = "source <> 'CALCULATOR' OR (" + " AND ".join(
+    f"{c} IS NOT NULL" for c in _CALCULATOR_COLUMNS
+) + ")"
+_QUIZ_COMPLETE = (
+    "source <> 'QUIZ' OR ("
+    "monthly_revenue IS NOT NULL AND operating_band IS NOT NULL"
+    " AND quiz_outcome IS NOT NULL AND quiz_params_version IS NOT NULL"
+    " AND full_name IS NOT NULL AND phone IS NOT NULL AND consented_contact_at IS NOT NULL"
+    " AND ((quiz_outcome = 'QUOTED' AND estimated_rate_min IS NOT NULL AND estimated_rate_max IS NOT NULL)"
+    " OR (quiz_outcome = 'DECLINED' AND estimated_rate_min IS NULL AND estimated_rate_max IS NULL)))"
+)
+
+
 class RateInquiry(Base):
+    """One enquiry from the public /rate page.
+
+    Two kinds of row share this table so both land in the same admin list:
+
+    - CALCULATOR: the long form priced by `grade_lite` (`POST /calculate`).
+    - QUIZ: the five-question illustrative quiz (`POST /sme/quiz-leads`). Its
+      rate is computed in the browser from a published formula, never by the
+      underwriting engine, and is stored as the monthly rate the visitor saw.
+      See docs/specs/rates/sme-rate-quiz.md.
+    """
+
     __tablename__ = "rate_inquiries"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -25,17 +61,19 @@ class RateInquiry(Base):
     ip_address = Column(INET, nullable=True)
     user_agent = Column(Text, nullable=True)
 
-    # Business Profile
-    industry = Column(String(100), nullable=False)
-    operating_months = Column(Integer, nullable=False)
-    employee_count = Column(Integer, nullable=False)
+    source = Column(String(20), nullable=False, server_default="CALCULATOR")
 
-    # 12-Month Financials (VND)
-    revenue_l12m = Column(BigInteger, nullable=False)
-    revenue_prev_12m = Column(BigInteger, nullable=False)
-    cogs_l12m = Column(BigInteger, nullable=False)
-    fixed_costs_l12m = Column(BigInteger, nullable=False)
-    variable_costs_l12m = Column(BigInteger, nullable=False)
+    # Business Profile (calculator)
+    industry = Column(String(100), nullable=False)
+    operating_months = Column(Integer, nullable=True)
+    employee_count = Column(Integer, nullable=True)
+
+    # 12-Month Financials (VND, calculator)
+    revenue_l12m = Column(BigInteger, nullable=True)
+    revenue_prev_12m = Column(BigInteger, nullable=True)
+    cogs_l12m = Column(BigInteger, nullable=True)
+    fixed_costs_l12m = Column(BigInteger, nullable=True)
+    variable_costs_l12m = Column(BigInteger, nullable=True)
 
     # Loan Request
     requested_amount = Column(BigInteger, nullable=False)
@@ -47,9 +85,9 @@ class RateInquiry(Base):
     top_1_customer_share = Column(Numeric(5, 2), nullable=True)
     top_3_customer_share = Column(Numeric(5, 2), nullable=True)
 
-    # Engine Output
-    estimated_rate_min = Column(Numeric(5, 2), nullable=False)
-    estimated_rate_max = Column(Numeric(5, 2), nullable=False)
+    # Engine output (calculator), or the quiz's monthly rate in both columns
+    estimated_rate_min = Column(Numeric(5, 2), nullable=True)
+    estimated_rate_max = Column(Numeric(5, 2), nullable=True)
     risk_tier = Column(String(20), nullable=True)
     calculated_monthly_payment = Column(BigInteger, nullable=True)
 
@@ -61,6 +99,20 @@ class RateInquiry(Base):
     phone = Column(String(20), nullable=True)
     consented_contact_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Quiz answers not covered by the columns above
+    monthly_revenue = Column(BigInteger, nullable=True)
+    operating_band = Column(String(10), nullable=True)
+    quiz_outcome = Column(String(10), nullable=True)
+    quiz_params_version = Column(String(20), nullable=True)
+
+    # Where the visitor came from (ad tracking parameters on the landing URL)
+    utm_source = Column(String(100), nullable=True)
+    utm_medium = Column(String(100), nullable=True)
+    utm_campaign = Column(String(100), nullable=True)
+    utm_content = Column(String(100), nullable=True)
+    utm_term = Column(String(100), nullable=True)
+    fbclid = Column(String(255), nullable=True)
+
     # Metadata
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -69,6 +121,12 @@ class RateInquiry(Base):
         CheckConstraint("tenor_months BETWEEN 1 AND 6", name="chk_rate_inquiries_tenor_months"),
         CheckConstraint("top_1_customer_share BETWEEN 0 AND 100", name="chk_rate_inquiries_top_1_customer_share"),
         CheckConstraint("top_3_customer_share BETWEEN 0 AND 100", name="chk_rate_inquiries_top_3_customer_share"),
+        CheckConstraint("source IN ('CALCULATOR', 'QUIZ')", name="chk_rate_inquiries_source"),
+        CheckConstraint("operating_band IN ('LT_1Y', 'Y1_3', 'GT_3Y')", name="chk_rate_inquiries_operating_band"),
+        CheckConstraint("quiz_outcome IN ('QUOTED', 'DECLINED')", name="chk_rate_inquiries_quiz_outcome"),
+        CheckConstraint("monthly_revenue > 0", name="chk_rate_inquiries_monthly_revenue"),
+        CheckConstraint(_CALCULATOR_COMPLETE, name="chk_rate_inquiries_calculator_complete"),
+        CheckConstraint(_QUIZ_COMPLETE, name="chk_rate_inquiries_quiz_complete"),
         Index("idx_rate_inquiries_industry", "industry"),
         Index("idx_rate_inquiries_created_at", desc("created_at")),
     )

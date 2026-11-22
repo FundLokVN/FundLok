@@ -10,7 +10,8 @@ which text it was; bump it whenever a word here changes.
 
 # v0.4: laid out as a Vietnamese contract (national header, date, number); filled in with the Standing Offer's
 # number and date and, where each Investor's copy fills a value in, the rule it follows (`PER_INVESTOR`).
-VERSION = "loan-contract-v0.4"
+# v0.5: the revenue share s is filled in, as on the Standing Offer, and covered by the check code.
+VERSION = "loan-contract-v0.5"
 
 TITLE = ("5. Hợp đồng cho vay", "Loan Contract")
 
@@ -404,3 +405,40 @@ SIGNATURE_BOXES = (
     ("DOANH NGHIỆP / SME", "Ký số doanh nghiệp / Enterprise digital signature"),
     ("NGƯỜI BẢO LÃNH CÁ NHÂN / PERSONAL GUARANTOR", "Ký số cá nhân / Personal digital signature"),
 )
+
+
+# --------------------------------------------------------------------------- #
+# Each Investor's own copy (Money flow FINAL v1.0, Day 13 and Day 14)
+# --------------------------------------------------------------------------- #
+# Generated for one Investor at 00:00 on Day 13 from the final pledge list. The SME signs it with its enterprise
+# digital signature and the Personal Guarantor by a Zalo one-time code on Day 13; the Investor signs it by a Zalo
+# one-time code on the Disbursement Date (Day 14). To be checked against the Contract 5 FINAL v1.0 wording.
+INVESTOR_COPY_SIGNING = (
+    "Bản Hợp đồng này được lập cho Nhà đầu tư nêu tại Điều 1 từ danh sách cam kết cuối cùng lúc 00:00 Ngày 13 của "
+    "Khoản gọi vốn. Doanh nghiệp ký bằng chữ ký số doanh nghiệp và Người bảo lãnh ký bằng mã xác thực một lần gửi qua "
+    "Zalo vào Ngày 13; Nhà đầu tư ký bằng mã xác thực một lần gửi qua Zalo vào Ngày giải ngân.",
+    "This copy is made for the Investor named in Article 1 from the final pledge list at 00:00 on Day 13 of the "
+    "Listing. The SME signs it with its enterprise digital signature and the Personal Guarantor by a one-time code "
+    "sent by Zalo on Day 13; the Investor signs it by a one-time code sent by Zalo on the Disbursement Date.",
+)
+INVESTOR_COPY_SIGNATURE_LINES = [
+    (
+        "Nhà đầu tư / Investor: ký bằng mã xác thực một lần gửi qua Zalo vào Ngày giải ngân {disbursement_date} / "
+        "signs by a one-time code sent by Zalo on the Disbursement Date {disbursement_date}."
+    ),
+    (
+        "Doanh nghiệp / SME: chữ ký số doanh nghiệp trên bản này, Ngày 13 / enterprise digital signature on this copy, "
+        "Day 13."
+    ),
+    (
+        "Người bảo lãnh cá nhân / Personal Guarantor: mã xác thực một lần gửi qua Zalo, Ngày 13 / one-time code sent by "
+        "Zalo, Day 13."
+    ),
+]
+INVESTOR_COPY_SIGNATURE_BOXES = (
+    ("DOANH NGHIỆP / SME", "Ký số doanh nghiệp / Enterprise digital signature"),
+    ("NGƯỜI BẢO LÃNH CÁ NHÂN / PERSONAL GUARANTOR", "Ký bằng mã OTP qua Zalo / Signs by Zalo one-time code"),
+)
+# The contract number of an Investor's copy: the application reference, the Investor's sequence in the final pledge
+# list, the document and FundLok.
+INVESTOR_NUMBER = "{ref}-{seq:02d}/HĐCV-FL"

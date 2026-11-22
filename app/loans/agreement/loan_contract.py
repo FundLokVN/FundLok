@@ -15,14 +15,17 @@ Where each blank comes from:
                                Disbursement Date and the Investor's signing time are each Investor's own, filled in
                                their copy at commitment: this copy states the rule each follows
                                (loan_contract_text.PER_INVESTOR), with I, T and A worked out at the minimum ticket
-  revenue share (s)            not computed by the platform yet, so a dotted blank
+  revenue share (s)            as the Standing Offer prints it: the LOCKED score run's daily repayment rate
+                               (terms.ListingTerms.revenue_share), a dotted blank on a run scored before it was stored
 
 Two empty signature fields sit over the signature boxes, SME_Signature and Guarantor_Signature, and every page
 carries a check code over everything it is filled in with (pdf.check_code).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,7 +44,7 @@ from app.loans.agreement.pdf import (
     signer_name,
 )
 from app.loans.agreement.standing_offer import StandingOfferData, _clean, _vnd_digits, offer_data
-from app.loans.agreement.terms import repayment_estimate
+from app.loans.agreement.terms import repayment_estimate, share_pct
 from app.loans.agreement.text import BLANK
 from app.users.models import User
 
@@ -87,6 +90,7 @@ def contract_check_code(data: StandingOfferData, signed_on: date | None) -> str:
             "sme": sme,
             "guarantor": [data.guarantor.name, data.guarantor.id_number, data.guarantor.address],
             "terms": [str(terms.rate_pct), terms.term_months] if terms else None,
+            "revenue_share": share_pct(terms.revenue_share) if terms else None,
             "schedule": [estimate.instalment_days, estimate.backstop_day] if estimate else None,
             "target": terms.amount_vnd if terms else None,
             "min_ticket_vnd": data.min_ticket_vnd,
@@ -95,7 +99,38 @@ def contract_check_code(data: StandingOfferData, signed_on: date | None) -> str:
     )
 
 
-def parties(data: StandingOfferData) -> list[tuple[str, str]]:
+@dataclass(frozen=True)
+class InvestorCopy:
+    """What one Investor's own copy fills in (Day 13): the contract number, the Lender, P and the Disbursement Date.
+    The rate and the term are the listing's."""
+
+    number: str
+    lender_name: str | None
+    lender_id_number: str | None
+    lender_account: str | None
+    lender_bank: str | None
+    principal_vnd: int
+    rate_pct: Decimal
+    term_months: int
+    disbursement_date: date
+
+    def check_values(self) -> dict:
+        return {
+            "number": self.number,
+            "lender": [self.lender_name, self.lender_id_number, self.lender_account, self.lender_bank],
+            "principal_vnd": self.principal_vnd,
+            "rate_pct": str(self.rate_pct),
+            "term_months": self.term_months,
+            "disbursement_date": self.disbursement_date.isoformat(),
+        }
+
+
+def investor_check_code(data: StandingOfferData, signed_on: date | None, copy: InvestorCopy) -> str:
+    """Over the template's values and this Investor's: what the SME's signed copy must carry."""
+    return check_code({"template": contract_check_code(data, signed_on), "copy": copy.check_values()})
+
+
+def parties(data: StandingOfferData, copy: InvestorCopy | None = None) -> list[tuple[str, str]]:
     """(vi, en) of Article 1: the Lender (each Investor, named in their own copy), the Borrower, the Guarantor."""
     offer_no = standing_offer_text.NUMBER.format(ref=data.sme.application_ref)
     borrower = {
@@ -110,23 +145,47 @@ def parties(data: StandingOfferData) -> list[tuple[str, str]]:
         "id_number": data.guarantor.id_number,
         "address": data.guarantor.address,
     }
-    return [
-        (
+    if copy is not None:
+        lender = {
+            "name": copy.lender_name,
+            "id_number": copy.lender_id_number,
+            "account": copy.lender_account,
+            "bank": copy.lender_bank,
+        }
+        lender_line = (_fill(text.LENDER_VI, lender, bold=True), _fill(text.LENDER_EN, lender, bold=False))
+    else:
+        lender_line = (
             text.PER_INVESTOR["lender_vi"].format(offer_no=offer_no),
             text.PER_INVESTOR["lender_en"].format(offer_no=offer_no),
-        ),
+        )
+    return [
+        lender_line,
         (_fill(text.BORROWER_VI, borrower, bold=True), _fill(text.BORROWER_EN, borrower, bold=False)),
         (_fill(text.GUARANTOR_VI, guarantor, bold=True), _fill(text.GUARANTOR_EN, guarantor, bold=False)),
     ]
 
 
-def terms_rows(data: StandingOfferData) -> list[tuple[str, str]]:
-    """Article 4. P and what follows from it are each Investor's: the rule, and the figures at the minimum ticket."""
+def terms_rows(data: StandingOfferData, copy: InvestorCopy | None = None) -> list[tuple[str, str]]:
+    """Article 4. P and what follows from it are each Investor's: the rule, and the figures at the minimum ticket;
+    on an Investor's own copy, their figures."""
     labels = text.TERMS_LABELS
     terms = data.terms
     estimate = terms.estimate if terms is not None else None
     rules = text.PER_INVESTOR
-    if terms is not None:
+    disbursement = standing_offer_text.DISBURSEMENT_DATE
+    if copy is not None:
+        own = repayment_estimate(copy.principal_vnd, copy.rate_pct, copy.term_months)
+        rate_vi, rate_en = rate(copy.rate_pct)
+        rate_value = f"{rate_vi}{text.RATE_VI} / {rate_en}% {text.RATE_EN}"
+        term = text.TERM.format(months=copy.term_months)
+        days = text.INSTALMENT_DAYS.format(days=own.instalment_days)
+        backstop = str(own.backstop_day)
+        principal = f"{_vnd_digits(own.principal_vnd)}{text.VND_SUFFIX}"
+        interest = f"{_vnd_digits(own.interest_vnd)}{text.VND_SUFFIX}"
+        total = f"{_vnd_digits(own.total_vnd)}{text.VND_SUFFIX}"
+        daily = text.DAILY.format(daily=_vnd_digits(own.daily_vnd), last=_vnd_digits(own.final_instalment_vnd))
+        disbursement = copy.disbursement_date.strftime("%d/%m/%Y")
+    elif terms is not None:
         rate_vi, rate_en = rate(terms.rate_pct)
         rate_value = f"{rate_vi}{text.RATE_VI} / {rate_en}% {text.RATE_EN}"
         term = text.TERM.format(months=terms.term_months)
@@ -154,6 +213,7 @@ def terms_rows(data: StandingOfferData) -> list[tuple[str, str]]:
         backstop = BLANK
         principal = interest = total = f"{BLANK}{text.VND_SUFFIX}"
         daily = text.DAILY.format(daily=BLANK, last=BLANK)
+    share = share_pct(terms.revenue_share) if terms is not None else None
     return [
         (labels["principal"], principal),
         (labels["rate"], rate_value),
@@ -162,20 +222,28 @@ def terms_rows(data: StandingOfferData) -> list[tuple[str, str]]:
         (labels["total"], total),
         (labels["instalment_days"], days),
         (labels["daily"], daily),
-        (labels["disbursement_date"], standing_offer_text.DISBURSEMENT_DATE),
+        (labels["disbursement_date"], disbursement),
         (labels["cut_off"], text.CUT_OFF),
         (labels["first_instalment"], text.FIRST_INSTALMENT),
         (labels["backstop"], backstop),
-        (labels["revenue_share"], text.REVENUE_SHARE.format(share=BLANK)),
+        (labels["revenue_share"], text.REVENUE_SHARE.format(share=share or BLANK)),
         (labels["pit"], text.PIT),
     ]
 
 
-def render(data: StandingOfferData, prepared_on: date, offer_signed: date | None) -> bytes:
+def render(
+    data: StandingOfferData, prepared_on: date, offer_signed: date | None, copy: InvestorCopy | None = None
+) -> bytes:
+    """The template the SME and the Guarantor sign on Day 0, or, given `copy`, one Investor's own contract (Day 13)."""
     ref = data.sme.application_ref
-    code = contract_check_code(data, offer_signed)
+    code = investor_check_code(data, offer_signed, copy) if copy else contract_check_code(data, offer_signed)
     offer = _offer(data, offer_signed)
-    pdf = ContractPDF(f"{text.VERSION} · Mã hồ sơ / Application {ref} · Mã đối chiếu / Check {code}")
+    number = copy.number if copy else text.NUMBER.format(ref=ref)
+    pdf = ContractPDF(
+        f"{text.VERSION} · Mã hồ sơ / Application {ref}"
+        + (f" · Hợp đồng / Contract {copy.number}" if copy else "")
+        + f" · Mã đối chiếu / Check {code}"
+    )
     pdf.set_title(f"{text.TITLE[0]} / {text.TITLE[1]}")
     pdf.set_author("FundLok")
     pdf.set_subject(f"{text.VERSION} – {data.sme.sme_name or ''}".strip(" –"))
@@ -183,7 +251,7 @@ def render(data: StandingOfferData, prepared_on: date, offer_signed: date | None
 
     pdf.title_block(
         text.TITLE,
-        number=text.NUMBER.format(ref=ref),
+        number=number,
         prepared_on=prepared_on,
         meta=f"Văn bản số 5 / Document 5   ·   Mã hồ sơ / Application: {ref}   ·   "
         f"Phiên bản / Version: {text.VERSION}   ·   Mã đối chiếu / Check: {code}",
@@ -191,13 +259,14 @@ def render(data: StandingOfferData, prepared_on: date, offer_signed: date | None
     pdf.vi(text.PREVAILS[0])
     pdf.en(text.PREVAILS[1])
     pdf.gap()
-    pdf.vi(text.SIGNING[0])
-    pdf.en(text.SIGNING[1])
+    signing = text.INVESTOR_COPY_SIGNING if copy else text.SIGNING
+    pdf.vi(signing[0])
+    pdf.en(signing[1])
 
     pdf.gap(4)
     pdf.heading(text.ARTICLE_1)
     pdf.gap(1)
-    for p_vi, p_en in parties(data):
+    for p_vi, p_en in parties(data, copy):
         pdf.vi(p_vi, markdown=True)
         pdf.en(p_en)
         pdf.gap(1.5)
@@ -208,7 +277,7 @@ def render(data: StandingOfferData, prepared_on: date, offer_signed: date | None
     pdf.gap(4)
     pdf.heading(text.ARTICLE_4)
     pdf.gap(1.5)
-    pdf.rows(terms_rows(data), col_widths=(75, 95))
+    pdf.rows(terms_rows(data, copy), col_widths=(75, 95))
 
     pdf.articles(text.ARTICLES)
 
@@ -224,14 +293,15 @@ def render(data: StandingOfferData, prepared_on: date, offer_signed: date | None
     lines = {
         "investor_time_vi": text.PER_INVESTOR["investor_time_vi"],
         "investor_time_en": text.PER_INVESTOR["investor_time_en"],
+        "disbursement_date": copy.disbursement_date.strftime("%d/%m/%Y") if copy else "",
         **offer,
     }
-    for line in text.SIGNATURE_LINES:
+    for line in text.INVESTOR_COPY_SIGNATURE_LINES if copy else text.SIGNATURE_LINES:
         pdf.vi(line.format(**lines), size=9.5)
         pdf.gap(0.8)
 
     pdf.signature_blocks(
-        text.SIGNATURE_BOXES,
+        text.INVESTOR_COPY_SIGNATURE_BOXES if copy else text.SIGNATURE_BOXES,
         fields=(SME_SIGNATURE_FIELD, GUARANTOR_SIGNATURE_FIELD),
         names=(signer_name(data.sme.legal_representative, data.sme.sme_name), data.guarantor.name),
     )

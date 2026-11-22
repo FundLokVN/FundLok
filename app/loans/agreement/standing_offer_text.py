@@ -11,7 +11,8 @@ whenever a word here changes.
 """
 
 # v0.4: laid out as a Vietnamese contract (national header, date, number); the Guarantor's address the SME enters.
-VERSION = "standing-offer-v0.4"
+# v0.5: the revenue share s is filled in (the locked run's daily repayment rate) and covered by the check code.
+VERSION = "standing-offer-v0.5"
 
 TITLE = ("3. Đề nghị giao kết hợp đồng cho vay", "Standing Offer to Conclude Loan Contracts")
 

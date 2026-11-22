@@ -72,7 +72,13 @@ def get_bytes(file_key: str, *, max_bytes: int, bucket: str | None = None) -> by
     return data
 
 
-def presign_put(file_key: str, content_type: str, *, content_length: int) -> str:
+def presign_put(
+    file_key: str,
+    content_type: str,
+    *,
+    content_length: int,
+    bucket: str | None = None,
+) -> str:
     """Presigned PUT URL bound to one Content-Type AND one exact size.
 
     Both are signed headers: storage rejects the PUT unless the client sends
@@ -86,13 +92,16 @@ def presign_put(file_key: str, content_type: str, *, content_length: int) -> str
     Callers pass the size they validated against their own limit. A browser
     sets Content-Length to the file's byte size itself, so declaring
     ``file.size`` matches automatically.
+
+    ``bucket`` overrides the default uploads bucket (blog images go to the
+    public bucket).
     """
     if content_length <= 0:
         raise ValueError("content_length must be positive")
     return _client().generate_presigned_url(
         "put_object",
         Params={
-            "Bucket": settings.R2_BUCKET,
+            "Bucket": bucket or settings.R2_BUCKET,
             "Key": file_key,
             "ContentType": content_type,
             "ContentLength": content_length,
@@ -127,6 +136,12 @@ def presign_get(
 def delete_object(file_key: str, *, bucket: str | None = None) -> None:
     """Delete an object; deleting a nonexistent key is a no-op in S3/R2."""
     _client().delete_object(Bucket=bucket or settings.R2_BUCKET, Key=file_key)
+
+
+def copy_object(source_key: str, target_key: str, *, bucket: str | None = None) -> None:
+    """Server-side copy within the bucket: a repeat request's own copy of the documents it reuses."""
+    bucket = bucket or settings.R2_BUCKET
+    _client().copy_object(Bucket=bucket, Key=target_key, CopySource={"Bucket": bucket, "Key": source_key})
 
 
 def head_object(file_key: str, *, bucket: str | None = None) -> dict | None:

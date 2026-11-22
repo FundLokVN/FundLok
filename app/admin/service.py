@@ -80,6 +80,7 @@ from app.auth.service import password_fingerprint
 from app.utils.email import send_admin_invite_email, send_application_updated_email
 from app.utils.jwt import create_password_reset_token
 from app.notifications.service import create_notification
+from app.projects.borrower import close_project_if_finished
 from app.projects.service import activate_project_if_approved
 from app.banking.models import LinkedAccount
 from app.direct_transfer.accounts import annotate_name_match, list_payment_accounts
@@ -992,6 +993,9 @@ async def decide_application(
     if decision is AdminDecision.rejected:
         row.status = "REJECTED"
     db.add(row)
+    if decision is AdminDecision.rejected:
+        # Every application on the project rejected ends it, so the business can apply again (one-borrower v1.1).
+        await close_project_if_finished(db, row.project_id, "REJECTED")
 
     # The operator's half just landed; if the engine's (a LOCKED score run) is
     # already there, the project goes on the marketplace now.

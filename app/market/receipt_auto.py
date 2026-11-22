@@ -32,6 +32,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.direct_transfer import day14
 from app.direct_transfer.banks import Bank, list_banks
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.evidence import log_event
@@ -57,6 +58,9 @@ NEEDS_REVIEW = "NEEDS_REVIEW"
 LATE_RECEIPT = "LATE_RECEIPT"
 AUTO_VERDICT_OFF = "AUTO_VERDICT_OFF"
 NOT_AWAITING = "NOT_AWAITING"
+# Day-14 late money (day14-transfer-rule.md): paid outside its QR's 15 minutes, or after 14:45. Never auto-accepted
+# or denied: the 15:00 step turns it into the lender's top-up (day14.process_day14_no_shows).
+PAID_LATE = "PAID_LATE"
 
 DUPLICATE_BANK_TXN = "DUPLICATE_BANK_TXN"
 
@@ -271,6 +275,15 @@ async def run_system_check(
             failures.append(DUPLICATE_BANK_TXN)
         receiver_failures, unknowns, receiver = await check_receiver(db, reading, payee)
         failures.extend(receiver_failures)
+        # Day-14 transfer rule: which QR code the receipt carries and whether it was inside that QR's 15 minutes.
+        # Recorded on the transfer whatever the verdict (staff see it; the 15:00 step reads it).
+        timing = await day14.record_payment_timing(
+            db, tranche=tranche, window=window, transfer=transfer, memo=fields.memo,
+            transferred_at=fields.transferred_at, params=p,
+        )
+        late_money = day14.is_late_money(window, timing, p)
+    else:
+        late_money = False
 
     # A wrong detail decides it (DENIED) even when another detail is missing; an all-correct read is ACCEPTED only
     # when nothing about the receiver is unknown.
@@ -282,6 +295,8 @@ async def run_system_check(
         reasons.extend(reading.notes)
     if not failures:
         reasons.extend(unknowns)
+    if late_money:
+        reasons.append(PAID_LATE)
     if tranche.status == "UNDER_REVIEW" and tranche.review_cause == "LATE_RECEIPT":
         reasons.append(LATE_RECEIPT)
     elif tranche.status != "SIGNED" or transfer.check_status != "AWAITING_FIELDS":
@@ -363,6 +378,8 @@ async def _accept(
     await transition_tranche(
         db, tranche, "ATTESTED", now=now, actor_role=SYSTEM_ROLE, reason=reason, confirm_deadline=now,
     )
+    # An automatic confirmation the SME never checked: it may still dispute it for 30 days (A5).
+    tranche.dispute_until = now + dt.timedelta(days=resolve(None).confirmed_dispute_days)
     await transition_tranche(db, tranche, "CONFIRMED", now=now, actor_role=SYSTEM_ROLE, reason=reason)
 
 

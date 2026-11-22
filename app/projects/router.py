@@ -5,6 +5,7 @@ from uuid import UUID
 from app.core.database import get_db
 from app.utils.jwt import get_current_user
 from app.projects.schemas import (
+    LoanApplicationCreateInline,
     MarketplaceLoanApplicationOut,
     MarketplaceProjectOut,
     ProjectCreate,
@@ -18,8 +19,11 @@ from app.projects.service import (
     create_project,
     get_my_projects,
     display_projects,
+    listed_guarantor_names,
     locked_business_scores,
+    locked_repayment_rates,
     marketplace_listings,
+    repeat_project,
     verified_document_types,
 )
 from app.users.models import User
@@ -42,6 +46,22 @@ async def create_project_endpoint(
     return out
 
 
+@router.post("/repeat", response_model=ProjectWithApplicationOut, status_code=201)
+async def repeat_project_endpoint(
+    loan: LoanApplicationCreateInline,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """A business whose last request has ended borrows again: only the amount and term are asked; the company, its
+    documents and figures come from its last approved request, and the request is submitted for review (409
+    NO_APPROVED_REQUEST when there is none to copy, SME_HAS_OPEN_PROJECT while one is in progress)."""
+    project, application = await repeat_project(db, loan, current_user)
+    out = ProjectWithApplicationOut.model_validate(project)
+    out.loan_application = ProjectLoanApplicationOut.model_validate(application)
+    await db.commit()
+    return out
+
+
 @router.get("", response_model=List[ProjectWithApplicationOut])
 async def list_my_projects(
     db: AsyncSession = Depends(get_db),
@@ -54,7 +74,7 @@ async def list_my_projects(
         if project.loan_applications:
             application = project.loan_applications[0]
             out.loan_application = ProjectLoanApplicationOut.model_validate(application)
-            out.loan_application.approval = await approval_for(db, application)
+            out.loan_application.approval = await approval_for(db, application, current_user)
         results.append(out)
     return results
 
@@ -74,6 +94,8 @@ async def list_projects(
     projects = await display_projects(db, current_user)
     application_ids = [p.loan_applications[0].id for p in projects if p.loan_applications]
     scores = await locked_business_scores(db, application_ids)
+    repayment_rates = await locked_repayment_rates(db, application_ids)
+    guarantors = await listed_guarantor_names(db, projects)
     listings = await marketplace_listings(db, application_ids)
     bank_rate_pct = await bank_rate_in_force(db)
     results = []
@@ -86,5 +108,9 @@ async def list_projects(
             out.loan_application.business_score = scores.get(application.id)
             out.loan_application.listing = listings.get(application.id)
             out.loan_application.bank_rate_pct = bank_rate_pct
+            # DRR and s are one figure today (D-044): the locked run's rate.
+            out.loan_application.daily_repayment_rate = repayment_rates.get(application.id)
+            out.loan_application.revenue_share = repayment_rates.get(application.id)
+            out.loan_application.guarantor_name = guarantors.get(application.id)
         results.append(out)
     return results

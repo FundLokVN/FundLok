@@ -129,7 +129,8 @@ async def test_a_rejection_never_activates(
     )
     assert resp.status_code == 200, resp.text
 
-    assert await _project_status(db_session, project["id"]) == "DRAFT"
+    # Never ACTIVE: the rejection ended the request, so the project is CLOSED (one-borrower v1.1, rule 3).
+    assert await _project_status(db_session, project["id"]) == "CLOSED"
 
 
 @pytest.mark.parametrize("taken_down", ["SUSPENDED", "CLOSED", "ARCHIVED"])

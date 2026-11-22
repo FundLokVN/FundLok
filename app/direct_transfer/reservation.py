@@ -62,6 +62,8 @@ async def reserve_ticket(
 
     if window.sme_user_id == investor_id:
         raise not_found("Window not found")
+    if window.flow == "COMMIT_THEN_ACCEPT":
+        raise conflict("USE_COMMITMENTS", "This window takes commitments, not reservations")
     if window.status != "OPEN" or now >= window.window_end:
         raise conflict("WINDOW_NOT_OPEN", "The window is not open for reservations")
     if await fees.investor_has_unpaid_invoice(db, investor_id, p, now=now):

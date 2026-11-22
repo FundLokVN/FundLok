@@ -10,7 +10,8 @@ Where each blank comes from:
   Listing details          the approved request's terms (agreement/terms.locked_terms): target, rate, term; the
                            minimum ticket from the funding parameters; the application reference as the Listing ID
                            (one Listing per request); the template's own rules for the dates
-  revenue share (s)        not computed by the platform yet, so a dotted blank
+  revenue share (s)        the LOCKED score run's daily repayment rate (terms.ListingTerms.revenue_share: D-044,
+                           confirmed by Loc on 16 Nov, D-060); a dotted blank on a run scored before it was stored
   assessment and estimate  the LOCKED score run's business score and lock date; principal, interest, total, daily
                            instalment and backstop from the repayment schedule's own rules (terms.repayment_estimate)
 Anything unknown prints as a dotted blank, as in the template, and the Offer cannot be signed while a party's details
@@ -46,7 +47,7 @@ from app.loans.agreement.pdf import (
     signer_name,
 )
 from app.loans.agreement.service import agreement_data
-from app.loans.agreement.terms import ListingTerms, locked_terms
+from app.loans.agreement.terms import ListingTerms, locked_terms, share_pct
 from app.loans.agreement.text import BLANK
 from app.users.models import User
 
@@ -94,6 +95,7 @@ class StandingOfferData:
                 "sme": sme,
                 "guarantor": [self.guarantor.name, self.guarantor.id_number, self.guarantor.address],
                 "terms": [terms.amount_vnd, str(terms.rate_pct), terms.term_months] if terms else None,
+                "revenue_share": share_pct(terms.revenue_share) if terms else None,
                 "score": _score(terms.business_score) if terms else None,
                 "assessed_on": _date(terms.assessed_at) if terms else None,
                 "estimate": [estimate.interest_vnd, estimate.total_vnd, estimate.daily_vnd,
@@ -235,6 +237,7 @@ def listing_rows(data: StandingOfferData) -> list[tuple[str, str]]:
         rate_value = f"{BLANK}{text.RATE_VI} / {text.RATE_EN}"
         term = f"{BLANK} tháng / months"
         instalment_days = f"{WORKING_DAYS_PER_MONTH} × M ngày làm việc / working days"
+    share = share_pct(terms.revenue_share) if terms is not None else None
     return [
         (labels["listing_id"], data.sme.application_ref),
         (labels["target"], target),
@@ -246,7 +249,7 @@ def listing_rows(data: StandingOfferData) -> list[tuple[str, str]]:
         (labels["acceptance_deadline"], text.ACCEPTANCE_DEADLINE),
         (labels["disbursement_date"], text.DISBURSEMENT_DATE),
         (labels["min_ticket"], _vnd_plain(data.min_ticket_vnd)),
-        (labels["revenue_share"], f"{BLANK}{text.REVENUE_SHARE_SUFFIX}"),
+        (labels["revenue_share"], f"{share or BLANK}{text.REVENUE_SHARE_SUFFIX}"),
     ]
 
 

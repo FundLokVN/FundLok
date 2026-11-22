@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | v1.0 IMPLEMENTED (Phat, `d2ea9ee`). **v1.1 AMENDMENT: DRAFT, for Phat's review** (Edward, D-050). Section 3, rules 1 and 3, and section 8 change; everything not mentioned stays as v1.0 |
+| **Status** | v1.0 IMPLEMENTED (Phat, `d2ea9ee`). **v1.1 IMPLEMENTED** (Phat, branch `feature/projects/borrow-again`, migration `d5c1e8a7f302`; D-050). Section 3, rules 1 and 3, and section 8 change; everything not mentioned stays as v1.0 |
 | **Owner** | Phat |
 | **Implementer(s)** | v1.0: Phat. v1.1 (HANDOFF-06 T6): a Claude Sonnet implementer after Phat and Edward approve this version; Phat reviews the PR (shared file `app/lending/models.py`, `app/projects`) |
 | **Module** | `app/projects/borrower.py`, `app/projects/service.py`, `app/market/funding.py`, `app/direct_transfer/windows.py`; migration `6664b74ae183` (v1.0) and a new one (v1.1); `app/lending/models.py` (`Project`), `app/direct_transfer/models.py` (index only) |
@@ -27,7 +27,7 @@ D-016 (Lok, 2026-10-28): at most 100M outstanding per borrower on FundLok, and o
 - The scope of the borrower cap (FundLok loans only, or also declared outside debt; `cross_platform_cap_vnd` is 400M, provisional): a separate decision, still open (open question 2).
 - Merging or cleaning existing rows that break the rules: the migration lists them and stops (section 6, rule 6).
 - A "returned to SME" application state (TD-02).
-- Copying a closed project's details into a new one: a UI convenience for Phat, not a rule.
+- ~~Copying a closed project's details into a new one~~: built as the repeat request (section 4, `POST /projects/repeat`, Phat 2026-11-19).
 
 ## 3. Data Model
 
@@ -67,6 +67,21 @@ No change to request or response shapes.
 | 409 | `TAX_CODE_NOT_VERIFIED_BUSINESS` | The SME's business is verified (approved KYB with a tax code) and this is another business |
 | 409 | `SME_HAS_OPEN_PROJECT` | The SME has a project in progress (rule 3). The friendly pre-check |
 | 409 | `DUPLICATE_TAX_CODE` | The business already has a project **in progress** under another account, however its code was written (the database index). A business whose earlier projects have all ended is **not** refused |
+
+### `POST /projects/repeat` (added 2026-11-19)
+
+A business borrowing again sends only `{requested_amount, duration_months}` (the same bounds as `POST /projects`; the
+term defaults to the last request's). The new project copies the company details of the SME's newest ended project
+whose application staff approved; the application copies its purpose, repayment preference, self-reported figures,
+guarantor address, and its uploaded documents (each file copied to the new application's own key) with their parsed
+summaries, and is `SUBMITTED` at once. The signed listing documents are not copied: they carry the approved terms and
+are signed again after this request's approval. Staff review and the score run are unchanged.
+
+| Status | Code | When |
+|---|---|---|
+| 409 | `SME_HAS_OPEN_PROJECT` | The SME has a project in progress |
+| 409 | `NO_APPROVED_REQUEST` | No ended project with an approved application to copy: the business uses the full application |
+| 422 | | Amount or term outside the engine's bounds |
 
 ### `POST /admin/projects/{project_id}/funding-window`, and opening on its own (`publish_if_ready`)
 
@@ -120,19 +135,26 @@ v1.0, `tests/projects/test_one_borrower.py` (kept; the two marked are reworded b
 - [x] `test_a_listing_cannot_open_for_a_business_other_than_the_one_verified`
 - [x] `test_the_database_holds_one_live_listing_per_sme`
 
-v1.1, new (HANDOFF-06 T6):
+v1.1, as built (`tests/projects/test_one_borrower.py`, `tests/projects/test_one_borrower_migration.py`):
 
-- [ ] `test_business_can_borrow_again_after_full_repayment`
-- [ ] `test_business_can_reapply_straight_away_after_a_failed_round`
-- [ ] `test_business_can_reapply_after_every_application_is_rejected`
-- [ ] `test_a_second_open_project_for_a_business_is_refused_by_the_database`
-- [ ] `test_the_same_tax_code_can_be_used_on_a_new_project_once_the_old_one_is_closed`
-- [ ] `test_project_closes_when_its_last_round_is_repaid_failed_or_cancelled`
-- [ ] `test_closing_a_project_is_idempotent_and_writes_one_audit_row`
-- [ ] `test_a_closed_project_is_never_reopened`
-- [ ] `test_open_funding_window_refuses_a_second_live_listing_for_an_sme`
-- [ ] `test_migration_closes_already_ended_projects_before_adding_the_indexes`
-- [ ] `test_migration_stops_when_a_business_has_two_open_projects`
+- [x] `test_business_can_borrow_again_after_full_repayment`: facility SETTLED, round REPAID, project CLOSED; the same
+  business starts, submits and gets approved a new request under its own tax code; still refused while repaying
+- [x] `test_business_can_reapply_straight_away_after_a_failed_round` (the SME declines: FAILED)
+- [x] `test_project_closes_when_its_round_fails_below_the_minimum_or_is_cancelled`
+- [x] `test_business_can_reapply_after_its_application_is_rejected`: also closing twice writes one audit row, and a
+  second account for the same business is refused by the database while the new project is open
+- [x] `test_migration_closes_ended_projects_and_downgrade_refuses_shared_codes`
+- [x] `test_a_repeat_request_copies_the_last_approved_request_and_goes_to_review`
+- [x] `test_a_repeat_request_takes_a_new_term_and_needs_an_approved_request_to_copy`
+- A second live listing for one SME: `test_an_sme_repaying_a_loan_can_neither_start_nor_list_another_project` and
+  `test_the_database_holds_one_live_listing_per_sme` (v1.0, unchanged)
+
+Not built from this version: the migration's check for two open projects of one business (every project was unique
+when it runs, so it cannot find one), and the per-SME live-listing check inside `open_funding_window` (open question
+3): the index still refuses it, reported as SME_HAS_LIVE_LISTING. `close_project_if_finished` is called where a round
+becomes REPAID, FAILED (SME declines or nobody pays, below the minimum, nothing repays from approval) or CANCELLED, and
+where staff reject an application. A closed project's signed documents still read as published
+(`app/loans/signing.py`), and GET /projects lists newest first.
 
 ## 9. Open Questions
 
@@ -149,4 +171,5 @@ v1.1, new (HANDOFF-06 T6):
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 1.0 | 2026-11-14 | Phat / Claude | First version, with the implementation |
+| 1.1 | 2026-11-19 | Phat / Claude | Implemented: migration `d5c1e8a7f302`, `borrower.close_project_if_finished`, section 8 as built |
 | 1.1 | 2026-11-15 | Edward / Claude | One project in progress per business, not one ever (D-040, D-050). Drops `uq_projects_tax_business` and `projects_tax_id_key`; adds two partial unique indexes on open projects; `projects.status = 'CLOSED'` is set when a project ends (rule 3); migration backfills and checks first. Resolves open questions 1 and 3. Draft: needs Phat's review |

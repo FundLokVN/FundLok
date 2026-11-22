@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.database import engine
 from app.core.timezone import ICT
 from app.direct_transfer import close, reservation, tranches, windows
+from app.direct_transfer.config import DirectTransferParams
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.models import (
     CicEvent,
@@ -159,8 +160,23 @@ async def test_open_window_requires_declaration_and_borrower_cap(world):
             storage=world.storage, params=world.params,
         )
     assert info.value.code == "DECLARATION_REQUIRED"
-    # PROVISIONAL(Q-D12): target + declared outside debt may not exceed the 400M cross-platform cap
-    await expect_error(open_window(world, declared=301 * M), "BORROWER_CAP_EXCEEDED", 409)
+    await expect_error(open_window(world, declared=1 * M), "BORROWER_CAP_EXCEEDED", 409)  # 100M target + 1M > 100M
+
+
+async def test_borrower_cap_is_100m_including_declared_outside_debt(db_session):
+    # D-054: target plus the SME's declared outside debt may not exceed 100M per legal entity.
+    world = await make_world(db_session, target=60 * M)
+    await expect_error(open_window(world, declared=50 * M), "BORROWER_CAP_EXCEEDED", 409)
+    window = await open_window(world, declared=40 * M)
+    assert window.status == "OPEN" and window.declared_outside_debt_vnd == 40 * M
+
+
+async def test_per_listing_cap_unchanged(db_session):
+    # D-054 leaves the per-listing cap (max_target_vnd) at 100M: a full 100M listing with no outside debt opens.
+    assert DirectTransferParams().max_target_vnd == 100 * M
+    await expect_error(open_window(await make_world(db_session, target=101 * M)), "TARGET_ABOVE_CAP", 400)
+    window = await open_window(await make_world(db_session, target=100 * M))
+    assert window.target_vnd == 100 * M
 
 
 async def test_open_window_other_users_listing_returns_404(world, db_session):

@@ -157,6 +157,40 @@ class InvestorTrancheOut(TrancheOut):
     project_id: UUID | None = None
     project_name: str | None = None
     term_months: int | None = None
+    # Day-14 transfer rule (day14-transfer-rule.md 4.4): from the latest receipt. PENDING_CHECK: a receipt is in but
+    # its fields are not read yet. Null: no receipt, or the ticket never had a QR code.
+    payment_timing: Literal["ON_TIME", "LATE", "PENDING_CHECK"] | None = None
+    late_reason: Literal["EXPIRED_CODE", "NO_QR_CODE", "AFTER_CUTOFF"] | None = None
+    # Confirmed automatically (the SME's 24 hours of silence): the SME may still dispute it until then (A5).
+    dispute_until: dt.datetime | None = None
+
+
+class TopUpPledgeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    window_id: UUID
+    listing_title: str | None = None
+    amount_vnd: int
+    recorded_at: dt.datetime
+    status: Literal["AWAITING_UNLOCK", "AWAITING_SIGNING", "SIGNED", "SME_CONFIRMED", "VOID"]
+
+
+class LenderStandingOut(BaseModel):
+    """The lender's lock after a Day-14 no-show or late money (commit-then-accept-flow.md 4.7)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    status: Literal["GOOD", "LOCKED", "CLOSED"]
+    no_show_count: int
+    locked_at: dt.datetime | None = None
+    unlock_requires: list[Literal["EKYC", "ACKNOWLEDGEMENT"]]
+    acknowledgement_sentence: str | None = None
+    top_up_pledges: list[TopUpPledgeOut]
+
+
+class UnlockStandingIn(BaseModel):
+    acknowledgement: str = Field(min_length=1, max_length=500)
 
 
 class SmeTicketOut(BaseModel):
@@ -172,6 +206,8 @@ class SmeTicketOut(BaseModel):
     attested_at: dt.datetime | None = None
     confirm_deadline: dt.datetime | None = None
     review_cause: str | None = None
+    # Confirmed automatically (silence for 24 hours): a dispute with a bank statement stays open until then (A5).
+    dispute_until: dt.datetime | None = None
 
 
 class SmeRoundOut(FundingWindowOut):
@@ -287,6 +323,26 @@ class RepaymentRejectionOut(BaseModel):
     decided_at: dt.datetime
 
 
+class ExtensionFilingOut(BaseModel):
+    """The business's monthly revenue filing and the automatic extension it gave (automatic-extension.md)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    window_id: UUID
+    period_month: dt.date
+    evidence_kind: Literal["TAX_DECLARATION", "BANK_INFLOW"]
+    revenue_vnd: int
+    due_vnd: int
+    shortfall_vnd: int
+    # EXTENDED: every investor's loan is Δ working days longer from start_date; NO_SHORTFALL: revenue covered the
+    # month; NO_ROOM: no days left before the backstop.
+    status: Literal["EXTENDED", "NO_SHORTFALL", "NO_ROOM"]
+    delta_days: int
+    start_date: dt.date | None = None
+    filed_at: dt.datetime
+
+
 class InvestmentDueOut(BaseModel):
     """What the business owes one investor on one investment now: every day due today or earlier that it has not
     marked paid, as one transfer to the investor's account (one VietQR for the whole amount, under the
@@ -304,6 +360,9 @@ class InvestmentDueOut(BaseModel):
     vietqr_payload: str | None
     # Set when a day due here is due again because staff denied its receipt.
     rejection: RepaymentRejectionOut | None = None
+    # Late interest on the days here past their due date, to today (late-interest.md): the business pays it to the
+    # investor directly, apart from the VietQR amount. FundLok never collects it.
+    late_interest_vnd: int = 0
 
 
 class RepaymentReceiptAccountOut(BaseModel):
@@ -325,7 +384,7 @@ class RepaymentReceiptDayOut(BaseModel):
     gross_vnd: int
     tax_withheld_vnd: int
     net_vnd: int
-    status: Literal["DUE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
+    status: Literal["DUE", "LATE", "PRESUMED_PAID", "REPORTED_MISSED", "MATCHED"]
 
 
 class RepaymentSystemCheckOut(BaseModel):

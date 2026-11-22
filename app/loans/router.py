@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.loans.schemas import (
+    GuarantorCodeOut,
+    GuarantorSignRequest,
     GuarantorAddressIn,
     LoanApplicationCreate,
     LoanApplicationFiguresIn,
@@ -169,6 +171,10 @@ async def _listing_documents(db: AsyncSession, application, user: User) -> Listi
         service_agreement=one(signing.SERVICE_AGREEMENT),
         standing_offer=one(signing.STANDING_OFFER),
         loan_contract=one(signing.LOAN_CONTRACT),
+        guarantor_missing=state.guarantor_missing,
+        guarantor_signed_by=state.guarantor_signed_by,
+        guarantor_signed_at=state.guarantor_signed_at,
+        guarantor_phone=state.guarantor_phone,
     )
 
 
@@ -305,6 +311,64 @@ async def upload_signed_listing_document(
         now=datetime.now(timezone.utc),
         ip_address=request.client.host if request.client else None,
     )
+    await db.commit()
+    return await _listing_documents(db, application, current_user)
+
+
+@router.post("/applications/{application_id}/guarantor-signature/code", response_model=GuarantorCodeOut)
+async def send_guarantor_signature_code(
+    application_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """Send the Personal Guarantor the Zalo one-time code that signs the SME-signed Standing Offer and Loan Contract
+    template on file (Money flow FINAL v1.0, Day 0). The guarantor is the signing user, so the code goes to this
+    account's verified phone. One a minute, five a day, good for five minutes. Owner only."""
+    from app.loans import guarantor_otp, signing
+    from app.loans.agreement.service import owned_application
+
+    application = await owned_application(db, application_id, current_user)
+    row = await signing.send_guarantor_code(
+        db, application=application, user=current_user, now=datetime.now(timezone.utc)
+    )
+    out = GuarantorCodeOut(
+        phone=guarantor_otp.masked_phone(row.phone),
+        channel=row.channel,
+        expires_in=int(guarantor_otp.CODE_TTL.total_seconds()),
+        resend_in=int(guarantor_otp.RESEND_COOLDOWN.total_seconds()),
+    )
+    await db.commit()
+    return out
+
+
+@router.post("/applications/{application_id}/guarantor-signature", response_model=ListingDocumentsOut)
+async def sign_as_guarantor(
+    application_id: UUID,
+    body: GuarantorSignRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The Personal Guarantor signs the Standing Offer and the Loan Contract template with the Zalo code; with the
+    three SME-signed documents on file this publishes the project. Owner only."""
+    from app.loans import guarantor_otp, signing
+    from app.loans.agreement.service import owned_application
+
+    application = await owned_application(db, application_id, current_user)
+    try:
+        await signing.sign_as_guarantor(
+            db,
+            application=application,
+            user=current_user,
+            code=body.code,
+            now=datetime.now(timezone.utc),
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    except guarantor_otp.GuarantorCodeError as exc:
+        if exc.persist:
+            await db.commit()  # the wrong guess counts
+        raise
     await db.commit()
     return await _listing_documents(db, application, current_user)
 

@@ -1,10 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin import analytics as admin_analytics
 from app.admin import fees as admin_fees
 from app.admin import funding as admin_funding
 from app.admin.fee_schemas import AdminFeeInvoiceOut, AdminFeeMarkPaidRequest, FeeInvoiceFilter
@@ -15,6 +17,7 @@ from app.admin.access_log import audit_admin_read
 from app.admin.schemas import (
     AdminSignatureCheck,
     AdminFundingActivityOut,
+    AdminFundingAnalyticsOut,
     AdminFundingRoundOut,
     AdminInvestorTransferOut,
     AdminPaymentAccountDecisionRequest,
@@ -25,6 +28,7 @@ from app.admin.schemas import (
     AdminOverdueRepaymentsOut,
     AdminRepaymentPreviewOut,
     AdminRepaymentReceiptOut,
+    AdminLateMoneyApprovalRequest,
     AdminTransferDecisionRequest,
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
@@ -431,6 +435,41 @@ async def list_funding_rounds(
     return await admin_funding.list_rounds(db, open_only=status == "OPEN")
 
 
+class WaiveLockRequest(BaseModel):
+    window_id: UUID
+    reason: Literal["FORCE_MAJEURE", "BANK_OUTAGE"]
+    note: str
+
+
+class LenderStandingAdminOut(BaseModel):
+    investor_id: UUID
+    status: str
+    no_show_count: int
+
+
+@router.post("/funding/lenders/{investor_id}/waive-lock", response_model=LenderStandingAdminOut)
+async def waive_lender_lock(
+    investor_id: UUID,
+    body: WaiveLockRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Lift a Day-14 lock on the investor's proof of force majeure or a bank outage (loan contract Art. 5.3, Money
+    flow FINAL v1.0): the lender is GOOD again and the miss is not counted. Audited with the staff member."""
+    from app.direct_transfer import standing as lender_standing
+    from app.direct_transfer.errors import DirectTransferError
+
+    try:
+        view = await lender_standing.waive_lock(
+            db, investor_id=investor_id, window_id=body.window_id, reason=body.reason, note=body.note,
+            staff_id=current_user.id, now=datetime.now(timezone.utc),
+        )
+    except DirectTransferError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail, headers={"X-Error-Code": exc.code}) from exc
+    await db.commit()
+    return LenderStandingAdminOut(investor_id=investor_id, status=view.status, no_show_count=view.no_show_count)
+
+
 @router.post("/funding/rounds/{window_id}/advance", response_model=AdminFundingRoundOut)
 async def advance_funding_round(
     window_id: UUID,
@@ -485,6 +524,17 @@ async def mark_fee_invoice_paid(
         actor=current_user,
         ip_address=request.client.host if request.client else None,
     )
+
+
+@router.get("/funding/analytics", response_model=AdminFundingAnalyticsOut)
+async def read_funding_analytics(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Platform-wide totals for the admin overview: what investors have put into businesses and what businesses
+    have repaid them, with the last 12 months of each. Totals only, no names or accounts, so the read is not
+    access-logged (app/admin/analytics.py)."""
+    return await admin_analytics.funding_analytics(db)
 
 
 @router.get(
@@ -610,6 +660,26 @@ async def decide_investor_receipt(
         db,
         transfer_id,
         outcome=body.outcome,
+        reason=body.reason,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.post("/funding/transfers/{transfer_id}/approve-late-money", response_model=AdminInvestorTransferOut)
+async def approve_late_money(
+    transfer_id: UUID,
+    body: AdminLateMoneyApprovalRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Approve a clean Day-14 late-money transfer into the round, until the 15:30 receipt cut-off. The ticket becomes
+    an ordinary paid one (the business still has 24 hours to check the money). 409: NOT_LATE_MONEY,
+    ALREADY_APPROVED, LATE_MONEY_APPROVAL_CLOSED, CAPACITY_EXCEEDED, DUPLICATE_BANK_TXN. Audited."""
+    return await admin_funding.approve_late_money_transfer(
+        db,
+        transfer_id,
         reason=body.reason,
         actor=current_user,
         ip_address=request.client.host if request.client else None,

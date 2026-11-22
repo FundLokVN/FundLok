@@ -17,12 +17,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.direct_transfer import extension
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.config import DEFAULT_PARAMS
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.evidence import store_evidence_file
 from app.direct_transfer.models import FundingWindow, PaymentAccount, RepaymentDay, Tranche, Transfer
-from app.direct_transfer.repayment import mark_days_paid, report_missing_day, todays_payments, tranche_schedule
+from app.direct_transfer.repayment import (
+    late_interest_vnd,
+    mark_days_paid,
+    report_missing_day,
+    todays_payments,
+    tranche_schedule,
+)
 from app.direct_transfer.schemas import RepaymentRowOut, TodaysPaymentsOut
 from app.direct_transfer.tranches import mask_name
 from app.direct_transfer.vietqr import build_vietqr_payload
@@ -37,6 +44,7 @@ from app.market.repayment_receipt_check import (
     record_refused,
 )
 from app.market.schemas import (
+    ExtensionFilingOut,
     InvestmentDueOut,
     MarkDaysPaidCreate,
     ProjectedScheduleOut,
@@ -88,7 +96,8 @@ async def mark_paid(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     """The business says it paid these days (due today or earlier): DUE -> PRESUMED_PAID. Each investor then has
-    two working days to report a day that did not arrive. Returns the rows as they now stand."""
+    24 hours, from now, to report a day that did not arrive. A receipt (`receipt_file_id`) is required: without proof
+    a day becomes LATE at 18:00 on its due date. Returns the rows as they now stand."""
     now = _now()
     try:
         days = await mark_days_paid(
@@ -141,8 +150,16 @@ async def read_investment_due(
     tranche = await _business_tranche(db, tranche_id, current_user.id)
     today = on_date or ict_date(_now())
     rows = await tranche_schedule(db, tranche_id=tranche_id, user_id=current_user.id)
-    due = [row for row in rows if row["status"] == "DUE" and row["due_date"] <= today]
+    due = [row for row in rows if row["status"] in ("DUE", "LATE") and row["due_date"] <= today]
     net = sum(row["net_vnd"] for row in due)
+    window = await db.get(FundingWindow, tranche.window_id)
+    late_interest = sum(
+        late_interest_vnd(
+            row["principal_vnd"], row["interest_vnd"], annual_rate_pct=window.annual_rate_pct,
+            due_date=row["due_date"], received_on=today,
+        )
+        for row in due
+    )
     account = await db.get(PaymentAccount, tranche.investor_account_id) if tranche.investor_account_id else None
     qr = None
     if account is not None and account.bank_bin and net > 0:
@@ -181,6 +198,7 @@ async def read_investment_due(
         payee=rows[0]["payee"] if rows else None,
         vietqr_payload=qr,
         rejection=rejection,
+        late_interest_vnd=late_interest,
     )
 
 
@@ -429,3 +447,49 @@ async def confirm_repayment_receipt(
     return await repayment_receipts.confirm_receipt(
         db, receipt_id, investor=current_user, ip_address=request.client.host if request.client else None
     )
+
+
+@router.post("/rounds/{window_id}/extension-filings", response_model=ExtensionFilingOut, status_code=201)
+async def file_extension(
+    window_id: UUID,
+    request: Request,
+    period_month: str = Form(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    revenue_vnd: int = Form(..., ge=0),
+    evidence_kind: Literal["TAX_DECLARATION", "BANK_INFLOW"] = Form(...),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The business files a month's revenue (`period_month`, YYYY-MM) by the 5th of the next month, with that month's
+    tax declaration or bank inflow statement (automatic-extension.md, D-042). Decided at once, with no staff step:
+    EXTENDED (every investor's loan is the same Δ working days longer, the daily amount never rises), NO_SHORTFALL or
+    NO_ROOM. 409 FILING_CLOSED outside the 1st to the 5th, LATE_DAY_BLOCKS_FILING while a day is late or in dispute."""
+    limit = DEFAULT_PARAMS.max_evidence_bytes
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(status_code=413, detail="File too large", headers={"X-Error-Code": "FILE_TOO_LARGE"})
+    content_type = funding.sniff_receipt_type(content)
+    if content_type is None:
+        raise HTTPException(
+            status_code=415, detail="Upload a PDF, PNG, JPEG or WEBP", headers={"X-Error-Code": "UNSUPPORTED_TYPE"}
+        )
+    try:
+        filing = await extension.file_extension(
+            db, window_id=window_id, sme_user_id=current_user.id,
+            period_month=dt.date.fromisoformat(f"{period_month}-01"), revenue_vnd=revenue_vnd,
+            evidence_kind=evidence_kind, content=content, content_type=content_type,
+            filename=(file.filename or "")[:255] or None, storage=funding.evidence_storage(), now=_now(),
+        )
+    except DirectTransferError as exc:
+        _raise_mapped(exc)
+    append_audit(
+        db,
+        entity_type="FUNDING_WINDOW",
+        entity_id=window_id,
+        action="EXTENSION_FILED",
+        actor_id=current_user.id,
+        after_state={"filing_id": str(filing.id), "status": filing.status, "delta_days": filing.delta_days},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return ExtensionFilingOut.model_validate(filing)

@@ -26,6 +26,7 @@ from app.core.database import get_db
 from app.lending.router import router as lending_router
 from app.loans.router import router as loans_router
 from app.market.router import router as market_router
+from app.market.commitments_router import router as commitments_router
 from app.market.funding_router import router as funding_router
 from app.market.repayment_router import router as repayment_router
 from app.oauth.router import router as oauth_router
@@ -43,6 +44,7 @@ from app.gverify.router import kyb_router as gverify_kyb_router, router as gveri
 from app.contact.router import router as contact_router
 from app.notifications.router import router as notifications_router
 from app.rates.router import admin_rates_router, router as rates_router
+from app.blog.router import admin_blog_router, router as blog_router
 
 # /docs, /redoc and /openapi.json are development tools. Served publicly they
 # hand any visitor the full route inventory and request/response schemas of the
@@ -234,6 +236,7 @@ app.include_router(uploads_router)
 app.include_router(contracts_router)
 app.include_router(market_router)
 app.include_router(funding_router)
+app.include_router(commitments_router)
 app.include_router(repayment_router)
 app.include_router(payments_router)
 app.include_router(banking_router)
@@ -243,6 +246,8 @@ app.include_router(contact_router)
 app.include_router(notifications_router)
 app.include_router(rates_router)
 app.include_router(admin_rates_router)
+app.include_router(blog_router)
+app.include_router(admin_blog_router)
 app.include_router(admin_email_router)
 app.include_router(scheduled_jobs_router)
 

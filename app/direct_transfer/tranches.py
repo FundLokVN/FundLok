@@ -12,14 +12,24 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.direct_transfer import day14
 from app.direct_transfer.calendar_utils import calendar_deadline
 from app.direct_transfer.config import DirectTransferParams, resolve
+from app.direct_transfer.day14_times import window_cutoffs
 from app.direct_transfer.disputes import open_tranche_dispute
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
 from app.direct_transfer.evidence import log_event, store_evidence_file
-from app.direct_transfer.models import FundingWindow, PaymentAccount, Tranche, Transfer
+from app.direct_transfer.models import Dispute, FundingWindow, PaymentAccount, Tranche, Transfer
 from app.direct_transfer.refunds import create_refund_transfer
-from app.direct_transfer.receipts import ExpectedTransfer, ReceiptExtractor, ReceiptFields, check_receipt
+from app.direct_transfer.receipts import (
+    AMOUNT_MISMATCH,
+    REFERENCE_MISSING,
+    ExpectedTransfer,
+    ReceiptExtractor,
+    ReceiptFields,
+    _normalize_memo,
+    check_receipt,
+)
 from app.direct_transfer.signing import Signer, SignerIdentity
 from app.direct_transfer.storage import EvidenceStorage
 from app.direct_transfer.tranche_state import transition_tranche
@@ -61,6 +71,15 @@ async def _sme_tranche(db: AsyncSession, tranche_id: UUID, sme_user_id: UUID, *,
 
 async def resolve_kyc_name(db: AsyncSession, user_id: UUID) -> str:
     """The investor's KYC name: latest APPROVED eKYC full name, else the account's full name."""
+    name = await approved_kyc_name(db, user_id)
+    if name:
+        return name
+    user = await db.get(User, user_id)
+    return (user.full_name or "") if user else ""
+
+
+async def approved_kyc_name(db: AsyncSession, user_id: UUID) -> str | None:
+    """The latest APPROVED eKYC full name, or None. Unlike resolve_kyc_name, never the self-editable full_name."""
     from app.gverify.models import STATUS_APPROVED, GVerifyVerification
 
     row = (
@@ -76,10 +95,7 @@ async def resolve_kyc_name(db: AsyncSession, user_id: UUID) -> str:
             .limit(1)
         )
     ).scalar_one_or_none()
-    if row:
-        return row
-    user = await db.get(User, user_id)
-    return (user.full_name or "") if user else ""
+    return row or None
 
 
 # --------------------------------------------------------------------------- #
@@ -106,6 +122,9 @@ async def accept_tranche(
     if now > tranche.hold_expires_at:
         raise conflict("HOLD_EXPIRED", "The reservation hold has expired")
     window = await db.get(FundingWindow, tranche.window_id)
+    cutoffs = window_cutoffs(window, p)
+    if cutoffs and now >= cutoffs.pay_deadline_at:
+        raise conflict("PAY_DEADLINE_PASSED", "Signing for this round closed at 14:45 on disbursement day")
     if window.status not in ("OPEN", "FULL") or now >= window.window_end:
         raise conflict("WINDOW_NOT_OPEN", "The window is not open")
     investor = await db.get(User, investor_id)
@@ -139,16 +158,36 @@ class PaymentInstructions:
     vietqr_payload: str
     hold_expires_at: dt.datetime
     warning: str
+    # Day-14 transfer rule: the QR's own code (also the memo) and its validity, and the round's cut-offs.
+    qr_code: str | None = None
+    qr_issued_at: dt.datetime | None = None
+    qr_expires_at: dt.datetime | None = None
+    pay_deadline_at: dt.datetime | None = None
+    receipt_deadline_at: dt.datetime | None = None
+    # The server's clock: the app counts the QR down on it, not on the device's.
+    server_time: dt.datetime | None = None
 
 
-async def payment_instructions(db: AsyncSession, *, tranche_id: UUID, investor_id: UUID, now: dt.datetime) -> PaymentInstructions:
+async def payment_instructions(
+    db: AsyncSession, *, tranche_id: UUID, investor_id: UUID, now: dt.datetime, params: DirectTransferParams | None = None
+) -> PaymentInstructions:
+    """Where and how to pay, with the current QR. The first call after signing issues the first QR (writes a
+    payment_qrs row: the caller commits). Later calls return the latest QR, expired or not."""
     tranche = await _investor_tranche(db, tranche_id, investor_id)
+    window = await db.get(FundingWindow, tranche.window_id)
+    if tranche.status == "RESERVED" and window.flow == "COMMIT_THEN_ACCEPT":
+        # Day 14 (Money flow FINAL v1.0): the VietQR appears only once the lender signed its loan contract.
+        raise conflict("CONTRACT_REQUIRED", "Sign your loan contract first")
     if tranche.status != "SIGNED":
         raise conflict("TRANCHE_NOT_SIGNED", "Sign the acceptance first")
-    window = await db.get(FundingWindow, tranche.window_id)
+    cutoffs = window_cutoffs(window, params)
+    if cutoffs and now >= cutoffs.pay_deadline_at:
+        raise conflict("PAY_DEADLINE_PASSED", "Payments for this round closed at 14:45 on disbursement day")
+    qr = await day14.current_qr(db, tranche=tranche, window=window, now=now, params=params)
     account = await db.get(PaymentAccount, window.sme_payment_account_id)
     payload = build_vietqr_payload(
-        bank_bin=account.bank_bin, account_number=account.account_number, amount_vnd=tranche.amount_vnd, memo=tranche.reference_code
+        bank_bin=account.bank_bin, account_number=account.account_number, amount_vnd=tranche.amount_vnd,
+        memo=qr.code if qr else tranche.reference_code,
     )
     return PaymentInstructions(
         bank_name=account.bank_name,
@@ -160,6 +199,12 @@ async def payment_instructions(db: AsyncSession, *, tranche_id: UUID, investor_i
         vietqr_payload=payload,
         hold_expires_at=tranche.hold_expires_at,
         warning=PAYMENT_WARNING,
+        qr_code=qr.code if qr else None,
+        qr_issued_at=qr.issued_at if qr else None,
+        qr_expires_at=qr.expires_at if qr else None,
+        pay_deadline_at=cutoffs.pay_deadline_at if cutoffs else None,
+        receipt_deadline_at=cutoffs.receipt_deadline_at if cutoffs else None,
+        server_time=now,
     )
 
 
@@ -214,13 +259,16 @@ async def submit_receipt(
 
     tranche = await _investor_tranche(db, tranche_id, investor_id, lock=True)
     window = await lock_window(db, tranche.window_id)
+    cutoffs = window_cutoffs(window, p)
+    if cutoffs and now > cutoffs.receipt_deadline_at:
+        raise conflict("RECEIPT_DEADLINE_PASSED", "Receipts for this round could be uploaded until 15:30")
 
     # A hold that has lapsed but whose job has not yet run is treated as lapsed (lazy expiry): the money may have
     # moved, so the receipt is accepted as a LATE_RECEIPT for staff rather than refused.
     if tranche.status in ("RESERVED", "SIGNED") and tranche.receipt_submitted_at is None and now > tranche.hold_expires_at:
         await _expire_now(db, tranche, now)
     late = tranche.status == "EXPIRED"
-    if late and window.status not in ("OPEN", "FULL", "CLOSING"):
+    if late and window.status not in ("OPEN", "FULL", "CLOSING", "AWAITING_PAYMENT"):
         raise conflict("TRANCHE_NOT_SIGNED", "The window has closed for this ticket")
     if not late and tranche.status != "SIGNED":
         raise conflict("TRANCHE_NOT_SIGNED", "The ticket is not awaiting a receipt")
@@ -333,6 +381,11 @@ async def apply_receipt_fields(
     failures = check_receipt(
         fields, expected, now=now, future_skew=dt.timedelta(minutes=params.receipt_future_skew_minutes)
     )
+    timing = await day14.record_payment_timing(
+        db, tranche=tranche, window=window, transfer=transfer, memo=fields.memo, transferred_at=fields.transferred_at,
+        params=params,
+    )
+    late_money = day14.is_late_money(window, timing, params)
     transfer.failure_codes = failures
     await log_event(
         db, entity_type="TRANSFER", entity_id=transfer.id, event_type="FIELDS_ENTERED", now=now, actor_id=actor_id,
@@ -346,7 +399,15 @@ async def apply_receipt_fields(
         # Late receipt: record the checks only; staff decide the outcome.
         transfer.check_status = "MATCHED" if not failures else "MISMATCH"
         return
-    if not failures:
+    if not failures and late_money:
+        # Day-14 late money: the receipt is right but outside its QR's 15 minutes (or after 14:45). It does not join
+        # the loan; the 15:00 step turns it into the lender's top-up (day14.process_day14_no_shows).
+        transfer.check_status = "MATCHED"
+        await transition_tranche(
+            db, tranche, "UNDER_REVIEW", now=now, actor_id=actor_id, actor_role=actor_role, review_cause="LATE_MONEY",
+            extra={"late_reason": timing.late_reason},
+        )
+    elif not failures:
         transfer.check_status = "MATCHED"
         transfer.confirmation_level = "ATTESTED"
         await transition_tranche(
@@ -523,6 +584,106 @@ async def sme_dispute_tranche(
     return tranche
 
 
+BANK_TXN_MISMATCH = "BANK_TXN_MISMATCH"
+
+
+async def sme_receipt_check(
+    db: AsyncSession,
+    *,
+    tranche_id: UUID,
+    sme_user_id: UUID,
+    content: bytes,
+    content_type: str,
+    filename: str | None,
+    fields: ReceiptFields | None,
+    storage: EvidenceStorage,
+    now: dt.datetime,
+    params: DirectTransferParams | None = None,
+) -> Tranche:
+    """The SME's own screenshot of the money arriving, within its 24 hours (spec 4.6, rule 8). Amount, reference and
+    bank transaction id equal to the lender's: CONFIRMED. A difference: UNDER_REVIEW with a RECEIPT_MISMATCH dispute.
+    `fields` is what the system read off the screenshot; None (OCR off or unsure) confirms on the SME's word, the
+    same as pressing Received."""
+    p = resolve(params)
+    tranche, _ = await _sme_tranche(db, tranche_id, sme_user_id, lock=True)
+    if tranche.status != "ATTESTED":
+        raise DirectTransferError(400, f"Invalid state transition: {tranche.status} → CONFIRMED", "INVALID_TRANSITION")
+    if now >= tranche.confirm_deadline:
+        raise conflict("DISPUTE_WINDOW_CLOSED", "The 24 hours have passed: silence counted as received")
+    evidence = await store_evidence_file(
+        db, storage, owner_user_id=sme_user_id, purpose="RECEIPT", content=content, content_type=content_type,
+        filename=filename, params=p,
+    )
+    failures: list[str] = []
+    if fields is not None:
+        lender = (
+            await db.execute(
+                select(Transfer).where(
+                    Transfer.tranche_id == tranche.id, Transfer.kind == "DISBURSEMENT", Transfer.check_status == "MATCHED"
+                ).order_by(Transfer.created_at.desc())
+            )
+        ).scalars().first()
+        if fields.amount_vnd != tranche.amount_vnd:
+            failures.append(AMOUNT_MISMATCH)
+        if _normalize_memo(tranche.reference_code) not in _normalize_memo(fields.memo or ""):
+            failures.append(REFERENCE_MISSING)
+        if not (lender and lender.bank_txn_id and (fields.bank_txn_id or "").strip().upper() == lender.bank_txn_id.strip().upper()):
+            failures.append(BANK_TXN_MISMATCH)
+    await log_event(
+        db, entity_type="TRANCHE", entity_id=tranche.id, event_type="SME_RECEIPT_UPLOADED", now=now,
+        actor_id=sme_user_id, actor_role="SME", file_sha256=evidence.sha256,
+        payload={"file_id": str(evidence.id), "fields": fields.to_json() if fields else None, "failure_codes": failures},
+    )
+    if not failures:
+        return await sme_confirm_tranche(db, tranche_id=tranche.id, sme_user_id=sme_user_id, now=now, params=p)
+    await transition_tranche(
+        db, tranche, "UNDER_REVIEW", now=now, actor_id=sme_user_id, actor_role="SME", review_cause="RECEIPT_MISMATCH",
+        extra={"failure_codes": failures},
+    )
+    await open_tranche_dispute(
+        db, tranche=tranche, cause="RECEIPT_MISMATCH", now=now, raised_by=sme_user_id, claim_file_id=evidence.id,
+        params=p,
+    )
+    return tranche
+
+
+async def sme_dispute_after_confirmation(
+    db: AsyncSession,
+    *,
+    tranche_id: UUID,
+    sme_user_id: UUID,
+    statement: str,
+    content: bytes,
+    content_type: str,
+    filename: str | None,
+    storage: EvidenceStorage,
+    now: dt.datetime,
+    params: DirectTransferParams | None = None,
+) -> Dispute:
+    """A confirmation by silence stays open to dispute for 30 days, with a bank statement (spec 4.6, rule 8, A5).
+    The ticket keeps its state (it may already be in the loan); staff decide the dispute."""
+    p = resolve(params)
+    tranche, _ = await _sme_tranche(db, tranche_id, sme_user_id, lock=True)
+    if tranche.dispute_until is None or now >= tranche.dispute_until:
+        raise conflict("DISPUTE_WINDOW_CLOSED", "The dispute window has closed")
+    if not (statement and statement.strip()):
+        raise bad_request("Say what is wrong", "EVIDENCE_REQUIRED")
+    statement_file = await store_evidence_file(
+        db, storage, owner_user_id=sme_user_id, purpose="BANK_STATEMENT", content=content, content_type=content_type,
+        filename=filename, params=p,
+    )
+    dispute = await open_tranche_dispute(
+        db, tranche=tranche, cause="SME_DISPUTE", now=now, raised_by=sme_user_id, claim_statement=statement.strip(),
+        claim_file_id=statement_file.id, params=p,
+    )
+    await log_event(
+        db, entity_type="TRANCHE", entity_id=tranche.id, event_type="SME_DISPUTED_AFTER_CONFIRMATION", now=now,
+        actor_id=sme_user_id, actor_role="SME", file_sha256=statement_file.sha256,
+        payload={"dispute_id": str(dispute.id), "dispute_until": tranche.dispute_until.isoformat()},
+    )
+    return dispute
+
+
 async def _void_if_excluded(
     db: AsyncSession, tranche: Tranche, window: FundingWindow, *, now: dt.datetime, params: DirectTransferParams
 ) -> None:
@@ -549,6 +710,7 @@ async def confirm_lapsed_tranches(
         transfer = (
             await db.execute(select(Transfer).where(Transfer.tranche_id == tranche.id, Transfer.kind == "DISBURSEMENT"))
         ).scalars().first()
+        tranche.dispute_until = calendar_deadline(now, days=p.confirmed_dispute_days)
         await transition_tranche(db, tranche, "CONFIRMED", now=now, reason="DISPUTE_WINDOW_LAPSED")
         if transfer is not None:
             transfer.confirmation_level = "CONFIRMED"
@@ -604,6 +766,7 @@ async def list_window_tranches(db: AsyncSession, *, window_id: UUID, sme_user_id
                 "attested_at": t.attested_at,
                 "confirm_deadline": t.confirm_deadline,
                 "review_cause": t.review_cause,
+                "dispute_until": t.dispute_until,
             }
         )
     return out
