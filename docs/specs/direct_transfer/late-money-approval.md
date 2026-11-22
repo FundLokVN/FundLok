@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | IMPLEMENTED (Edward, 2026-11-22; Loc's answers of 21 Nov applied) |
+| **Status** | IMPLEMENTED (Edward, 2026-11-22). Open Question 1 is reopened by Loc's reply of 22 Nov |
 | **Owner** | Edward |
 | **Implementer(s)** | Edward: the service function, the state transition, the thin admin route glue and the tests (Phat reviews `app/admin/`). Phat: the button |
 | **Module** | `app/direct_transfer/late_money.py` (new), `app/direct_transfer/tranche_state.py` (one transition), `app/admin/` (Phat's, calls the service) |
@@ -152,6 +152,6 @@ After approval the ticket is an ordinary paid ticket: the SME's 24-hour receipt 
 
 ## 9. Open Questions
 
-1. **Resolved (Edward, 2026-11-21, on Loc's behalf: "go with the proposal").** Late money staff do **not** approve by 15:30 still becomes a `TopUpPledge` nobody can sign. At launch staff mark the pledge `VOID` with a reason and the SME refunds the lender by a normal bank transfer, recorded as a refund transfer (the existing `create_refund_transfer` path, as for `EXCLUDED_AT_CLOSE`); the lender stays locked until it is recorded. **Not built by this spec:** it needs its own small spec (`late-money-refund.md`) before launch.
-2. **Resolved (Edward, 2026-11-21):** approval keeps the SME's 24-hour receipt check; it does not skip it.
+1. **OPEN (Loc, 22 Nov: "really against" the SME refunding the lender).** Late money staff do **not** approve by 15:30 still becomes a `TopUpPledge` nobody can sign. Loc rejects the SME returning it and wants FundLok to "manage the money, manually at the start and automatically afterwards". That conflicts with the no-custody rule (ADR-009, Decree 94 Art. 11.1.b: FundLok never holds money), so before any refund spec is written Loc must say what "manage" means: staff approve it into the loan (this spec), staff instruct a return that the SME still makes, or FundLok itself moves money (custody, needs a legal answer). No `late-money-refund.md` is written until then. Until it is answered the launch rule is: staff approve before 15:30, and anything else is handled by staff case by case, off the platform.
+2. **Edward, 2026-11-21: approval keeps the SME's 24-hour receipt check; it does not skip it. Loc asked on 22 Nov what that check is; his own AM-E5 rule (SCRUM-610): after the lender's proof the SME has 24 calendar hours to upload its receipt or raise a concern, silence counts as received, and a loan takes effect only once confirmed.**
 3. **Resolved (Edward, 2026-11-21):** 15:30 stays. Staff watch the `NEEDS_ACTION` queue from 14:45, and the 15:35 pledge path catches the rest.
