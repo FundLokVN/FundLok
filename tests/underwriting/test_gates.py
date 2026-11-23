@@ -111,33 +111,34 @@ def test_gate3_fire_rate_is_instrumented(params):
     assert 0.037 <= rate <= 0.038, f"gate 3 fire rate {rate:.4f} outside [0.037, 0.038] on the full golden set"
 
 
-def test_gate_7_disabled_by_default_and_config_switchable(params, tmp_path):
+def test_gate_7_is_enabled_and_config_switchable(params, tmp_path):
+    """Gate 7 (`cic_floor`) is on since wb-v4-20261122 (HANDOFF-07 E12): a CIC score of 500 or below is a final,
+    non-overridable reject. It stays switchable by the params file alone."""
     gate7 = next(g for g in params.gates if g.key == "cic_floor")
-    assert gate7.enabled is False
+    assert gate7.enabled is True
+
+    low = grade(make_valid_input(cic_score=400), params)
+    assert any(g.key == "cic_floor" for g in low.fired_gates) and low.decision == "REJECT"
+    assert grade(make_valid_input(cic_score=500), params).decision == "REJECT"  # "<= 500": 500 itself is rejected
+    assert not any(g.key == "cic_floor" for g in grade(make_valid_input(cic_score=501), params).fired_gates)
 
     original_text = GRADING_PARAMS_PATH.read_text()
     switched_text = original_text.replace(
-        'rule: "cic_score <= 500", enabled: false}',
         'rule: "cic_score <= 500", enabled: true}',
+        'rule: "cic_score <= 500", enabled: false}',
     )
     assert switched_text != original_text
-
     switched_yaml = tmp_path / "grading_params_v1.yaml"
     switched_yaml.write_text(switched_text)
-
     switched_params = load_params(path=switched_yaml)
-    switched_gate7 = next(g for g in switched_params.gates if g.key == "cic_floor")
-    assert switched_gate7.enabled is True
+    assert next(g for g in switched_params.gates if g.key == "cic_floor").enabled is False
+    assert not any(g.key == "cic_floor" for g in grade(make_valid_input(cic_score=400), switched_params).fired_gates)
 
-    inputs = make_valid_input(cic_score=400)  # <= 500
-    result = grade(inputs, switched_params)
-    assert any(g.key == "cic_floor" for g in result.fired_gates)
-    assert result.decision == "REJECT"
 
-    # With gate 7 disabled (the shipped default), the same low CIC score
-    # does not hard-reject on that basis.
-    inputs_default_params = grade(inputs, params)
-    assert not any(g.key == "cic_floor" for g in inputs_default_params.fired_gates)
+def test_a_missing_cic_score_is_not_a_pass(params):
+    """Loc (22 Nov): block until a CIC score is entered. No score means no grade and no rate, not a quiet pass."""
+    result = grade(make_valid_input(cic_score=None), params)
+    assert result.decision == "INSUFFICIENT_DATA" and result.interest_rate_pct is None
 
 
 def test_gate_2_uses_term_over_operating_history_not_inverse():

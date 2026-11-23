@@ -357,3 +357,15 @@ def test_the_grading_input_carries_the_score_not_the_percentage():
 
     built = build_grading_input(**application(), figures=figures(owner_withdrawal_pct=25.0), cic_score=600)
     assert built.owner_withdrawal == owner_withdrawal_score(25.0)
+
+
+class TestCicGateAndTheIndicativeBand:
+    def test_the_cic_floor_is_on_for_real_scoring_but_never_rejects_an_indicative_band(self):
+        # Gate 7 (cic_floor) is enabled since wb-v4-20261122, so a real score run rejects a CIC of 500 or below.
+        # The indicative band only ASSUMES a CIC score, bracketed from CIC_BRACKET_LOW (442, below 500): with the
+        # gate on, its low end would hard-reject and the public rate estimate would break for everyone.
+        assert next(g for g in params().gates if g.key == "cic_floor").enabled is True
+        assert CIC_BRACKET_LOW <= 500
+        band = grade_lite(**application(), figures=figures())
+        assert band.rate_low_pct is not None and band.rate_high_pct is not None
+
