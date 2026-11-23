@@ -12,7 +12,12 @@ from app.core.config import settings
 # async engine -- see app/core/base.py docstring.
 SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
 
-engine = create_async_engine(SQLALCHEMY_DATABASE_URL)
+# Production's database (Neon) closes connections that sit idle (about five minutes). Without a health check the pool
+# hands the next request a dead connection and the first request after a quiet spell fails with
+# "asyncpg ... InterfaceError: connection is closed", in the maintenance-mode middleware every request passes through
+# (prod-api, 23 Nov 2026, POST /internal/jobs/repayment-day). pool_pre_ping tests a connection before it is used and
+# replaces a dead one; pool_recycle retires connections before the server's idle close.
+engine = create_async_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True, pool_recycle=240)
 
 # expire_on_commit=False: without it, attribute access on a committed object
 # after the request handler returns (e.g. during response serialization)
