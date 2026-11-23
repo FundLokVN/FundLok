@@ -240,6 +240,16 @@ def validate_cover(url: str | None, alt: str | None) -> tuple[str | None, str | 
         raise ContentError(f"cover image: {exc}") from None
 
 
+def normalize_keyword(value: str) -> str:
+    """NFC, single spaces, trimmed: 'Vay  vốn ' -> 'Vay vốn'. Keeps the admin's casing."""
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFC", value)).strip()
+
+
+def keyword_key(value: str) -> str:
+    """What two keywords are compared by: case-insensitive, Vietnamese included."""
+    return normalize_keyword(value).casefold()
+
+
 def reading_minutes(plain_text: str) -> int:
     return max(1, math.ceil(len(plain_text.split()) / WORDS_PER_MINUTE))
 
