@@ -13,9 +13,12 @@ from sqlalchemy import (
     desc,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 
 from app.core.base import Base
+
+MAX_SECONDARY_KEYWORDS = 4
+KEYWORD_MAX_LENGTH = 100
 
 # Lowercase words joined by single hyphens, no dots: the front end's proxy
 # skips any path containing "." (fundlok-front-end proxy.ts matcher), so a
@@ -38,6 +41,11 @@ class BlogPost(Base):
     reading_minutes = Column(Integer, nullable=False, server_default="1")
     cover_image_url = Column(String(500), nullable=True)
     cover_alt = Column(String(200), nullable=True)
+    # What the post is written to rank for. Editor-only: they drive the SEO
+    # checklist in the admin and are never rendered into the page (search
+    # engines ignore <meta name="keywords">).
+    focus_keyword = Column(String(100), nullable=True)
+    secondary_keywords = Column(ARRAY(String(100)), nullable=False, server_default="{}")
     status = Column(String(20), nullable=False, server_default="draft")
     # Set on the first publish and kept after an unpublish: it is the date the
     # post first went live, and its presence locks the slug.
@@ -53,6 +61,10 @@ class BlogPost(Base):
         CheckConstraint("status IN ('draft', 'published')", name="chk_blog_posts_status"),
         CheckConstraint(f"slug ~ '{SLUG_PATTERN}'", name="chk_blog_posts_slug"),
         CheckConstraint("reading_minutes > 0", name="chk_blog_posts_reading_minutes"),
+        CheckConstraint(
+            f"cardinality(secondary_keywords) <= {MAX_SECONDARY_KEYWORDS}",
+            name="chk_blog_posts_secondary_keywords",
+        ),
         CheckConstraint(
             "status <> 'published' OR published_at IS NOT NULL",
             name="chk_blog_posts_published_at",

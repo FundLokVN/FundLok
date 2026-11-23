@@ -38,13 +38,14 @@ Secret values (keys, passwords) may show as `valueFrom: secretKeyRef`. That is f
 | 1.10 | `ZALO_ZBS_OTP_TEMPLATE_ID`, `ZALO_APP_ID`, `ZALO_APP_SECRET`, `ZALO_OA_REFRESH_TOKEN`, `ZALO_TOKEN_ENCRYPTION_KEY` | all set | Zalo codes (sign-up, guarantor, lender signing) cannot be sent without them | [ ] |
 | 1.11 | `ZALO_ZBS_DEVELOPMENT_MODE` | unset or `false` | In development mode Zalo delivers only to the OA's admins | [ ] |
 | 1.12 | `PHONE_OTP_CHANNEL` | `zalo` (not `log`) | `log` writes codes to the server log | [ ] |
-| 1.13 | `RECEIPT_OCR_ENABLED` | `1` | Default is off: receipts are not read at all | [ ] |
-| 1.14 | `RECEIPT_AUTO_VERDICT_ENABLED` | `1` only if Loc wants automatic verdicts; otherwise staff decide every receipt | Default is off. Decide with Loc and write the answer here: ______ | [ ] |
+| 1.13 | `RECEIPT_OCR_ENABLED` | `1` | Default is off: receipts are not read at all. Loc (22 Nov): OCR is the first barrier, "a lock on the door", not the only control | [ ] |
+| 1.14 | `RECEIPT_AUTO_VERDICT_ENABLED` | `1` (Loc, 22 Nov: OCR works; the real control is confirming payments against bank statements) | Default is off: a confident read would not accept or deny a receipt | [ ] |
 | 1.15 | `GVERIFY_BASE_URL`, `GVERIFY_API_KEY`, `GVERIFY_PARTNER_CODE` | all set (TPV Datatrust, live) | Without them KYC and KYB cannot run | [ ] |
 | 1.16 | `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | set, bucket exists | Receipts, contracts and signed documents are stored there | [ ] |
 | 1.17 | `NEAC_VERIFY_URL` | unset (default `https://neac.gov.vn/vi/Home/VerifyFileByNeac`) or the value NEAC gave | The signature check on signed PDFs | [ ] |
 | 1.18 | `FRONTEND_URL` | the production web address | Links in emails and Zalo | [ ] |
 | 1.19 | `DEBUG` | unset or `false` | Never on in production | [ ] |
+| 1.20 | `GVERIFY_KYB_REQUIRE_REP_MATCH` | `true` | Default is off. Loc (22 Nov): no separate guarantor; the owner or legal representative signs up, does KYB and KYC, signs and is the guarantor. On, KYB is refused unless the KYC person is a legal representative on the certificate (`NOT_A_REPRESENTATIVE`) | [ ] |
 
 ---
 
@@ -114,8 +115,8 @@ Do each with a real person, real documents and the real service. Write what you 
 |---|---|---|---|
 | 4.1 | Uploaded files are not malware-scanned | Off since #73; not on Loc's launch list | `docs/outstanding-issues.md` TD-05 |
 | 4.2 | Top-up signing is not built | Launch rule: staff approve late money before 15:30 (`late-money-approval.md`) | `late-money-approval.md` |
-| 4.3 | Late money staff do not approve | Becomes a pledge nobody can sign; refund process not decided (Loc rejects the SME refunding; FundLok must not hold money, ADR-009) | `late-money-approval.md` Open Question 1 |
-| 4.4 | Per-lender schedules can differ from a lender's own contract by 1 to 30 đồng | Rounding rule awaits Loc (E2) | HANDOFF-07 E2 |
+| 4.3 | Late money, and what happens after 15:30 | Loc (22 Nov): top-up signing is the intended way and not a launch blocker. At launch staff approve late money into the loan (`late-money-approval.md`) and manage anything later by hand, even after 15:30, outside the platform; the SME does not refund | `docs/outstanding-issues.md` TD-06, D-061 |
+| 4.4 | Per-lender schedules can differ from a lender's own contract by 1 to 30 đồng | Loc agreed the rule (22 Nov); Phat implements `per-lender-rounding.md` (E2) | `per-lender-rounding.md` |
 | 4.5 | `expire_holds_job` and `advance_windows_job` are still ARQ-only (no worker) | Not needed by the commit-then-accept flow; the dispute-deadline step of `advance_windows_job` is not run by any route | `cloud-scheduler-jobs.md` section 10 |
 | 4.6 | Public holidays are not skipped (the schedule bills them) | Decided (TD-01); the contract text must say so (Phat, contracts v1.0) | `docs/outstanding-issues.md` TD-01 |
 

@@ -23,6 +23,7 @@ NOT_PERSONAL_DATA = {
     "/admin/email/oauth/callback": "Google's redirect back; stores the operator's own token, audited as EMAIL_GMAIL_CONNECTED",
     "/admin/blog/posts": "blog posts: marketing content written by staff, no user data",
     "/admin/blog/posts/{post_id}": "one blog post: marketing content written by staff, no user data",
+    "/admin/blog/keyword-usage": "titles and slugs of blog posts sharing a focus keyword, no user data",
 }
 # Admin-only GET routes mounted outside /admin.
 ADMIN_READS_OUTSIDE_ADMIN_PREFIX = {
