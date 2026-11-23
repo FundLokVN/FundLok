@@ -11,6 +11,7 @@ from app.admin import fees as admin_fees
 from app.admin import funding as admin_funding
 from app.admin.fee_schemas import AdminFeeInvoiceOut, AdminFeeMarkPaidRequest, FeeInvoiceFilter
 from app.admin import repayments as admin_repayments
+from app.admin import role_change
 from app.admin.fee_notice.service import run_fee_invoice_emails
 from app.admin import service
 from app.admin.access_log import audit_admin_read
@@ -47,6 +48,7 @@ from app.admin.schemas import (
     AdminProjectDetail,
     AdminUserDetail,
     AdminUserFullDetail,
+    AdminUserRoleRequest,
     AdminUserStatusRequest,
     AuditLogOut,
     Page,
@@ -789,6 +791,30 @@ async def set_user_status(
         db,
         user_id,
         new_status=body.status,
+        note=body.note,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.patch("/users/{user_id}/role", response_model=AdminUserDetail)
+async def change_user_role(
+    user_id: UUID,
+    body: AdminUserRoleRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Promote an existing account to admin, or demote an admin account.
+
+    ADMIN and SYSTEM_ADMIN may promote a member to ADMIN; only a SYSTEM_ADMIN
+    may grant SYSTEM_ADMIN or change an admin account's role. Audited, and the
+    account is signed out everywhere. docs/specs/admin/user-role-change.md.
+    """
+    return await role_change.change_user_role(
+        db,
+        user_id,
+        new_role=body.role,
         note=body.note,
         actor=current_user,
         ip_address=request.client.host if request.client else None,

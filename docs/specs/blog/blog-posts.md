@@ -6,8 +6,8 @@
 | **Owner** | Phat |
 | **Implementer(s)** | Phat (backend + frontend) |
 | **Module** | `app/blog/` |
-| **Version** | 1.0 |
-| **Date** | 2026-11-21 |
+| **Version** | 1.1 |
+| **Date** | 2026-11-23 |
 | **Related ADR** | — |
 | **Depends on** | — |
 
@@ -56,6 +56,8 @@ blog_posts
 ├── reading_minutes  INTEGER       NOT NULL DEFAULT 1, CHECK > 0
 ├── cover_image_url  VARCHAR(500)  nullable
 ├── cover_alt        VARCHAR(200)  nullable
+├── focus_keyword    VARCHAR(100)  nullable          -- v1.1, editor-only SEO target
+├── secondary_keywords VARCHAR(100)[] NOT NULL DEFAULT '{}', CHECK cardinality <= 4  -- v1.1
 ├── status           VARCHAR(20)   NOT NULL DEFAULT 'draft', CHECK IN ('draft', 'published')
 ├── published_at     TIMESTAMPTZ   nullable          -- set on FIRST publish, kept after unpublish
 ├── author_id        UUID          nullable → users(id) ON DELETE SET NULL
@@ -90,7 +92,7 @@ blog_media
 
 ### Alembic Migration
 
-`alembic/versions/749861cba438_blog_posts.py`
+`alembic/versions/749861cba438_blog_posts.py`; v1.1 keywords: `alembic/versions/ebeed4fd366b_blog_focus_keywords.py`
 
 ---
 
@@ -110,7 +112,8 @@ BlogPostSummary {
 }
 BlogPostDetail = BlogPostSummary + {
   locale: "vi"|"en", seo_title: string|null, content: TipTapDoc,
-  version: int, author_id: uuid|null, updated_by: uuid|null
+  version: int, author_id: uuid|null, updated_by: uuid|null,
+  focus_keyword: string|null, secondary_keywords: string[]   // v1.1, admin only
 }
 PublicBlogPostSummary {
   slug, title, excerpt, cover_image_url, cover_alt, published_at, updated_at, reading_minutes
@@ -125,12 +128,13 @@ PublicBlogPost = PublicBlogPostSummary + { locale, seo_title, content }
 | `GET /admin/blog/posts?status=&search=&page=&page_size=` | — | `{ total, page, page_size, items: BlogPostSummary[] }` |
 | `POST /admin/blog/posts` | `{ title }` | 201 `BlogPostDetail` (draft, slug from title, `-2`, `-3`… if taken) |
 | `GET /admin/blog/posts/{post_id}` | — | `BlogPostDetail` |
-| `PUT /admin/blog/posts/{post_id}` | `{ title, slug, seo_title, excerpt, content, cover_image_url, cover_alt, version }` | `BlogPostDetail` |
+| `PUT /admin/blog/posts/{post_id}` | `{ title, slug, seo_title, excerpt, content, cover_image_url, cover_alt, focus_keyword?, secondary_keywords?, version }` | `BlogPostDetail` |
 | `POST /admin/blog/posts/{post_id}/publish` | `{ version }` | `BlogPostDetail` |
 | `POST /admin/blog/posts/{post_id}/unpublish` | `{ version }` | `BlogPostDetail` |
 | `DELETE /admin/blog/posts/{post_id}` | — | 204 |
 | `POST /admin/blog/media/presign` | `{ content_type, size_bytes }` | 201 `{ media_id, upload_url, public_url }` |
 | `POST /admin/blog/media/{media_id}/confirm` | — | `{ media_id, public_url }` |
+| `GET /admin/blog/keyword-usage?keyword=&exclude_id=` | — | `{ keyword, posts: [{ id, slug, title, status }] }` (v1.1) |
 
 Admin GETs return no personal data (marketing content), so they are listed in
 `NOT_PERSONAL_DATA` instead of writing VIEW audit rows.
@@ -188,6 +192,9 @@ draft  ──[delete, admin]──────►  (row removed)
 9. A published post cannot be deleted; unpublish it first.
 10. Images: `image/jpeg`, `image/png`, `image/webp`, at most 5 MB; the presigned PUT is bound to the declared type and exact size; confirm deletes an object larger than the limit.
 11. Every write is audited (`entity_type` `BLOG_POST` / `BLOG_MEDIA`) with metadata only, not the post body.
+12. Keywords (v1.1) are editor-only: they drive the admin SEO checklist and never appear in the public API or the page (search engines ignore `<meta name="keywords">`).
+13. Keywords are stored NFC, trimmed, with single spaces, keeping the admin's casing. Secondary keywords drop blanks, case-insensitive repeats and the focus keyword; at most 4 remain, each at most 100 characters (422 otherwise).
+14. `keyword-usage` lists other posts whose focus keyword matches case-insensitively (Python `casefold`, so Vietnamese folds correctly). It only warns: two posts may share a focus keyword.
 
 ---
 
@@ -228,6 +235,10 @@ draft  ──[delete, admin]──────►  (row removed)
 - [ ] `test_public_api_hides_drafts`
 - [ ] `test_media_presign_validates_type_and_size`
 - [ ] `test_media_confirm_checks_storage`
+- [ ] `test_keywords_are_saved_trimmed_and_deduplicated` (v1.1)
+- [ ] `test_rejects_more_than_four_secondary_keywords_or_long_ones` (v1.1)
+- [ ] `test_keyword_usage_finds_other_posts_case_insensitively` (v1.1)
+- [ ] `test_keywords_never_reach_the_public_api` (v1.1)
 
 ---
 
@@ -244,3 +255,4 @@ draft  ──[delete, admin]──────►  (row removed)
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 1.0 | 2026-11-21 | Phat | Initial draft |
+| 1.1 | 2026-11-23 | Phat | Focus and secondary keywords for the admin SEO checklist; `keyword-usage` endpoint |
