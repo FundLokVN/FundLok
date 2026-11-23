@@ -25,7 +25,7 @@
 # (curve-fit artifacts); the clamp neutralises them. Do not change them to 100.
 
 engine_version: "1.0.0"
-params_version: "wb-v3-20261114"  # working_days_per_month 22 -> 21 (HANDOFF-06 T1, D14). Prior: wb-v2-20261005 (loan_constraints.max_vnd 1bn -> 100M); wb-v1-20260917 (T0a/T0b/T3/T5: gate 3 enabled, working_days_per_month 21->22, bank_rate now sourced from config)
+params_version: "wb-v4-20261122"  # gate 7 (cic_floor) enabled (HANDOFF-07 E12, Loc 15 Nov, confirmed 22 Nov). Prior: wb-v3-20261114 (working_days_per_month 22 -> 21, HANDOFF-06 T1, D14); wb-v2-20261005 (loan_constraints.max_vnd 1bn -> 100M); wb-v1-20260917 (T0a/T0b/T3/T5: gate 3 enabled, working_days_per_month 21->22, bank_rate now sourced from config)
 source_workbook: "FundLok formula factors v0.xlsx"
 source_tab: "Scoring From Raw"
 factor_count: 22
@@ -385,9 +385,10 @@ gates:
   - {id: 4, key: first_loan_tenor,      severity: none, rule: "enforced_in_ui"}
   - {id: 5, key: excluded_industry,     severity: hard, rule: "industry in excluded_industries"}
   - {id: 6, key: kyc_aml,               severity: hard, rule: "kyc_aml_passed is false or fraud_flags non-empty"}
-  # GATE 7 SHIPS DISABLED until the CIC scale is confirmed with the business
-  # CIC report layout. It is a final, non-overridable reject.
-  - {id: 7, key: cic_floor,             severity: hard, rule: "cic_score <= 500", enabled: false}
+  # GATE 7 ENABLED (HANDOFF-07 E12; Loc decided 15 Nov to keep it on, confirmed 22 Nov). A final,
+  # non-overridable reject: cic_score <= 500, the scale unchanged from the formula workbook (D-060).
+  # A missing score is not a pass: the engine returns INSUFFICIENT_DATA (no grade) until staff enter it.
+  - {id: 7, key: cic_floor,             severity: hard, rule: "cic_score <= 500", enabled: true}
   - {id: 8, key: daily_repayment_rate,  severity: soft, rule: "daily_repayment_rate >= 0.30"}
 
 excluded_industries: [gambling, alcohol, tobacco, weapons, defence]

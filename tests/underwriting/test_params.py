@@ -42,7 +42,9 @@ def test_params_version_pinned(params):
     #
     # wb-v2-20261005 -> wb-v3-20261114 (HANDOFF-06 T1, D14): working_days_per_month
     # 22 -> 21, so the daily repayment rate divides by 21 working days a month.
-    assert params.params_version == "wb-v3-20261114"
+    #
+    # wb-v3-20261114 -> wb-v4-20261122 (HANDOFF-07 E12, deviations D32): gate 7 (`cic_floor`) enabled.
+    assert params.params_version == "wb-v4-20261122"
     assert params.engine_version == "1.0.0"
 
 
