@@ -208,6 +208,20 @@ class AdminUserStatusRequest(BaseModel):
     note: str | None = None
 
 
+class AdminUserRoleRequest(BaseModel):
+    """Change an existing account's role (docs/specs/admin/user-role-change.md).
+
+    INVESTOR and SME are here only as demotion targets for an admin account;
+    the service refuses them for a member account. No "no role" value: a
+    demoted admin is given a member role explicitly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["ADMIN", "SYSTEM_ADMIN", "INVESTOR", "SME"]
+    note: str | None = Field(default=None, max_length=500)
+
+
 class AdminInviteRequest(BaseModel):
     """Create an ADMIN account and email the invitee a set-password link.
 
