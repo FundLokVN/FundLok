@@ -23,6 +23,7 @@ from app.blog.schemas import (
     BlogPostListResponse,
     BlogPostUpdate,
     BlogVersionBody,
+    KeywordUsageResponse,
     Locale,
     PostStatus,
     PublicBlogPost,
@@ -78,6 +79,18 @@ async def list_posts(
         db, page=page, page_size=page_size, status_filter=status_filter, search=search
     )
     return BlogPostListResponse(total=total, page=page, page_size=page_size, items=items)
+
+
+@admin_blog_router.get("/keyword-usage", response_model=KeywordUsageResponse)
+async def keyword_usage(
+    keyword: str = Query(min_length=1, max_length=200),
+    exclude_id: UUID | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Other posts with the same focus keyword, for the editor's checklist warning."""
+    normalized, posts = await service.find_focus_keyword_usage(db, keyword=keyword, exclude_id=exclude_id)
+    return KeywordUsageResponse(keyword=normalized, posts=posts)
 
 
 @admin_blog_router.post("/posts", response_model=BlogPostDetail, status_code=status.HTTP_201_CREATED)

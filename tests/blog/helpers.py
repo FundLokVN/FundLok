@@ -67,6 +67,8 @@ def update_body(post: dict, **overrides) -> dict:
         "content": post["content"],
         "cover_image_url": post["cover_image_url"],
         "cover_alt": post["cover_alt"],
+        "focus_keyword": post["focus_keyword"],
+        "secondary_keywords": post["secondary_keywords"],
         "version": post["version"],
     }
     body.update(overrides)

@@ -3,9 +3,10 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.blog.models import SLUG_PATTERN
+from app.blog.models import KEYWORD_MAX_LENGTH, MAX_SECONDARY_KEYWORDS, SLUG_PATTERN
+from app.blog.validation import keyword_key, normalize_keyword
 
 PostStatus = Literal["draft", "published"]
 Locale = Literal["vi", "en"]
@@ -45,6 +46,9 @@ class BlogPostUpdate(BaseModel):
     content: dict[str, Any]
     cover_image_url: str | None = Field(default=None, max_length=500)
     cover_alt: str | None = Field(default=None, max_length=200)
+    # Editor-only SEO targets (§3); default empty so an older client's save is valid.
+    focus_keyword: str | None = Field(default=None, max_length=KEYWORD_MAX_LENGTH * 2)
+    secondary_keywords: list[str] = Field(default_factory=list, max_length=20)
     version: int = Field(ge=1)
 
     @field_validator("title")
@@ -54,6 +58,29 @@ class BlogPostUpdate(BaseModel):
         if not value:
             raise ValueError("title must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def _keywords(self) -> "BlogPostUpdate":
+        """Trim and collapse spaces, drop blanks and case-insensitive repeats, and
+        never repeat the focus keyword among the secondary ones."""
+        focus = normalize_keyword(self.focus_keyword) if self.focus_keyword else ""
+        if len(focus) > KEYWORD_MAX_LENGTH:
+            raise ValueError(f"focus_keyword is longer than {KEYWORD_MAX_LENGTH} characters")
+        seen = {focus.casefold()} if focus else set()
+        secondary: list[str] = []
+        for raw in self.secondary_keywords:
+            keyword = normalize_keyword(raw)
+            if not keyword or keyword_key(keyword) in seen:
+                continue
+            if len(keyword) > KEYWORD_MAX_LENGTH:
+                raise ValueError(f"a secondary keyword is longer than {KEYWORD_MAX_LENGTH} characters")
+            seen.add(keyword_key(keyword))
+            secondary.append(keyword)
+        if len(secondary) > MAX_SECONDARY_KEYWORDS:
+            raise ValueError(f"at most {MAX_SECONDARY_KEYWORDS} secondary keywords")
+        self.focus_keyword = focus or None
+        self.secondary_keywords = secondary
+        return self
 
     @field_validator("excerpt")
     @classmethod
@@ -93,6 +120,24 @@ class BlogPostDetail(BlogPostSummary):
     version: int
     author_id: UUID | None
     updated_by: UUID | None
+    focus_keyword: str | None
+    secondary_keywords: list[str]
+
+
+class KeywordUsagePost(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    slug: str
+    title: str
+    status: PostStatus
+
+
+class KeywordUsageResponse(BaseModel):
+    """Other posts whose focus keyword is the same, compared case-insensitively."""
+
+    keyword: str
+    posts: list[KeywordUsagePost]
 
 
 class BlogPostListResponse(BaseModel):

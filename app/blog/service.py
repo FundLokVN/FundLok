@@ -21,6 +21,8 @@ from app.blog.schemas import (
 from app.blog.validation import (
     EMPTY_DOCUMENT,
     ContentError,
+    keyword_key,
+    normalize_keyword,
     reading_minutes,
     slugify,
     validate_cover,
@@ -193,6 +195,8 @@ async def update_post(db: AsyncSession, post: BlogPost, body: BlogPostUpdate, *,
     post.reading_minutes = reading_minutes(plain_text)
     post.cover_image_url = cover_url
     post.cover_alt = cover_alt
+    post.focus_keyword = body.focus_keyword
+    post.secondary_keywords = body.secondary_keywords
     _touch(post, actor)
     await db.flush()
     return post
@@ -314,6 +318,29 @@ async def confirm_media(db: AsyncSession, media_id: uuid.UUID) -> tuple[BlogMedi
         media.confirmed_at = _now()
         await db.flush()
     return media, f"{base}/{media.key}"
+
+
+# --------------------------------------------------------------------------- #
+# Keywords
+# --------------------------------------------------------------------------- #
+
+
+async def find_focus_keyword_usage(
+    db: AsyncSession, *, keyword: str, exclude_id: uuid.UUID | None = None
+) -> tuple[str, list[BlogPost]]:
+    """Other posts targeting the same focus keyword (two posts competing for one
+    search hurt each other). Compared case-insensitively in Python: Postgres
+    lower() only folds ASCII under a C collation, and Vietnamese is not ASCII.
+    The blog is small, so reading every focus keyword is cheap."""
+    normalized = normalize_keyword(keyword)
+    if not normalized:
+        return "", []
+    query = select(BlogPost).where(BlogPost.focus_keyword.is_not(None))
+    if exclude_id is not None:
+        query = query.where(BlogPost.id != exclude_id)
+    target = keyword_key(normalized)
+    rows = await db.execute(query.order_by(BlogPost.updated_at.desc()))
+    return normalized, [post for post in rows.scalars() if keyword_key(post.focus_keyword) == target]
 
 
 # --------------------------------------------------------------------------- #
