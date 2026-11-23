@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT (Edward, 2026-11-22). Open Question 1 waits on Loc |
+| **Status** | ACCEPTED (Edward, 2026-11-23). Loc agreed on 22 Nov; ready for Phat |
 | **Owner** | Edward |
 | **Implementer(s)** | Phat (D-058: `app/direct_transfer/repayment.py`, `app/repayment_schedule/`); Edward approves the PR in writing (it changes the figures behind the ledger claim legs) |
 | **Module** | `app/direct_transfer/repayment.py` (`create_instalments`), `app/repayment_schedule/origination.py` and its invariants |
-| **Version** | 1.0 |
+| **Version** | 1.1 |
 | **Date** | 2026-11-22 |
 | **Related ADR** | ADR-011 |
 | **Depends on** | `origination-schedule-generation.md`, `repayment-collection.md`, `late-status.md`, `docs/specs/loans/listing-signing.md` (the Loan Contract's Articles 4 and 7.2), D-045, HANDOFF-07 task E2 |
@@ -89,7 +89,7 @@ The first test already exists as a strict `xfail` on `main`: once the build make
 
 ## 9. Open Questions
 
-1. **Loc:** the SME's daily amount becomes the sum of the lenders' amounts, so it can differ from the single pooled figure by a few đồng per day (and by up to `n·(N−1)` đồng on the last day). Proposal: accept it. The SME pays each lender its own amount on its own QR anyway, so the pooled figure is only a total. Confirm the SME's daily total is the sum.
+1. **Resolved (Loc, 22 Nov: "agreed").** The SME's daily amount is the sum of the lenders' own amounts, so it can differ from the old pooled figure by a few đồng per day (and by up to `n·(N−1)` đồng on the last day). The SME pays each lender on its own QR anyway.
 2. **Edward / Phat:** does `facility_data` need a migration? `facility-data-model.md` stores `remainder_vnd` with an invariant `0 <= remainder < N`. If that invariant is a database CHECK, rule 3 needs a migration relaxing it; if it is only application code, none. Check `app/repayment_schedule/models.py` before building.
 3. **Edward:** extension and relief re-pricing recompute `A` from the balance. They should keep working on the pooled facility, now derived from the lenders. Confirm no extension test assumes the old pooled remainder.
-4. **Loc:** the lenders' contract totals can sum to a few đồng more or less than the SME's offer for the target amount, because each rounds on its own principal. Proposal: accept; the contracts are the binding figures, as the offer screen already says.
+4. **Resolved (Loc, 22 Nov: "agreed").** The lenders' contract totals can sum to a few đồng more or less than the SME's offer for the target amount; the contracts are the binding figures.

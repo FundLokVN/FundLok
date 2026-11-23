@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| **Status** | IMPLEMENTED (Edward, 2026-11-22). Open Question 1 is reopened by Loc's reply of 22 Nov |
+| **Status** | IMPLEMENTED (Edward, 2026-11-23). Loc's answers of 22 Nov applied |
 | **Owner** | Edward |
 | **Implementer(s)** | Edward: the service function, the state transition, the thin admin route glue and the tests (Phat reviews `app/admin/`). Phat: the button |
 | **Module** | `app/direct_transfer/late_money.py` (new), `app/direct_transfer/tranche_state.py` (one transition), `app/admin/` (Phat's, calls the service) |
-| **Version** | 1.1 |
+| **Version** | 1.2 |
 | **Date** | 2026-11-21 |
 | **Related ADR** | ADR-011, ADR-009 |
 | **Depends on** | `day14-transfer-rule.md` (rules 5 to 7, 9), `commit-then-accept-flow.md`, `day14-investor-signing.md`, `transfer-and-evidence.md`, `ledger-amendment.md`, HANDOFF-07 task E3 |
@@ -152,6 +152,6 @@ After approval the ticket is an ordinary paid ticket: the SME's 24-hour receipt 
 
 ## 9. Open Questions
 
-1. **OPEN (Loc, 22 Nov: "really against" the SME refunding the lender).** Late money staff do **not** approve by 15:30 still becomes a `TopUpPledge` nobody can sign. Loc rejects the SME returning it and wants FundLok to "manage the money, manually at the start and automatically afterwards". That conflicts with the no-custody rule (ADR-009, Decree 94 Art. 11.1.b: FundLok never holds money), so before any refund spec is written Loc must say what "manage" means: staff approve it into the loan (this spec), staff instruct a return that the SME still makes, or FundLok itself moves money (custody, needs a legal answer). No `late-money-refund.md` is written until then. Until it is answered the launch rule is: staff approve before 15:30, and anything else is handled by staff case by case, off the platform.
+1. **Resolved (Loc, 22 Nov).** Approve into the loan (his option A); the SME does not refund, and no refund spec is written. Loc expects top-up signing to be the long-term way, but it is **not a launch blocker**: at launch staff push the investors and manage late money by hand, **even after 15:30**. After 15:30 this spec's approval is refused by design and the 15:35 run records the pledge, so that handling happens outside the platform (TD-06). If staff need to approve after 15:30 in the system, that is a new, small change to this spec, not built.
 2. **Edward, 2026-11-21: approval keeps the SME's 24-hour receipt check; it does not skip it. Loc asked on 22 Nov what that check is; his own AM-E5 rule (SCRUM-610): after the lender's proof the SME has 24 calendar hours to upload its receipt or raise a concern, silence counts as received, and a loan takes effect only once confirmed.**
 3. **Resolved (Edward, 2026-11-21):** 15:30 stays. Staff watch the `NEEDS_ACTION` queue from 14:45, and the 15:35 pledge path catches the rest.
