@@ -306,19 +306,24 @@ blocking anything. A `None` bonus contributes 0, which is the correct semantics 
 | 4 | `first_loan_tenor` | n/a | enforced in the application UI, not here |
 | 5 | `excluded_industry` | hard | industry in gambling, alcohol, tobacco, weapons, defence |
 | 6 | `kyc_aml` | hard | `not kyc_aml_passed` or `fraud_flags` non-empty |
-| 7 | `cic_floor` | hard | **DISABLED** — `cic_score <= 500`; see §9 Q2 |
+| 7 | `cic_floor` | hard | `cic_score <= 500`; **enabled** since `wb-v4-20261122` (deviations D32) |
 | 8 | `daily_repayment_rate` | soft | `daily_repayment_rate >= 0.30` |
 
 Resolution: any hard gate fired → `REJECT`. Else any soft gate fired → `REVIEW`. Else → `APPROVED`.
 
-Gates 3 and 7 are `enabled: false` in the YAML and must be read from there, not hardcoded. Both must
-be switchable by config alone, with no code change.
+Gates 3 and 7 are both `enabled: true` in the YAML (`wb-v4-20261122`) and must be read from there, not
+hardcoded. Both must be switchable by config alone, with no code change.
 
 Gate 3 is disabled because at the specified threshold it fires on **98.4%** of the golden set (95.2%
 at "4 or more"). The median SME has 8 of 22 factors below 50. Shipping it would route essentially the
 entire book to manual review.
 
-Gate 7 is disabled because it is a final, non-overridable reject and the CIC scale is unconfirmed.
+Gate 7 is a final, non-overridable reject. It was disabled until the business confirmed the CIC scale; Loc
+decided on 15 Nov 2026 to keep it on (D-060: the scale is unchanged from the formula workbook, a score of
+500 or below is rejected, no override) and confirmed it on 22 Nov, so it is enabled (deviations D32). A
+**missing** CIC score is not a pass: `_is_insufficient_data` returns `INSUFFICIENT_DATA` (no grade, no rate)
+until staff enter the score. The applicant-facing indicative band (`grade_lite`) only *assumes* a CIC score, so it
+runs with this one gate off; real score runs never do.
 
 ### R10 — Pricing and repayment.
 
