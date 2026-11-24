@@ -30,8 +30,8 @@ Secret values (keys, passwords) may show as `valueFrom: secretKeyRef`. That is f
 | 1.2 | `FUNDLOK_FEE_BANK_BIN` | `970407` (Techcombank) | SME fee QR and the fee email's bank block; unset = no QR | [ ] |
 | 1.3 | `FUNDLOK_FEE_ACCOUNT_NUMBER` | `116889688` | Same | [ ] |
 | 1.4 | `FUNDLOK_FEE_ACCOUNT_NAME` | the account holder's name as the bank has it | Same | [ ] |
-| 1.5 | `SCHEDULER_SERVICE_ACCOUNT` | `cloud-scheduler@fundlok.iam.gserviceaccount.com` | Unset: every scheduled job answers 503 | [ ] |
-| 1.6 | `SCHEDULER_AUDIENCE` | exactly the `prod-api` URL (no path, no trailing slash) | A mismatch: every job answers 401 | [ ] |
+| 1.5 | `SCHEDULER_SERVICE_ACCOUNT` | `cloud-scheduler@fundlok.iam.gserviceaccount.com` | Unset: every scheduled job answers 503 | [x] |
+| 1.6 | `SCHEDULER_AUDIENCE` | exactly the `prod-api` URL (no path, no trailing slash) | A mismatch: every job answers 401 | [x] |
 | 1.7 | `ZALO_ZBS_ACCEPTANCE_TEMPLATE_ID` | the approved template; parameters `company_name`, `amount`, `deadline` (Phat checks the OA) | Unset: SME acceptance reminders go in-app and by email only | [ ] |
 | 1.8 | `ZALO_ZBS_DAY14_TEMPLATE_ID` | the approved template; parameters `company_name`, `amount`, `deadline` | Unset: Day-14 reminders go in-app and by email only | [ ] |
 | 1.9 | `ZALO_ZBS_REMINDER_TEMPLATE_ID` | `666161` (`fundlok_reminder`) | Repayment reminder on Zalo | [ ] |
@@ -59,17 +59,17 @@ Every job: region `asia-southeast1`, time zone `Asia/Ho_Chi_Minh`, HTTP POST to 
 
 | # | Job | Cron (ICT) | Route | Body | Created | Fired once (200) |
 |---|---|---|---|---|---|---|
-| 2.1 | `repayment-reminders` | `0 15 * * *` | `/internal/jobs/repayment-reminders` | none | [ ] | [ ] |
-| 2.2 | `fee-invoice-emails` | `5 15 * * *` | `/internal/jobs/fee-invoice-emails` | none | [ ] | [ ] |
-| 2.3 | `funding-advance` | `0 0,15 * * *` | `/internal/jobs/funding-advance` | none | [ ] | [ ] |
-| 2.4 | `funding-advance-day14` | `40 15 * * *` | `/internal/jobs/funding-advance` | none | [ ] | [ ] |
-| 2.5 | `acceptance-reminders` | `0 9 * * *` | `/internal/jobs/acceptance-reminders` | none | [ ] | [ ] |
-| 2.6 | `day14-reminders-morning` | `0 8 * * *` | `/internal/jobs/day14-transfer-reminders` | `{"kind": "DAY14_MORNING"}` | [ ] | [ ] |
-| 2.7 | `day14-reminders-afternoon` | `0 14 * * *` | `/internal/jobs/day14-transfer-reminders` | `{"kind": "DAY14_AFTERNOON"}` | [ ] | [ ] |
-| 2.8 | `day14-cutoff` | `0,35 15 * * *` | `/internal/jobs/day14-cutoff` | none | [ ] | [ ] |
-| 2.9 | `repayment-day` | `10 0,18 * * *` | `/internal/jobs/repayment-day` | none | [ ] | [ ] |
-| 2.10 | `invoices` | `20 0 * * *` | `/internal/jobs/invoices` | none | [ ] | [ ] |
-| 2.11 | `cic-daily-balance` | `30 0 * * *` | `/internal/jobs/cic-daily-balance` | none | [ ] | [ ] |
+| 2.1 | `repayment-reminders` | `0 15 * * *` | `/internal/jobs/repayment-reminders` | none | [x] | [x] |
+| 2.2 | `fee-invoice-emails` | `5 15 * * *` | `/internal/jobs/fee-invoice-emails` | none | [x] | [x] |
+| 2.3 | `funding-advance` | `0 0,15 * * *` | `/internal/jobs/funding-advance` | none | [x] | [ ] |
+| 2.4 | `funding-advance-day14` | `40 15 * * *` | `/internal/jobs/funding-advance` | none | [x] | [ ] |
+| 2.5 | `acceptance-reminders` | `0 9 * * *` | `/internal/jobs/acceptance-reminders` | none | [x] | [ ] |
+| 2.6 | `day14-reminders-morning` | `0 8 * * *` | `/internal/jobs/day14-transfer-reminders` | `{"kind": "DAY14_MORNING"}` | [x] | [ ] |
+| 2.7 | `day14-reminders-afternoon` | `0 14 * * *` | `/internal/jobs/day14-transfer-reminders` | `{"kind": "DAY14_AFTERNOON"}` | [x] | [ ] |
+| 2.8 | `day14-cutoff` | `0,35 15 * * *` | `/internal/jobs/day14-cutoff` | none | [x] | [ ] |
+| 2.9 | `repayment-day` | `10 0,18 * * *` | `/internal/jobs/repayment-day` | none | [x] | [x] |
+| 2.10 | `invoices` | `20 0 * * *` | `/internal/jobs/invoices` | none | [x] | [x] |
+| 2.11 | `cic-daily-balance` | `30 0 * * *` | `/internal/jobs/cic-daily-balance` | none | [x] | [x] |
 
 Fire each once and read the result:
 
@@ -89,6 +89,14 @@ Careful with 2.9: its first run marks any unpaid due repayment day Late and sett
 |---|---|---|
 | 2.12 | Each job's last run at its scheduled time (not only the manual run) shows `200` the next day | [ ] |
 
+### Evidence so far (Cloud Run logs, `gcloud logging read`; times UTC)
+
+- **2.1, 2.2** (scheduled runs, 23 Nov): `repayment-reminders` 08:00 and `fee-invoice-emails` 08:05, both `200`.
+- **2.10, 2.11** (fired by hand, 23 Nov 20:40): `invoices` and `cic-daily-balance`, both `200` through the real OIDC token. This also proves 1.5, 1.6 and 3.7 (an unset setting would be 503, a wrong audience 401, a wrong account 403).
+- **2.9** `repayment-day`: the first run (23 Nov 20:46) returned **500**: `asyncpg InterfaceError: connection is closed` in the maintenance-mode middleware, not in the job. Cause: the app's database pool had no health check and Neon closes idle connections, so the first request after about five idle minutes failed for any endpoint. Fixed in #155 (`pool_pre_ping`, `pool_recycle=240`, regression test). After the deploy, two runs **7 min 10 s apart** (24 Nov 01:32:41 and 01:39:51) both returned `200`.
+- All 11 jobs exist, are `ENABLED`, in `Asia/Ho_Chi_Minh`, with the right route, audience and service account; the two Day-14 reminder jobs carry `{"kind": "DAY14_MORNING"}` and `{"kind": "DAY14_AFTERNOON"}`.
+- Still to see: 2.3 to 2.8 firing on their own schedule (08:00, 09:00, 14:00, 15:00 and 15:35 Vietnam time), and 2.12 (each job `200` at its scheduled time the next day, including `repayment-day` at 00:10 and 18:10 after a long idle gap).
+
 ---
 
 ## 3. Real accounts, not mocks (Loc asked for these four)
@@ -103,7 +111,7 @@ Do each with a real person, real documents and the real service. Write what you 
 | 3.4 | **Zalo codes** | A real phone receives the sign-up code, then the guarantor code, then a lender signing code. Each arrives in under a minute from the production OA | Phat | [ ] |
 | 3.5 | **Zalo reminder templates** | Trigger the acceptance reminder and the Day-14 reminder for a test account on a real phone; parameters (`company_name`, `amount`, `deadline`) are filled in, not blank | Phat | [ ] |
 | 3.6 | **Receipt OCR** | Upload three real bank receipts in production: one correct, one with a wrong amount, one blurry. Expect: matched, denied, and sent to staff | Edward | [ ] |
-| 3.7 | **The scheduler login** | Job rows 2.9 to 2.11 returned `200` through the real OIDC token (not a bypass) | Edward | [ ] |
+| 3.7 | **The scheduler login** | Job rows 2.9 to 2.11 returned `200` through the real OIDC token (not a bypass) | Edward | [x] |
 | 3.8 | **Fee QR** | An SME fee invoice shows a QR; scan it with a bank app and confirm the account is Techcombank 116889688 with the right amount and reference | Edward | [ ] |
 | 3.9 | **Late status and investor invoices end to end** | After 2.9 and 2.10 have run on real data: an unpaid due day shows Late, a paid day settles after 24 hours, an investor invoice exists and is readable by the lender | Edward | [ ] |
 
