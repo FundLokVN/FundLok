@@ -26,26 +26,26 @@ Secret values (keys, passwords) may show as `valueFrom: secretKeyRef`. That is f
 
 | # | Setting | Expected | Why | OK |
 |---|---|---|---|---|
-| 1.1 | `FUNDING_WINDOW_FLOW` | `COMMIT_THEN_ACCEPT` | The default is `LEGACY`: new rounds would use the old pay-at-commit flow | [ ] |
-| 1.2 | `FUNDLOK_FEE_BANK_BIN` | `970407` (Techcombank) | SME fee QR and the fee email's bank block; unset = no QR | [ ] |
-| 1.3 | `FUNDLOK_FEE_ACCOUNT_NUMBER` | `116889688` | Same | [ ] |
-| 1.4 | `FUNDLOK_FEE_ACCOUNT_NAME` | the account holder's name as the bank has it | Same | [ ] |
+| 1.1 | `FUNDING_WINDOW_FLOW` | `COMMIT_THEN_ACCEPT` | The default is `LEGACY`: new rounds would use the old pay-at-commit flow | [x] |
+| 1.2 | `FUNDLOK_FEE_BANK_BIN` | `970407` (Techcombank) | SME fee QR and the fee email's bank block; unset = no QR | [x] |
+| 1.3 | `FUNDLOK_FEE_ACCOUNT_NUMBER` | `116889688` | Same | [x] |
+| 1.4 | `FUNDLOK_FEE_ACCOUNT_NAME` | the account holder's name as the bank has it | Same | [x] |
 | 1.5 | `SCHEDULER_SERVICE_ACCOUNT` | `cloud-scheduler@fundlok.iam.gserviceaccount.com` | Unset: every scheduled job answers 503 | [x] |
 | 1.6 | `SCHEDULER_AUDIENCE` | exactly the `prod-api` URL (no path, no trailing slash) | A mismatch: every job answers 401 | [x] |
 | 1.7 | `ZALO_ZBS_ACCEPTANCE_TEMPLATE_ID` | the approved template; parameters `company_name`, `amount`, `deadline` (Phat checks the OA) | Unset: SME acceptance reminders go in-app and by email only | [ ] |
 | 1.8 | `ZALO_ZBS_DAY14_TEMPLATE_ID` | the approved template; parameters `company_name`, `amount`, `deadline` | Unset: Day-14 reminders go in-app and by email only | [ ] |
-| 1.9 | `ZALO_ZBS_REMINDER_TEMPLATE_ID` | `666161` (`fundlok_reminder`) | Repayment reminder on Zalo | [ ] |
-| 1.10 | `ZALO_ZBS_OTP_TEMPLATE_ID`, `ZALO_APP_ID`, `ZALO_APP_SECRET`, `ZALO_OA_REFRESH_TOKEN`, `ZALO_TOKEN_ENCRYPTION_KEY` | all set | Zalo codes (sign-up, guarantor, lender signing) cannot be sent without them | [ ] |
-| 1.11 | `ZALO_ZBS_DEVELOPMENT_MODE` | unset or `false` | In development mode Zalo delivers only to the OA's admins | [ ] |
-| 1.12 | `PHONE_OTP_CHANNEL` | `zalo` (not `log`) | `log` writes codes to the server log | [ ] |
-| 1.13 | `RECEIPT_OCR_ENABLED` | `1` | Default is off: receipts are not read at all. Loc (22 Nov): OCR is the first barrier, "a lock on the door", not the only control | [ ] |
-| 1.14 | `RECEIPT_AUTO_VERDICT_ENABLED` | `1` (Loc, 22 Nov: OCR works; the real control is confirming payments against bank statements) | Default is off: a confident read would not accept or deny a receipt | [ ] |
-| 1.15 | `GVERIFY_BASE_URL`, `GVERIFY_API_KEY`, `GVERIFY_PARTNER_CODE` | all set (TPV Datatrust, live) | Without them KYC and KYB cannot run | [ ] |
+| 1.9 | `ZALO_ZBS_REMINDER_TEMPLATE_ID` | `666161` (`fundlok_reminder`) | Repayment reminder on Zalo | [x] |
+| 1.10 | `ZALO_ZBS_OTP_TEMPLATE_ID`, `ZALO_APP_ID`, `ZALO_APP_SECRET`, `ZALO_OA_REFRESH_TOKEN`, `ZALO_TOKEN_ENCRYPTION_KEY` | all set | Zalo codes (sign-up, guarantor, lender signing) cannot be sent without them | [x] |
+| 1.11 | `ZALO_ZBS_DEVELOPMENT_MODE` | unset or `false` | In development mode Zalo delivers only to the OA's admins | [x] |
+| 1.12 | `PHONE_OTP_CHANNEL` | `zalo` (not `log`) | `log` writes codes to the server log | [x] |
+| 1.13 | `RECEIPT_OCR_ENABLED` | `1` | Default is off: receipts are not read at all. Loc (22 Nov): OCR is the first barrier, "a lock on the door", not the only control | [x] |
+| 1.14 | `RECEIPT_AUTO_VERDICT_ENABLED` | `1` (Loc, 22 Nov: OCR works; the real control is confirming payments against bank statements) | Default is off: a confident read would not accept or deny a receipt | [x] |
+| 1.15 | `GVERIFY_BASE_URL`, `GVERIFY_API_KEY`, `GVERIFY_PARTNER_CODE` | all set (TPV Datatrust, live) | Without them KYC and KYB cannot run | [x] |
 | 1.16 | `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | set, bucket exists | Receipts, contracts and signed documents are stored there | [ ] |
-| 1.17 | `NEAC_VERIFY_URL` | unset (default `https://neac.gov.vn/vi/Home/VerifyFileByNeac`) or the value NEAC gave | The signature check on signed PDFs | [ ] |
-| 1.18 | `FRONTEND_URL` | the production web address | Links in emails and Zalo | [ ] |
-| 1.19 | `DEBUG` | unset or `false` | Never on in production | [ ] |
-| 1.20 | `GVERIFY_KYB_REQUIRE_REP_MATCH` | `true` | Default is off. Loc (22 Nov): no separate guarantor; the owner or legal representative signs up, does KYB and KYC, signs and is the guarantor. On, KYB is refused unless the KYC person is a legal representative on the certificate (`NOT_A_REPRESENTATIVE`) | [ ] |
+| 1.17 | `NEAC_VERIFY_URL` | unset (default `https://neac.gov.vn/vi/Home/VerifyFileByNeac`) or the value NEAC gave | The signature check on signed PDFs | [x] |
+| 1.18 | `FRONTEND_URL` | the production web address | Links in emails and Zalo | [x] |
+| 1.19 | `DEBUG` | unset or `false` | Never on in production | [x] |
+| 1.20 | `GVERIFY_KYB_REQUIRE_REP_MATCH` | `true` | Default is off. Loc (22 Nov): no separate guarantor; the owner or legal representative signs up, does KYB and KYC, signs and is the guarantor. On, KYB is refused unless the KYC person is a legal representative on the certificate (`NOT_A_REPRESENTATIVE`) | [x] |
 
 ---
 
@@ -95,6 +95,9 @@ Careful with 2.9: its first run marks any unpaid due repayment day Late and sett
 - **2.10, 2.11** (fired by hand, 23 Nov 20:40): `invoices` and `cic-daily-balance`, both `200` through the real OIDC token. This also proves 1.5, 1.6 and 3.7 (an unset setting would be 503, a wrong audience 401, a wrong account 403).
 - **2.9** `repayment-day`: the first run (23 Nov 20:46) returned **500**: `asyncpg InterfaceError: connection is closed` in the maintenance-mode middleware, not in the job. Cause: the app's database pool had no health check and Neon closes idle connections, so the first request after about five idle minutes failed for any endpoint. Fixed in #155 (`pool_pre_ping`, `pool_recycle=240`, regression test). After the deploy, two runs **7 min 10 s apart** (24 Nov 01:32:41 and 01:39:51) both returned `200`.
 - All 11 jobs exist, are `ENABLED`, in `Asia/Ho_Chi_Minh`, with the right route, audience and service account; the two Day-14 reminder jobs carry `{"kind": "DAY14_MORNING"}` and `{"kind": "DAY14_AFTERNOON"}`.
+- **Settings (24 Nov, `gcloud run services describe prod-api`, secret values not printed):** `FUNDLOK_FEE_BANK_BIN` 970407, `FUNDLOK_FEE_ACCOUNT_NUMBER` 116889688 and the account name are set (1.2 to 1.4); `ZALO_ZBS_REMINDER_TEMPLATE_ID` 666161 (1.9); all secret-type Zalo and TPV settings are set (1.10, 1.15); `ZALO_ZBS_DEVELOPMENT_MODE` false (1.11); `PHONE_OTP_CHANNEL` zalo (1.12); `NEAC_VERIFY_URL` unset, so the default (1.17); `FRONTEND_URL` https://www.fundlok.com (1.18); `DEBUG` unset (1.19); `GVERIFY_KYB_REQUIRE_REP_MATCH` true (1.20). "Set" proves the setting exists, not that the service works: that is section 3.
+- **Fixed that day:** `FUNDING_WINDOW_FLOW`, `RECEIPT_OCR_ENABLED` and `RECEIPT_AUTO_VERDICT_ENABLED` were UNSET (the flow would have defaulted to `LEGACY`). One `gcloud run services update --update-env-vars` created revision `prod-api-00297-ntb`; re-read shows `COMMIT_THEN_ACCEPT`, `1`, `1` (1.1, 1.13, 1.14), and `invoices` returned `200` on it.
+- **Still open in section 1:** 1.7 and 1.8 (the two Zalo template IDs, from Phat or Loc) and 1.16 (R2 settings are set; the bucket is proven by the receipt upload in 3.6).
 - Still to see: 2.3 to 2.8 firing on their own schedule (08:00, 09:00, 14:00, 15:00 and 15:35 Vietnam time), and 2.12 (each job `200` at its scheduled time the next day, including `repayment-day` at 00:10 and 18:10 after a long idle gap).
 
 ---
