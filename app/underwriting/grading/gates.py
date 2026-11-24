@@ -10,12 +10,12 @@ Spec: docs/specs/underwriting/grading-engine-core.md, R9.
 | 4 | first_loan_tenor       | n/a  | enforced in the application UI, not here |
 | 5 | excluded_industry      | hard | industry in gambling, alcohol, tobacco, weapons, defence |
 | 6 | kyc_aml                | hard | not kyc_aml_passed or fraud_flags non-empty |
-| 7 | cic_floor              | hard | DISABLED -- cic_score <= 500 |
+| 7 | cic_floor              | hard | cic_score <= 500 (enabled since wb-v4-20261122) |
 | 8 | daily_repayment_rate   | soft | daily_repayment_rate >= 0.30 |
 
-Gates 3 and 7 ship `enabled: false` in the YAML and must stay switchable by
+Gates 3 and 7 are both enabled in the YAML and must stay switchable by
 config alone -- `evaluate_gates` reads `gate.enabled` off the `GateParam`,
-never a hardcoded skip list, so flipping either on is a params-file change,
+never a hardcoded skip list, so flipping either is a params-file change,
 not a code change.
 """
 from __future__ import annotations

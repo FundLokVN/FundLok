@@ -29,8 +29,9 @@ from app.direct_transfer.repayment import (
     report_missing_day,
     todays_payments,
     tranche_schedule,
+    withholding_report,
 )
-from app.direct_transfer.schemas import RepaymentRowOut, TodaysPaymentsOut
+from app.direct_transfer.schemas import RepaymentRowOut, TodaysPaymentsOut, WithholdingReportOut
 from app.direct_transfer.tranches import mask_name
 from app.direct_transfer.vietqr import build_vietqr_payload
 from app.lending.models import AuditLog
@@ -85,6 +86,19 @@ async def read_todays_payments(
     return TodaysPaymentsOut.model_validate(
         await todays_payments(db, sme_user_id=current_user.id, on_date=on_date or ict_date(_now()))
     )
+
+
+@router.get("/withholding-report", response_model=WithholdingReportOut)
+async def read_withholding_report(
+    month: str | None = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$", description="YYYY-MM, default this month"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_sme),
+):
+    """The 5% personal income tax the business withheld, per individual lender, on the instalments it paid in the
+    month (paid, not due): interest, tax and the lender's full name and ID number as their Loan Contract has them
+    (docs/specs/direct_transfer/withholding-report.md). Live: it follows the days' statuses when read."""
+    first = dt.date.fromisoformat(f"{month}-01") if month else ict_date(_now()).replace(day=1)
+    return WithholdingReportOut.model_validate(await withholding_report(db, sme_user_id=current_user.id, month=first))
 
 
 @router.post("/days/mark-paid", response_model=list[RepaymentRowOut])

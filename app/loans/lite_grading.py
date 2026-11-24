@@ -38,7 +38,7 @@ cannot forget them:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -62,8 +62,10 @@ __all__ = [
 # 442-750 (see factor 20 in grading_params_v1.yaml). The generator spec allows
 # 150-750, but bracketing down to 150 would extrapolate the sigmoid far below
 # anything the regression suite covers and would widen the band into
-# uselessness. Gate 7 (`cic_floor`, cic_score <= 500) ships DISABLED pending
-# confirmation of the CIC scale, so the low end cannot spuriously hard-reject.
+# uselessness. Gate 7 (`cic_floor`, cic_score <= 500) is ENABLED for real
+# scoring (wb-v4-20261122), but an indicative run only ASSUMES a CIC score, so
+# grade_lite switches that one gate off (`_indicative_params`): otherwise the
+# low end of the bracket would hard-reject on its own assumption.
 CIC_BRACKET_LOW = 442
 CIC_BRACKET_HIGH = 750
 
@@ -360,6 +362,12 @@ def _as_float(value: object) -> Optional[float]:
     return None if value is None else float(value)  # type: ignore[arg-type]
 
 
+def _indicative_params(p):
+    """The params with the CIC floor (gate 7) off: the CIC score of an indicative run is an assumption (bracketed),
+    never a fact, so it must not hard-reject the applicant. Real score runs keep the gate on."""
+    return replace(p, gates=tuple(replace(g, enabled=False) if g.key == "cic_floor" else g for g in p.gates))
+
+
 def grade_lite(
     *,
     company_code: str,
@@ -376,7 +384,7 @@ def grade_lite(
     `bank_rate_pct` is the bank_rate_config rate in force
     (app/rates/bank_rate.py::bank_rate_in_force), the one score runs use.
     """
-    p = params()
+    p = _indicative_params(params())
 
     def run(cic: int):
         inputs = build_grading_input(
