@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT (Edward, 2026-11-22). Loc's answers of 22 Nov applied |
+| **Status** | IMPLEMENTED (Edward, 2026-11-22). Loc's answers of 22 Nov applied |
 | **Owner** | Edward |
 | **Implementer(s)** | Edward (the query and the route; Phat reviews `app/market/` and `app/direct_transfer/repayment.py`, his modules per D-058); Phat (the screen AM-P16 and its wording) |
 | **Module** | `app/direct_transfer/repayment.py` (`withholding_report`), `app/market/repayment_router.py`, `app/market/schemas.py` |
-| **Version** | 1.0 |
+| **Version** | 1.1 |
 | **Date** | 2026-11-22 |
 | **Related ADR** | ADR-009 |
 | **Depends on** | `repayment-collection.md` (tax rule, `withholding_bps`, D-045), `late-status.md` (statuses), the Loan Contract Article 7 (FundLok's SME withholds), Handbook 10.3 and 10.7, HANDOFF-07 / SCRUM-623 (AM-E18) |

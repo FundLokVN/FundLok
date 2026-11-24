@@ -269,36 +269,51 @@ async def tranche_schedule(db: AsyncSession, *, tranche_id: UUID, user_id: UUID)
 
 
 async def withholding_report(db: AsyncSession, *, sme_user_id: UUID, month: dt.date) -> dict:
-    """Data for the SME's monthly withholding report (wording is Huy's). `month` is the first day of the month."""
+    """The SME's monthly tax-withholding report (docs/specs/direct_transfer/withholding-report.md): per individual
+    lender, the interest and the 5% withheld on the instalments the SME actually paid in `month` (the first day of
+    the month, ICT). Paid means PRESUMED_PAID or MATCHED, in the month of `COALESCE(marked_paid_at, matched_at)`;
+    LATE, DUE and REPORTED_MISSED days never count. The lender is named as their Loan Contract names them."""
+    from app.market.investor_agreement.service import current_party_b  # local import: the agreement code imports this package
+
     first = month.replace(day=1)
     nxt = (first.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+    paid_at = func.coalesce(RepaymentDay.marked_paid_at, RepaymentDay.matched_at)
     rows = (
         await db.execute(
             select(RepaymentDay, Tranche)
             .join(Tranche, Tranche.id == RepaymentDay.tranche_id)
             .join(FundingWindow, FundingWindow.id == Tranche.window_id)
-            .where(FundingWindow.sme_user_id == sme_user_id, RepaymentDay.due_date >= first, RepaymentDay.due_date < nxt)
+            .where(
+                FundingWindow.sme_user_id == sme_user_id,
+                Tranche.investor_type == "INDIVIDUAL",
+                RepaymentDay.status.in_(("PRESUMED_PAID", "MATCHED")),
+                paid_at >= start_of_day_ict(first),
+                paid_at < start_of_day_ict(nxt),
+            )
         )
     ).all()
-    by_tranche: dict[UUID, dict] = {}
+    by_lender: dict[UUID, dict] = {}
     for day, tranche in rows:
-        entry = by_tranche.get(tranche.id)
+        entry = by_lender.get(tranche.investor_id)
         if entry is None:
-            investor = await db.get(User, tranche.investor_id)
-            entry = by_tranche[tranche.id] = {
-                "tranche_id": tranche.id,
-                "investor_display": mask_name(investor.full_name or investor.email),
-                "investor_type": tranche.investor_type,
+            party = await current_party_b(db, tranche.investor_id)
+            entry = by_lender[tranche.investor_id] = {
+                "investor_id": tranche.investor_id,
+                "lender_name": party.name,
+                "lender_id_number": party.id_number,
+                "paid_days": 0,
                 "interest_vnd": 0,
                 "tax_withheld_vnd": 0,
             }
+        entry["paid_days"] += 1
         entry["interest_vnd"] += day.interest_vnd
         entry["tax_withheld_vnd"] += day.tax_withheld_vnd
-    out = list(by_tranche.values())
+    out = sorted(by_lender.values(), key=lambda r: (r["lender_name"] or "", str(r["investor_id"])))
     return {
         "month": first.strftime("%Y-%m"),
         "rows": out,
         "totals": {
+            "paid_days": sum(r["paid_days"] for r in out),
             "interest_vnd": sum(r["interest_vnd"] for r in out),
             "tax_withheld_vnd": sum(r["tax_withheld_vnd"] for r in out),
         },
