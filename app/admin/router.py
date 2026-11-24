@@ -37,6 +37,7 @@ from app.admin.schemas import (
     AdminKybCertificateUrlResponse,
     AdminKybResolveRequest,
     AdminKybReviewOut,
+    AdminKybResolveOut,
     AdminKybVerificationOut,
     AdminKycImageUrlResponse,
     AdminKycResolveRequest,
@@ -129,7 +130,7 @@ async def open_project_for_funding(
 
 @router.post(
     "/kyb-verifications/{verification_id}/resolve",
-    response_model=AdminKybVerificationOut,
+    response_model=AdminKybResolveOut,
 )
 async def resolve_kyb_verification(
     verification_id: UUID,
@@ -151,6 +152,9 @@ async def resolve_kyb_verification(
         business_name=body.business_name,
         tax_code=body.tax_code,
         representative_id_numbers=body.representative_id_numbers,
+        legal_representative_name=body.legal_representative_name,
+        legal_representative_position=body.legal_representative_position,
+        company_address=body.company_address,
     )
 
 
