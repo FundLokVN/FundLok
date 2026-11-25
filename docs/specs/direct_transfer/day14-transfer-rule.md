@@ -187,6 +187,7 @@ Cloud Scheduler, Google OIDC, the same pattern as `/internal/jobs/repayment-remi
 
 11. The app counts QR time on the server's clock (`server_time` in 4.1), not the device's.
 12. Unlocking needs an eKYC approved after the lock. `GET /gverify/kyc/status` returns `reverify_required: true` while that is missing, and `POST /gverify/kyc/verify` accepts a new attempt from an approved investor exactly then.
+13. On a round with these cut-offs a ticket's hold (`hold_expires_at`, 14:45) only closes signing and new QRs; it never expires the ticket. Nothing turns an unpaid ticket EXPIRED before rule 6's 15:30 decision: no lazy expiry on a page read (`expire_lapsed_holds`), none in the hold job (`expire_holds`), and none on a receipt upload, which runs the rule 3 check up to 15:30. A RESERVED ticket that was never signed still cannot upload a receipt, after 14:45 as before it.
 
 ## 7. Error Cases
 
@@ -222,6 +223,7 @@ Backend (Edward, pytest):
 - `test_no_transfer_locks_without_pledge`.
 - `test_receipt_refused_after_1530`.
 - `test_top_up_signable_only_after_unlock_before_1500_within_reopening`.
+- Rule 13 (`tests/direct_transfer/test_commit_then_accept.py`, real commit-then-accept rounds whose holds end at 14:45): `test_reading_the_round_after_1445_expires_no_ticket_so_the_1535_step_finds_the_no_show`, `test_a_receipt_uploaded_at_1450_for_money_paid_on_time_is_checked_not_set_aside`.
 
 Reminder (Phat, pytest):
 - `test_day14_reminder_targets_unpaid_lenders_on_disbursement_day`.
