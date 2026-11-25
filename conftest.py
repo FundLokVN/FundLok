@@ -66,7 +66,7 @@ os.environ.setdefault("REFRESH_TOKEN_EXPIRE_DAYS", "14")
 # same underlying reason (plain-http uvicorn).
 os.environ.setdefault("COOKIE_SECURE", "False")
 # Explicitly blank (not just "unset") so a developer's local .env can't leak a
-# real Turnstile secret into the test run and make verify_turnstile_token try
+# real Turnstile secret into the test run and make the captcha verifier try
 # a real network call.
 os.environ["CLOUDFLARE_TURNSTILE_SECRET_KEY"] = ""
 # With no secret, captcha must be explicitly not required, or every protected
