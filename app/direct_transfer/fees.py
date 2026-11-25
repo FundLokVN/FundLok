@@ -310,6 +310,9 @@ async def accrue_investor_fees(db: AsyncSession, *, now: dt.datetime, params: Di
             created += 1
         if last_month not in existing:
             continue
+        counted = sum(a.received_gross_vnd for a in existing.values())
+        if counted >= scheduled_total:
+            continue
 
         # A due month's accrual counted the receipts that had settled by then.
         # Consume that gross oldest-first before grouping the remaining receipts.
@@ -325,7 +328,6 @@ async def accrue_investor_fees(db: AsyncSession, *, now: dt.datetime, params: Di
             month = max(_first_of_month(ict_date(row.settled_at)), first_catch_up_month)
             catch_up_gross[month] += row.gross_vnd - billed
 
-        counted = sum(a.received_gross_vnd for a in existing.values())
         for month, received in sorted(catch_up_gross.items()):
             if month >= this_month or month in existing or received <= 0:
                 continue
