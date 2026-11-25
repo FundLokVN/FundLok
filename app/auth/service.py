@@ -56,9 +56,30 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def normalize_email(email: str) -> str:
+    """How a new account's address is stored: lowercase. A mailbox is case-insensitive in practice, and a person
+    or a sign-in provider may send Lan.Nguyen@ one day and lan.nguyen@ the next."""
+    return email.strip().lower()
+
+
+async def user_by_email(db: AsyncSession, email: str) -> User | None:
+    """The account for this address, whatever its letter case. Every sign-in path finds accounts here, so
+    "Lan.Nguyen@gmail.com" and Google's "lan.nguyen@gmail.com" are one person, not two accounts.
+
+    Accounts created before addresses were stored lowercase keep the case they were typed in, so two old accounts
+    may differ only in case: the exact spelling wins, then the oldest, and the lookup never fails on them."""
+    return (
+        await db.execute(
+            select(User)
+            .where(func.lower(User.email) == normalize_email(email))
+            .order_by((User.email == email).desc(), User.created_at, User.id)
+            .limit(1)
+        )
+    ).scalars().first()
+
+
 async def authenticate_user(db: AsyncSession, email: str, password: str):
-    result = await db.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
+    user = await user_by_email(db, email)
     # `password_hash` is nullable (OAuth accounts have none until the user sets
     # one). Reject those before passlib sees a None hash -- it would raise
     # rather than return False, turning a normal failed login into a 500.
@@ -527,9 +548,8 @@ async def _record_failed_login(
     # When the address has an account, the row is on the owner's security
     # history (actor = the account, as for TWO_FACTOR_FAILED), so a stream of
     # wrong passwords is something they can see.
-    owner_id = (
-        await db.execute(select(User.id).where(User.email == email))
-    ).scalar_one_or_none()
+    owner = await user_by_email(db, email)
+    owner_id = owner.id if owner is not None else None
     append_audit(
         db,
         entity_type="AUTH",
@@ -751,12 +771,10 @@ async def register_user(
         "message": "If these details are available, a verification email has been sent.",
     }
 
-    existing_email = (
-        await db.execute(select(User).where(User.email == user_in.email))
-    ).scalar_one_or_none()
+    existing_email = await user_by_email(db, user_in.email)
     if existing_email is not None:
         # Don't create or reveal — tell the genuine owner someone used their email.
-        background_tasks.add_task(send_existing_account_notice, to_email=user_in.email)
+        background_tasks.add_task(send_existing_account_notice, to_email=existing_email.email)
         return ack
 
     if user_in.phone:
@@ -770,7 +788,7 @@ async def register_user(
             )
 
     new_user = User(
-        email=user_in.email,
+        email=normalize_email(user_in.email),
         phone=user_in.phone,
         full_name=user_in.full_name,
         password_hash=hash_password(user_in.password),
@@ -846,8 +864,7 @@ async def resend_verification(
     """
     await verify_turnstile_token_async(body.turnstile_token)
 
-    result = await db.execute(select(User).where(User.email == body.email))
-    user = result.scalar_one_or_none()
+    user = await user_by_email(db, body.email)
     if user is None or user.email_verified:
         return dict(RESEND_VERIFICATION_ACK)
 
@@ -894,8 +911,7 @@ async def forgot_password(db: AsyncSession, body: ForgotPasswordRequest, backgro
     # Same response whether or not the email exists, to avoid user enumeration.
     response = {"status": "success", "message": "If the email is registered, a password reset link has been sent."}
 
-    result = await db.execute(select(User).where(User.email == body.email))
-    user = result.scalar_one_or_none()
+    user = await user_by_email(db, body.email)
     if not user:
         return response
 
