@@ -45,6 +45,7 @@ from webauthn.helpers.structs import (
     UserVerificationRequirement,
 )
 
+from app.auth.email_verification import require_verified_email
 from app.core.config import settings
 from app.users.models import User, WebAuthnChallenge, WebAuthnCredential
 from app.utils.jwt import SECOND_FACTOR_ROLES
@@ -194,15 +195,6 @@ async def delete_credential(
 # --------------------------------------------------------------------------
 # Registration — adding a passkey to an account that is already signed in
 # --------------------------------------------------------------------------
-
-
-def require_verified_email(user: User, *, method: str = "a passkey") -> None:
-    """Require proof of email ownership before adding a sign-in credential."""
-    if not user.email_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Verify your email address before adding {method}.",
-        )
 
 
 async def registration_options(db: AsyncSession, user: User) -> str:

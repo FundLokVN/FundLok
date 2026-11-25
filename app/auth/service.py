@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import BackgroundTasks, HTTPException, status
 
 from app.auth import totp, totp_crypto
-from app.auth.passkeys import require_verified_email
+from app.auth.email_verification import require_verified_email
 from app.auth.password_policy import reject_breached_password
 from app.auth.user_agent import describe_browser, describe_device
 from app.utils.email import send_new_device_signin_alert
