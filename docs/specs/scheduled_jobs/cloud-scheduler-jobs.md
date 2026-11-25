@@ -6,8 +6,8 @@
 | **Owner** | Phat |
 | **Implementer(s)** | Phat; Edward wrote the `repayment-day` and `invoices` routes (HANDOFF-07 E1, Phat reviews) (`app/scheduled_jobs/`, `app/admin/system_email.py`, `app/phone_verification/zalo.py`) |
 | **Module** | `app/scheduled_jobs/` |
-| **Version** | 1.2 (repayment-day, invoices and cic-daily-balance routes: HANDOFF-07 E1) |
-| **Date** | 2026-11-13 |
+| **Version** | 1.3 (repayment-day also hands expired dispute turns to staff; the unused ARQ worker is removed) |
+| **Date** | 2026-11-25 |
 | **Related ADR** | ADR-009 |
 | **Depends on** | `docs/specs/admin/internal-email.md` v2.1 (reminder sender), `docs/specs/admin/fee-invoice-email.md`, Edward's `app/direct_transfer/repayment.todays_payments` |
 
@@ -15,12 +15,12 @@
 
 ## 1. Context & Goal
 
-Production deploys only the API (`prod-api` on Cloud Run); the ARQ worker has
-no deployed service (`docs/deployment/ci-cd-pipeline.md`), so no scheduled job
-runs there. Rather than deploy and pay for an always-on worker, Google Cloud
-Scheduler calls a protected endpoint on `prod-api` at a set time: Cloud
-Scheduler's free tier covers a few jobs, and Cloud Run bills only while the
-call runs.
+Production deploys only the API (`prod-api` on Cloud Run); the ARQ worker
+never had a deployed service (`docs/deployment/ci-cd-pipeline.md`) and was
+removed in v1.3, so no scheduled job runs outside these routes. Rather than
+deploy and pay for an always-on worker, Google Cloud Scheduler calls a
+protected endpoint on `prod-api` at a set time: Cloud Scheduler's free tier
+covers a few jobs, and Cloud Run bills only while the call runs.
 
 **Goal:** a safe way for Cloud Scheduler to run jobs on prod-api, and the first
 two jobs: the daily repayment reminder to each SME, and a daily retry of SME
@@ -28,9 +28,8 @@ fee invoice emails.
 
 ## 2. Out of Scope
 
-- Edward's worker jobs (`app/direct_transfer/worker.py`: round advancing,
-  repayment-day presume/settle, `invoice_job`, CIC). They can be exposed the
-  same way, but they change money state and are his to decide.
+- Money timers beyond the ones under *Money timers* below. They can be
+  exposed the same way, but they change money state and are Edward's to decide.
 - Reminders to investors; lateness, arrears or late fees (out of MVP scope).
 - A Zalo message for the fee-invoice job, or for earlier unpaid days (the
   template says "due today"; staff see late days in red on Admin >
@@ -96,7 +95,7 @@ JobResult { job: str, sent: int, failed: int, skipped: str | null,   -- skipped:
 -- zalo: repayment-reminders only; skipped NOT_CONFIGURED | NOT_A_WORKING_DAY
 ```
 ```
-RepaymentDayResult { job: "repayment-day", late: int, settled: int }
+RepaymentDayResult { job: "repayment-day", late: int, settled: int, disputes: int }
 InvoicesResult     { job: "invoices", overdue: int, accrued: int, invoiced: int }
 CicDailyBalanceResult { job: "cic-daily-balance", events: int }
 ```
@@ -152,25 +151,30 @@ while `attempts < 3`; `SENDING` left by a crash is never retried.
    Each message costs (400 đ by phone at approval), so it is claimed before it
    is sent, like the email.
 
-### Money timers (HANDOFF-07 E1: the ARQ jobs, run here because no worker is deployed)
+### Money timers (HANDOFF-07 E1: run here because no worker is deployed)
 
-No body. Each is the same unit of work as the ARQ job of the same purpose in `app/direct_transfer/jobs.py`, run in one
-transaction (committed once; a failure rolls the whole call back and Cloud Scheduler retries). Both are idempotent.
+No body. Each runs in one transaction (`app/scheduled_jobs/money_timers.py`; committed once, a failure rolls the whole
+call back and Cloud Scheduler retries). All are idempotent.
 
 - `POST /internal/jobs/repayment-day` runs at 00:10 and 18:10 ICT (the worker's cron). `repayment.mark_late_days`:
   a DUE day with no payment proof by 18:00 ICT on its due date becomes LATE (so the 18:10 run marks the same day, the
   00:10 run catches anything missed). `repayment.settle_days`: a PRESUMED_PAID day whose investor 24-hour report window
-  has passed, with no open dispute, is settled and posted to the ledger. `late` and `settled` are the days changed by
-  this call; a second call changes none.
+  has passed, with no open dispute, is settled and posted to the ledger. `disputes.advance_dispute_deadlines`: an open
+  dispute whose required party (investor or SME) has not answered by its `response_deadline` passes to staff
+  (`required_next_party = STAFF`, deadline cleared, a `NO_RESPONSE` evidence event); it is never decided
+  automatically (`docs/specs/direct_transfer/disputes.md`). The hand-over happens at the first run after the deadline,
+  so up to about 18 hours late. `late` and `settled` are the days changed by this call, `disputes` the disputes handed
+  to staff; a second call changes none.
 - `POST /internal/jobs/invoices` runs at 00:20 ICT. `fees.mark_overdue_invoices`, `fees.accrue_investor_fees` (ended
   months, pro rata to money received) and `fees.issue_investor_invoices`. `invoiced` is the investor invoices issued by
   this call.
 - `POST /internal/jobs/cic-daily-balance` runs at 00:30 ICT. `cic.emit_daily_balances` for the previous day when it was
   a business day: one `DAILY_BALANCE` event per ACTIVE tranche (Decree 94 CIC event log; no sender). `events` is the
   number newly logged; a second call logs none, and a call the morning after a weekend or holiday logs none.
-- Not covered here, on purpose: `expire_holds_job` (a commit-then-accept ticket's hold runs to `pay_deadline_at` and
-  the Day-14 no-show step is `day14-cutoff`; expiring it earlier would pre-empt the lock), `advance_windows_job` (for
-  commit-then-accept rounds `funding-advance` already calls the same `close.advance_window`). See Open Questions.
+- Not covered here, on purpose: `tranches.expire_holds` (a commit-then-accept ticket's hold runs to `pay_deadline_at`
+  and the Day-14 no-show step is `day14-cutoff`; expiring it earlier would pre-empt the lock) and
+  `close.advance_all_windows` (for commit-then-accept rounds `funding-advance` already calls the same
+  `close.advance_window`). Their ARQ wrappers were removed with the worker in v1.3. See Open Questions.
 
 ## 7. Error Cases
 
@@ -201,6 +205,7 @@ Money timers (`tests/direct_transfer/test_money_timers.py`, the rest above in th
 - `test_repayment_day_marks_an_unpaid_day_late_after_18h_and_not_before`
 - `test_repayment_day_settles_a_paid_day_after_the_investor_s_24_hours`
 - `test_repayment_day_called_twice_changes_nothing_the_second_time`
+- `test_repayment_day_hands_an_expired_dispute_turn_to_staff`
 - `test_invoices_issues_an_investor_invoice_once`
 - `test_invoices_marks_an_unpaid_invoice_overdue`
 - `test_cic_daily_balance_logs_the_previous_business_day_once`
@@ -331,7 +336,10 @@ gcloud scheduler jobs create http cic-daily-balance --location $REGION --project
 ## 10. Open Questions
 
 - Resolved (v1.2): the worker's repayment-day presume/settle and invoice jobs are exposed as `repayment-day` and
-  `invoices`. Still ARQ-only: `advance_windows_job` (its dispute-deadline step `disputes.advance_dispute_deadlines` and
-  the legacy-flow window close are not run by any route) and `expire_holds_job`. `cic-daily-balance` was added in v1.2.
-  Edward decides whether `advance-windows` gets a route before launch.
+  `invoices`. `cic-daily-balance` was added in v1.2.
+- Resolved (v1.3): the dispute-deadline step (`disputes.advance_dispute_deadlines`), which only the never-deployed ARQ
+  worker ran, now runs inside `repayment-day` (00:10 and 18:10 ICT), so a missed dispute deadline reaches staff in
+  production. The ARQ worker and its job wrappers are removed. Not run by any route: the legacy-flow window close
+  (`close.advance_all_windows`) and hold expiry (`tranches.expire_holds`); see *Money timers* for why. Edward decides
+  whether either needs a route before launch.
 - Should investors get a reminder too (e.g. to report a missing payment)?

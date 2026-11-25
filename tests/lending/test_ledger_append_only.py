@@ -1,48 +1,47 @@
-"""HANDOFF-01 §5 + §3.6: ledger append-only invariant.
+"""HANDOFF-01 §5 + §3.6: ledger append-only invariant at the application layer.
 
-The service layer only ever inserts into ledger_entries (app/payments/service.py
-has no update/delete path), and no route anywhere in the app exposes a way to
-mutate or delete an existing ledger entry.
+app/ledger/service.py only ever inserts: a second posting adds new rows and
+leaves earlier ones as they were. The database-layer trigger that refuses
+UPDATE/DELETE is covered in tests/ledger/test_ledger_foundation.py. Posted the
+way the direct-transfer path posts (app/direct_transfer/ledger_posting.py):
+against the platform EXTERNAL account, never OMNIBUS_CASH (D-026).
 """
-from app.main import app
-from conftest import iter_endpoint_routes
+import uuid
+from decimal import Decimal
+
+from sqlalchemy import select
+
+from app.ledger.models import LedgerEntry
+from app.ledger.service import LedgerLeg, get_or_create_account, post_transaction, resolve_custodial_account
 
 
-def test_ledger_entry_has_no_exposed_mutation_route():
-    """Pure route introspection -- no DB/client needed, so this stays sync."""
-    ledger_mutation_routes = [
-        route
-        for route in iter_endpoint_routes(app.routes)
-        if route.path.startswith("/payments") and any(m in route.methods for m in ("PUT", "PATCH", "DELETE"))
-    ]
-    assert ledger_mutation_routes == []
-
-
-def test_payments_routes_are_create_only():
-    """Every registered /payments route is a POST (create); there is nothing
-    to GET/PUT/PATCH/DELETE an individual ledger entry by id. Pure route
-    introspection -- no DB/client needed, so this stays sync."""
-    payments_routes = [route for route in iter_endpoint_routes(app.routes) if route.path.startswith("/payments")]
-    assert payments_routes, "expected at least the disbursements/repayments routes to be registered"
-    for route in payments_routes:
-        assert route.methods <= {"POST", "HEAD", "OPTIONS"}
-
-
-async def test_disbursement_creates_a_ledger_entry_and_leaves_prior_entries_untouched(funded_contract, client):
+async def test_a_second_posting_appends_and_leaves_the_first_entry_untouched(db_session, funded_contract):
     setup = await funded_contract(target_amount="10000.00", min_ticket="1000.00")
-    first = await client.post(
-        "/payments/disbursements",
-        json={"contract_id": setup["contract"]["id"], "bank_account": "VN-TEST-0001", "amount": "10000.00"},
-        headers={**setup["admin"]["headers"], "Idempotency-Key": "append-only-check-1"},
+    contract_id = uuid.UUID(setup["contract"]["id"])
+    custodial = await resolve_custodial_account(db_session, contract_id=contract_id)
+    external = await get_or_create_account(db_session, account_type="EXTERNAL", custodial_account_id=custodial.id)
+    borrower = await get_or_create_account(
+        db_session, account_type="BORROWER", custodial_account_id=custodial.id,
+        owner_user_id=uuid.UUID(setup["sme"]["id"]), contract_id=contract_id,
     )
-    assert first.status_code == 201
 
-    # A second, distinct disbursement call (different key) appends a new
-    # entry; it does not update the first one in place.
-    second = await client.post(
-        "/payments/disbursements",
-        json={"contract_id": setup["contract"]["id"], "bank_account": "VN-TEST-0002", "amount": "10000.00"},
-        headers={**setup["admin"]["headers"], "Idempotency-Key": "append-only-check-2"},
+    def leg(amount: str) -> LedgerLeg:
+        return LedgerLeg(external.id, borrower.id, Decimal(amount), "DISBURSEMENT", contract_id)
+
+    first = await post_transaction(
+        db_session, event_type="DISBURSEMENT", legs=[leg("10000")], idempotency_key=f"append-only-{uuid.uuid4().hex}"
     )
-    assert second.status_code == 201
-    assert second.json()["disbursement_id"] != first.json()["disbursement_id"]
+    await db_session.commit()
+    second = await post_transaction(
+        db_session, event_type="DISBURSEMENT", legs=[leg("2500")], idempotency_key=f"append-only-{uuid.uuid4().hex}"
+    )
+    await db_session.commit()
+
+    assert second.id != first.id
+    rows = (
+        await db_session.execute(
+            select(LedgerEntry.ledger_transaction_id, LedgerEntry.amount).where(LedgerEntry.contract_id == contract_id)
+        )
+    ).all()
+    assert {r.ledger_transaction_id: r.amount for r in rows} == {first.id: Decimal("10000"), second.id: Decimal("2500")}
+    assert len(rows) == 2

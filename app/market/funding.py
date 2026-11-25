@@ -285,9 +285,9 @@ async def expire_lapsed_holds(db: AsyncSession, *, window_id: UUID, now: dt.date
     """The window's RESERVED and SIGNED tickets whose hold has lapsed with no receipt -> EXPIRED, freeing their
     capacity so their investors (and others) can reserve again (funding-window.md rule 9). How many expired.
 
-    Edward's `expire_holds_job` does this for every window on a timer, but only `app/direct_transfer/worker.py`
-    schedules it and nothing runs that worker yet, so a lapsed hold would otherwise block its investor
-    (ALREADY_HAS_LIVE_TRANCHE) and the window's capacity for good. Same rule as the job, so both can run.
+    Edward's `tranches.expire_holds` does this for every window, but nothing runs it on a timer (no worker is
+    deployed), so a lapsed hold would otherwise block its investor (ALREADY_HAS_LIVE_TRANCHE) and the window's
+    capacity for good. Same rule as that function, so both can run.
 
     Never on a window with Day-14 cut-offs (commit-then-accept): its holds end at 14:45, but receipts are taken until
     15:30 and the 15:00 / 15:35 Day-14 step decides who is a no-show. Expiring them here, on any page view after
