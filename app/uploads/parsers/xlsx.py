@@ -9,7 +9,11 @@ UNTRUSTED uploads free of a large third-party surface.
 SAFETY
 An .xlsx is a zip of XML written by whoever uploaded it.
   * Every part read is capped (MAX_PART_BYTES) before it is parsed, so a
-    compression bomb inside the workbook cannot exhaust memory.
+    compression bomb inside the workbook cannot exhaust memory. ElementTree
+    builds the whole tree, ~15-30x the XML's size in memory (a 40 MB sheet
+    peaked at 1.15 GB), so the cap is 8 MB: a listing row is ~1 KB of XML,
+    so ~8,000 invoices in one month still fit. Streaming (iterparse) would
+    lift that if a real export ever needs more.
   * XML is parsed with ElementTree, which never resolves external entities, on
     expat >= 2.4.1, which bounds entity-expansion ("billion laughs") attacks.
   * Rows and columns are capped; a sheet claiming a column like XFD1048576 is
@@ -25,7 +29,7 @@ from io import BytesIO
 _NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 _CELL_REF = re.compile(r"^([A-Z]{1,3})\d+$")
 
-MAX_PART_BYTES = 40 * 1024 * 1024
+MAX_PART_BYTES = 8 * 1024 * 1024
 MAX_ROWS = 50_000
 MAX_COLUMNS = 64
 
@@ -79,6 +83,7 @@ def read_first_sheet(raw: bytes) -> list[list[str | None]]:
             if "xl/sharedStrings.xml" in names:
                 root = ET.fromstring(_read_part(archive, "xl/sharedStrings.xml"))
                 shared = [_text(si) for si in root.findall(f"{_NS}si")]
+                del root  # one tree in memory at a time: the strings are kept, not their XML
             sheet = ET.fromstring(_read_part(archive, sheets[0]))
         except ET.ParseError as exc:
             raise XlsxError("Workbook XML is malformed") from exc

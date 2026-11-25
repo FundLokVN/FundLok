@@ -177,6 +177,19 @@ def test_a_quarterly_period_is_not_a_fiscal_year():
         parse_statements_xml(statements_xml(year="Q1/2025"))
 
 
+def _statements_of(size: int) -> str:
+    """The statement fixture padded with blanks to exactly `size` bytes of UTF-8."""
+    xml = statements_xml()
+    return xml.replace("</HSoThueDTu>", " " * (size - len(xml.encode("utf-8"))) + "</HSoThueDTu>")
+
+
+def test_a_statement_file_over_8_mb_is_refused_and_one_of_8_mb_is_read():
+    with pytest.raises(StatementParseError, match="too large") as exc:
+        parse_statements_xml(_statements_of(8 * 1024 * 1024 + 1))
+    assert exc.value.code == "UNREADABLE_STATEMENTS"
+    assert parse_statements_xml(_statements_of(8 * 1024 * 1024)).cogs_y1 == 6_400_000_000
+
+
 # --- the bundle ----------------------------------------------------------------
 
 

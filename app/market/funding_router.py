@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.direct_transfer.close import request_early_close
 from app.direct_transfer.config import DEFAULT_PARAMS
-from app.direct_transfer.errors import DirectTransferError
+from app.direct_transfer.errors import DirectTransferError, not_found
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.models import FundingWindow, RepaymentDay, Tranche, Transfer
 from app.direct_transfer import day14
@@ -699,7 +699,15 @@ async def upload_receipt(
     ).first() is not None
     # OCR (receipt-ocr.md) runs before submit_receipt takes the ticket and round locks: a slow read must not hold up
     # other investors in the round. Not on a replay: that receipt was read the first time.
-    reading = await ocr.reader.read(content=content, content_type=content_type) if ocr and not replay else None
+    reading = None
+    if ocr and not replay:
+        # Only on the caller's own ticket (submit_receipt's lookup and 404), checked before the read so no one can
+        # make the server decode and OCR an image against another investor's ticket or a made-up id. The id only:
+        # submit_receipt's locked read must load the ticket itself, fresh, after the read.
+        owned = select(Tranche.id).where(Tranche.id == tranche_id, Tranche.investor_id == current_user.id)
+        if (await db.execute(owned)).first() is None:
+            await _raise_mapped(db, not_found("Ticket not found"))
+        reading = await ocr.reader.read(content=content, content_type=content_type)
     now = _now()
     try:
         result = await submit_receipt(
@@ -839,7 +847,18 @@ async def upload_sme_receipt(
     transaction id as the investor's: CONFIRMED. A difference: UNDER_REVIEW (RECEIPT_MISMATCH) for staff. With
     RECEIPT_OCR_ENABLED off nothing is read, and the upload confirms on the business's word."""
     content, content_type = await _read_evidence(file)
-    reading = await ocr.reader.read(content=content, content_type=content_type) if ocr else None
+    reading = None
+    if ocr:
+        # Only on a ticket of the caller's own round (sme_receipt_check's lookup and 404), before the read; the id
+        # only, as in upload_receipt.
+        owned = (
+            select(Tranche.id)
+            .join(FundingWindow, FundingWindow.id == Tranche.window_id)
+            .where(Tranche.id == tranche_id, FundingWindow.sme_user_id == current_user.id)
+        )
+        if (await db.execute(owned)).first() is None:
+            await _raise_mapped(db, not_found("Ticket not found"))
+        reading = await ocr.reader.read(content=content, content_type=content_type)
     try:
         tranche = await sme_receipt_check(
             db,
