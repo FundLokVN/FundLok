@@ -195,6 +195,7 @@ transaction (committed once; a failure rolls the whole call back and Cloud Sched
 - `test_only_earlier_days_still_get_a_reminder`
 - `test_a_failed_reminder_is_retried_by_the_next_run`
 - `test_the_money_timer_routes_need_the_scheduler_token`
+- `test_funding_advance_answers_500_when_a_round_failed_so_the_scheduler_retries`
 
 Money timers (`tests/direct_transfer/test_money_timers.py`, the rest above in the first file):
 - `test_repayment_day_marks_an_unpaid_day_late_after_18h_and_not_before`
@@ -281,7 +282,10 @@ generated; at 15:00 the silence rule decides a round the SME did not decide; fro
 its pooled loan forms with everyone who paid, once no ticket is pending or 2 days after the 14:45 pay deadline.
 `POST /internal/jobs/acceptance-reminders` (no body) runs at 09:00 ICT and reminds the SME 3 days and 1 day before the
 15:00 Day-13 deadline (in the app, by email, and on Zalo once `ZALO_ZBS_ACCEPTANCE_TEMPLATE_ID` is set). Both are
-idempotent and only touch commit-then-accept rounds (`FUNDING_WINDOW_FLOW=COMMIT_THEN_ACCEPT`).
+idempotent and only touch commit-then-accept rounds (`FUNDING_WINDOW_FLOW=COMMIT_THEN_ACCEPT`). `funding-advance`
+commits each round on its own and answers 500 (same body) when any round failed, so the retries below run it again
+within minutes; rounds already advanced are no-ops on the retry. A round that fails every time keeps the job red
+until someone looks at it.
 
 ```bash
 gcloud scheduler jobs create http funding-advance --location $REGION --project $PROJECT \
