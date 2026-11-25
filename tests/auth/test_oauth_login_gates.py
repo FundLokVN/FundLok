@@ -13,7 +13,7 @@ from sqlalchemy import select
 from app.oauth.schema import OAuthProvider
 from app.oauth.service import GoogleOAuthProvider
 from app.users.models import USER_STATUS_SUSPENDED, RefreshToken, User
-from tests.auth.test_totp import enrol
+from tests.auth.test_totp import enrol, enrol_legacy_unverified_totp
 
 
 @pytest.fixture
@@ -146,12 +146,12 @@ async def test_account_without_2fa_still_signs_straight_in(
 
 
 async def test_a_strangers_2fa_on_an_unverified_account_does_not_challenge_the_owner(
-    client, make_user, stub_google
+    client, make_user, stub_google, db_session
 ):
     # The reclaim runs before the 2FA gate: a squatter's authenticator is
     # removed, so the owner who just proved the email is not locked out by it.
     squatter = await make_user()
-    await enrol(client, squatter)
+    await enrol_legacy_unverified_totp(client, db_session, squatter)
     stub_google(squatter["email"])
 
     resp = await _google_login(client)

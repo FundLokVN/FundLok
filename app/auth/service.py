@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import BackgroundTasks, HTTPException, status
 
 from app.auth import totp, totp_crypto
+from app.auth.email_verification import require_verified_email
 from app.auth.password_policy import reject_breached_password
 from app.auth.user_agent import describe_browser, describe_device
 from app.utils.email import send_new_device_signin_alert
@@ -798,7 +799,7 @@ async def register_user(
 async def verify_email(db: AsyncSession, token: str) -> dict:
     uid = _parse_user_id(verify_email_token(token))
 
-    result = await db.execute(select(User).where(User.id == uid))
+    result = await db.execute(select(User).where(User.id == uid).with_for_update())
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -806,6 +807,9 @@ async def verify_email(db: AsyncSession, token: str) -> dict:
     if user.email_verified:
         return {"status": "success", "message": "Email already verified"}
 
+    # A secret staged or enabled before this check existed has no proof of ownership.
+    if user.totp_enabled or user.totp_secret:
+        await _clear_totp(db, user)
     user.email_verified = True
     await db.commit()
     return {"status": "success", "message": "Email verified successfully"}
@@ -1037,6 +1041,7 @@ async def start_totp_setup(db: AsyncSession, current_user: User) -> tuple[str, s
     invalidate the authenticator the user is currently relying on. Disable
     first, which requires the password.
     """
+    require_verified_email(current_user, method="an authenticator app")
     if current_user.totp_enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1060,6 +1065,7 @@ async def start_totp_setup(db: AsyncSession, current_user: User) -> tuple[str, s
 
 async def enable_totp(db: AsyncSession, current_user: User, code: str) -> list[str]:
     """Verify a code, turn 2FA on, and return one-time recovery codes."""
+    require_verified_email(current_user, method="an authenticator app")
     if current_user.totp_enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
