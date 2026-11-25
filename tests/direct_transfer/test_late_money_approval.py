@@ -17,7 +17,7 @@ from app.direct_transfer.disputes import open_tranche_dispute
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.models import EvidenceLog, LenderStanding, TopUpPledge, Transfer
 from app.direct_transfer.tranche_state import transition_tranche
-from app.direct_transfer.windows import confirmed_total
+from app.direct_transfer.windows import capacity_left, confirmed_total
 from app.lending.models import AuditLog
 
 from .helpers import T0, accept, good_fields, make_investor, open_window, reserve, upload_receipt
@@ -84,6 +84,45 @@ async def test_approval_at_or_after_1530_is_refused_and_the_1535_run_records_the
     assert tranche.status == "UNDER_REVIEW"
     outcome = await day14.process_day14_no_shows(world.db, now=ict(15, 35), params=world.params)
     assert [p.tranche_id for p in outcome.pledges] == [tranche.id]
+
+
+async def _paid_in_time(world, amount: int = 10_000_000):
+    investor = await make_investor(world)
+    tranche = await reserve(world, investor, amount, now=ict(10, 0))
+    await accept(world, investor, tranche, now=ict(10, 0))
+    pay = await tranches.payment_instructions(
+        world.db, tranche_id=tranche.id, investor_id=investor.user.id, now=ict(10, 1), params=world.params
+    )
+    fields = good_fields(world, tranche, investor, when=ict(10, 5), memo=pay.qr_code, amount_vnd=amount)
+    await upload_receipt(world, investor, tranche, now=ict(10, 6), fields=fields)
+    assert tranche.status == "ATTESTED"
+    return tranche
+
+
+async def test_late_money_can_be_approved_on_a_full_round(world):
+    # Target 100M: one lender's 10M came late, nine others paid 90M in time. Late money holds no room, so the 10M it
+    # needs is still there and staff can approve it; before, it was counted against itself (CAPACITY_EXCEEDED).
+    _, tranche, transfer = await _late_money(world)
+    for _ in range(9):
+        await _paid_in_time(world)
+    assert await capacity_left(world.db, world.window) == 10_000_000
+    await _approve(world, transfer, now=ict(15, 10))
+    assert tranche.status == "ATTESTED"
+    assert await capacity_left(world.db, world.window) == 0
+
+
+async def test_late_money_is_refused_when_other_lenders_took_the_room(world):
+    # The same round, but ten lenders paid 100M in time: there is no room left for the late 10M, so it stays late
+    # money (a top-up after 15:30) and the round is never overbooked.
+    _, tranche, transfer = await _late_money(world)
+    for _ in range(10):
+        await _paid_in_time(world)
+    assert await capacity_left(world.db, world.window) == 0
+    # This test round turns FULL, which closes approval before the room is even checked; a commit-then-accept round
+    # stays AWAITING_PAYMENT through Day 14, so put it there to reach the room check.
+    world.window.status = "AWAITING_PAYMENT"
+    assert await _code(_approve(world, transfer, now=ict(15, 10))) == "CAPACITY_EXCEEDED"
+    assert tranche.status == "UNDER_REVIEW" and tranche.review_cause == "LATE_MONEY"
 
 
 async def test_approved_late_money_records_no_top_up_pledge(world):

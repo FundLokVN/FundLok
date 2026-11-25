@@ -1,5 +1,6 @@
 """Spec: docs/specs/direct_transfer/fees.md section 8 (B12). Fees are LIVE by default (E1)."""
 import datetime as dt
+import uuid
 
 import pytest
 from sqlalchemy import func, select
@@ -12,9 +13,16 @@ from app.direct_transfer.fees import ManualInvoiceProvider
 from app.direct_transfer.models import FeeInvoice, InvestorFeeAccrual, RepaymentDay, Tranche
 from app.ledger.models import LedgerAccount, LedgerEntry
 
-from .helpers import T0, at, close_now, fund_window, make_investor, make_world, open_window, pay_days_through, reserve
+from .helpers import T0, at, close_now, fund_window, make_investor, make_world, open_window, pay_days_through, receipt_file, reserve
 
 M = 1_000_000
+
+
+async def pay(world, day_ids, *, now):
+    return await repayment.mark_days_paid(
+        world.db, sme_user_id=world.sme.id, repayment_day_ids=day_ids, receipt_file_id=(await receipt_file(world)).id,
+        idempotency_key=f"pay-{uuid.uuid4().hex}", now=now, params=world.params,
+    )
 
 
 def ict(y, m, d, h=0):
@@ -108,6 +116,69 @@ async def test_monthly_accrual_pro_rata_to_received_and_sums_to_total(loan):
     for t in tr:
         total = (await world.db.execute(select(func.sum(InvestorFeeAccrual.fee_vnd)).where(InvestorFeeAccrual.tranche_id == t.id))).scalar_one()
         assert total == 83_333
+
+
+@pytest.mark.parametrize("catch_up", [False, True], ids=["on-time", "catch-up"])
+async def test_late_days_settled_after_the_last_month_is_billed_are_billed_the_month_they_settle(world, catch_up):
+    # Repaying from Wed 11 Nov: the last month (March) has six days. The first investor's last three, 4, 5 and 8
+    # March, go unpaid and turn LATE; every other day is paid on its due date. (late-status.md rule 6)
+    tr = await fund_window(world, [10 * M] * 10)
+    assert (await close_now(world, now=at(days=8))).repayment_start_date == dt.date(2026, 11, 11)
+    rows = (await world.db.execute(select(RepaymentDay).order_by(RepaymentDay.due_date, RepaymentDay.day_index))).scalars().all()
+    mine = [r for r in rows if r.tranche_id == tr[0].id]
+    late = mine[-3:]
+    assert [r.due_date for r in late] == [dt.date(2027, 3, 4), dt.date(2027, 3, 5), dt.date(2027, 3, 8)]
+    by_date: dict[dt.date, list] = {}
+    for r in rows:
+        if r not in late:
+            by_date.setdefault(r.due_date, []).append(r.id)
+    for due_date, ids in by_date.items():
+        await pay(world, ids, now=dt.datetime.combine(due_date, dt.time(10), tzinfo=ICT))
+    await repayment.mark_late_days(world.db, now=ict(2027, 3, 9), params=world.params)
+    assert {r.status for r in late} == {"LATE"}
+    await repayment.settle_days(world.db, now=ict(2027, 3, 31))
+
+    async def billed():
+        accruals = (await world.db.execute(select(InvestorFeeAccrual).where(InvestorFeeAccrual.tranche_id == tr[0].id))).scalars().all()
+        return {a.period_month: a for a in accruals}
+
+    await fees.accrue_investor_fees(world.db, now=ict(2027, 4, 1))
+    before = await billed()
+    assert max(before) == dt.date(2027, 3, 1)  # March billed for what arrived; its late days counted for nothing
+    charged = sum(a.fee_vnd for a in before.values())
+    assert charged < 83_333
+
+    # Two of the late days are paid on 3 April: billed pro rata for April, once April has ended.
+    await pay(world, [late[0].id, late[1].id], now=ict(2027, 4, 3, 10))
+    await repayment.settle_days(world.db, now=ict(2027, 4, 5))
+    await fees.accrue_investor_fees(world.db, now=ict(2027, 4, 20))
+    assert await billed() == before  # April has not ended
+    if catch_up:
+        # April's invoice job resumes after a May settlement. April is still billable in May.
+        await pay(world, [late[2].id], now=ict(2027, 5, 4, 10))
+        await repayment.settle_days(world.db, now=ict(2027, 5, 6))
+    may_run = ict(2027, 5, 6) if catch_up else ict(2027, 5, 1)
+    await fees.accrue_investor_fees(world.db, now=may_run)
+    may_accruals = await billed()
+    assert max(may_accruals) == dt.date(2027, 4, 1)
+    april = may_accruals[dt.date(2027, 4, 1)]
+    unpaid = sum(r.gross_vnd for r in late)
+    assert april.received_gross_vnd == late[0].gross_vnd + late[1].gross_vnd
+    assert april.fee_vnd == fees.investor_fee_for_month(83_333, charged, april.received_gross_vnd, unpaid)
+    assert await fees.accrue_investor_fees(world.db, now=may_run) == 0  # idempotent
+
+    # The last one is paid in May: June's run completes the fee to exactly its total.
+    if not catch_up:
+        await pay(world, [late[2].id], now=ict(2027, 5, 4, 10))
+        await repayment.settle_days(world.db, now=ict(2027, 5, 6))
+    await fees.accrue_investor_fees(world.db, now=ict(2027, 6, 1))
+    after = await billed()
+    assert after[dt.date(2027, 5, 1)].received_gross_vnd == late[2].gross_vnd
+    assert sum(a.fee_vnd for a in after.values()) == 83_333
+    assert sum(a.received_gross_vnd for a in after.values()) == sum(r.gross_vnd for r in mine)
+    invoices = await fees.issue_investor_invoices(world.db, now=ict(2027, 6, 1))
+    assert all(a.invoice_id is not None for a in (await billed()).values())
+    assert {i.period_month for i in invoices if i.payer_user_id == tr[0].investor_id} >= {dt.date(2027, 5, 1)}
 
 
 async def test_accrual_job_idempotent(loan):

@@ -1,6 +1,6 @@
 from logging.config import fileConfig
 
-from sqlalchemy import create_engine, pool
+from sqlalchemy import create_engine, pool, text
 
 from alembic import context
 
@@ -29,6 +29,9 @@ config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = Base.metadata
 
+# Stable database-local advisory lock key (ASCII "FundLok").
+MIGRATION_LOCK_ID = 0x46756E644C6F6B
+
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
@@ -52,6 +55,12 @@ def run_migrations_online() -> None:
         context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
+            # Bound waits for both the advisory lock and the locks taken by DDL.
+            connection.exec_driver_sql("SET LOCAL lock_timeout = '10s'")
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_id)"),
+                {"lock_id": MIGRATION_LOCK_ID},
+            )
             context.run_migrations()
 
 

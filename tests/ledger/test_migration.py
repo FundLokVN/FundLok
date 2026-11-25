@@ -6,6 +6,8 @@ rest of the suite uses via conftest's session-scoped `_migrate_schema`
 fixture) so a downgrade here can't leave any other test without a schema.
 """
 import os
+import subprocess
+from contextlib import closing
 
 import psycopg2
 import pytest
@@ -65,8 +67,6 @@ def _admin_connect_kwargs():
 
 
 def test_migration_upgrade_and_downgrade_clean():
-    import subprocess
-
     admin_conn = psycopg2.connect(**_admin_connect_kwargs())
     admin_conn.autocommit = True
     try:
@@ -116,3 +116,20 @@ def test_migration_upgrade_and_downgrade_clean():
         with admin_conn.cursor() as cur:
             cur.execute(f'DROP DATABASE IF EXISTS "{MIGRATION_CHECK_DB}"')
         admin_conn.close()
+
+
+def test_migration_times_out_when_another_migration_holds_the_lock():
+    dbname = make_url(ALEMBIC_DATABASE_URL).database
+    connect_kwargs = {**_admin_connect_kwargs(), "dbname": dbname}
+    env = {**os.environ, "DATABASE_URL": ALEMBIC_DATABASE_URL}
+
+    with closing(psycopg2.connect(**connect_kwargs)) as blocker, blocker.cursor() as cur:
+        # Use the same database-local key as the boot migration in alembic/env.py.
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (0x46756E644C6F6B,))
+        result = subprocess.run(
+            [*ALEMBIC_COMMAND, "upgrade", "head"], cwd=ROOT, env=env,
+            capture_output=True, text=True, timeout=30,
+        )
+
+    assert result.returncode != 0, "a second Alembic process ran while the lock was held"
+    assert "canceling statement due to lock timeout" in result.stderr
