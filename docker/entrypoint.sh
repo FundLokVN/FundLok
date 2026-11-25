@@ -2,9 +2,9 @@
 # Container entrypoint: apply DB migrations, then start the API server.
 #
 # Running `alembic upgrade head` here means a deploy to Cloud Run automatically
-# brings the database schema up to date. It is idempotent — a no-op when the DB
-# is already at head — and Alembic takes a lock so parallel instance starts are
-# safe.
+# brings the database schema up to date. alembic/env.py serializes migration
+# transactions with a PostgreSQL advisory lock and limits each lock wait to
+# 10 seconds. A migration failure stops startup before the API serves traffic.
 #
 # Driver split (matches CI): the app runs on async psycopg (postgresql+asyncpg),
 # Alembic runs on sync psycopg2 (postgresql+psycopg2). Both read DATABASE_URL,

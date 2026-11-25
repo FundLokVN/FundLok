@@ -103,7 +103,7 @@ After approval the ticket is an ordinary paid ticket: the SME's 24-hour receipt 
    b. The latest receipt's `check_status` is `MATCHED` and its `payment_timing` is `LATE`.
    c. No open dispute on the ticket and no `TopUpPledge` for it.
    d. The window has Day-14 cut-offs (`window_cutoffs` is not None), is `OPEN` or `AWAITING_PAYMENT` (not yet closing), and `now < receipt_deadline_at` (15:30 ICT on Day 14). The server clock decides; there is no override.
-   e. `capacity_left(window) >= tranche.amount_vnd`.
+   e. `capacity_left(window) >= tranche.amount_vnd`. The late ticket itself holds no capacity (`capacity_used` skips `LATE_MONEY` as it skips `LATE_RECEIPT`), so on a full round its own amount is the room it needs.
    f. `staff_id` is not the ticket's investor (the same rule as every receipt review).
    g. `reason` is not blank.
 2. **Effect**, in one transaction: refuse a bank transaction that already funds another ticket (the same test as `receipt_auto.bank_txn_used_elsewhere`, repeated in `late_money.py` so `app/direct_transfer/` does not import from `app/market/`); set `tranche.receipt_submitted_at` if empty; `transition_tranche(UNDER_REVIEW → ATTESTED, actor_role="ADMIN", reason, confirm_deadline = now + sme_confirm_hours)`; set `tranche.review_cause = None`; set `transfer.confirmation_level = "ATTESTED"`; `refresh_window_fullness`; log `LATE_MONEY_APPROVED` and notify the lender. The admin wrapper `approve_late_money_transfer` (which has the IP) appends the audit row (`TRANCHE`, `LATE_MONEY_APPROVED`, actor, `reason`, `ip_address`), rings the business's bell and commits.
@@ -147,6 +147,8 @@ After approval the ticket is an ordinary paid ticket: the SME's 24-hour receipt 
 - `test_approval_never_bypasses_the_sme_receipt_check`
 - `test_a_late_money_ticket_shows_under_needs_action_until_1530`
 - `test_the_new_transition_is_only_allowed_for_a_late_money_ticket`
+- `test_late_money_can_be_approved_on_a_full_round`
+- `test_late_money_is_refused_when_other_lenders_took_the_room`
 
 ---
 

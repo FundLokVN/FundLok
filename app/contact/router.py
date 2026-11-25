@@ -1,13 +1,13 @@
 from fastapi import APIRouter, BackgroundTasks
 from app.contact.schemas import ContactRequest
 from app.utils.email import send_contact_autoreply, send_contact_notification
-from app.utils.captcha import verify_turnstile_token
+from app.utils.captcha import verify_turnstile_token_async
 
 router = APIRouter(prefix="/contact", tags=["contact"])
 
 @router.post("")
-def submit_contact_form(contact: ContactRequest, background_tasks: BackgroundTasks):
-    verify_turnstile_token(contact.turnstile_token)
+async def submit_contact_form(contact: ContactRequest, background_tasks: BackgroundTasks):
+    await verify_turnstile_token_async(contact.turnstile_token)
 
     # Forward the submission to the team inbox (CONTACT_INBOX_EMAIL) — without
     # this the message body only ever existed in the request.

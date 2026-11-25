@@ -165,7 +165,7 @@ class RateCalculationRequest(BaseModel):
 
     # Cloudflare Turnstile. Optional on the type so the field can be absent in
     # tests and in local dev, where CLOUDFLARE_TURNSTILE_SECRET_KEY is unset and
-    # `verify_turnstile_token` no-ops. In any environment that HAS the secret
+    # the captcha verifier no-ops. In any environment that HAS the secret
     # configured, a missing token is rejected by that verifier, not here.
     turnstile_token: str | None = Field(default=None, max_length=4096)
 

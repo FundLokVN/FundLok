@@ -39,8 +39,10 @@ def compute_min_raise(target_vnd: int, pct: int) -> int:
 
 
 async def capacity_used(db: AsyncSession, window_id: UUID) -> int:
-    """Amount held by live tranches. UNDER_REVIEW holds capacity except a LATE_RECEIPT review, which does not
-    (otherwise re-entering review could overbook the window; reviving re-checks capacity). PROVISIONAL(Q-D3)."""
+    """Amount held by live tranches. UNDER_REVIEW holds capacity except a LATE_RECEIPT or LATE_MONEY review, which
+    does not (otherwise re-entering review could overbook the window; reviving or approving re-checks capacity).
+    PROVISIONAL(Q-D3). Late money must not hold room, or approving it would count the ticket against itself and a
+    full round could never take it (late-money-approval.md); close._pending_tranches skips both causes the same way."""
     base = (
         await db.execute(
             select(func.coalesce(func.sum(Tranche.amount_vnd), 0)).where(
@@ -53,7 +55,7 @@ async def capacity_used(db: AsyncSession, window_id: UUID) -> int:
             select(func.coalesce(func.sum(Tranche.amount_vnd), 0)).where(
                 Tranche.window_id == window_id,
                 Tranche.status == "UNDER_REVIEW",
-                (Tranche.review_cause.is_(None)) | (Tranche.review_cause != "LATE_RECEIPT"),
+                (Tranche.review_cause.is_(None)) | (Tranche.review_cause.not_in(("LATE_RECEIPT", "LATE_MONEY"))),
             )
         )
     ).scalar_one()
