@@ -244,9 +244,9 @@ async def receipt_file(world: World):
     )
 
 
-async def pay_days_through(world: World, now: dt.datetime) -> int:
-    """The SME pays every day due before `now`'s ICT date at 10:00 on its due date, oldest first, each date's days with
-    one receipt: the days are PRESUMED_PAID and settle once the investor's 24 hours pass (repayment.settle_days)."""
+async def pay_days_through(world: World, now: dt.datetime, *, paid_at: dt.time = dt.time(10)) -> int:
+    """The SME pays every day due before `now`'s ICT date at `paid_at` on its due date, oldest first, each date's days
+    with one receipt: the days are PRESUMED_PAID and settle once the investor's 24 hours pass (repayment.settle_days)."""
     from sqlalchemy import select
 
     days = (
@@ -262,7 +262,7 @@ async def pay_days_through(world: World, now: dt.datetime) -> int:
     for due_date, ids in by_date.items():
         await repayment.mark_days_paid(
             world.db, sme_user_id=world.sme.id, repayment_day_ids=ids, receipt_file_id=(await receipt_file(world)).id,
-            idempotency_key=f"pay-{uuid.uuid4().hex}", now=dt.datetime.combine(due_date, dt.time(10), tzinfo=ICT),
+            idempotency_key=f"pay-{uuid.uuid4().hex}", now=dt.datetime.combine(due_date, paid_at, tzinfo=ICT),
             params=world.params,
         )
     return len(days)

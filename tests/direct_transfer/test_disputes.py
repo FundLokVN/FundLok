@@ -9,7 +9,9 @@ from app.direct_transfer import close, disputes, repayment, reservation, tranche
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.models import CicEvent, Dispute, DisputeEvidence, EvidenceLog, RepaymentDay, Tranche, Transfer
 
-from .helpers import T0, accept, at, attested_tranche, fund_window, make_investor, open_window, reserve, upload_receipt
+from .helpers import (
+    T0, accept, at, attested_tranche, fund_window, make_investor, open_window, pay_days_through, reserve, upload_receipt,
+)
 
 M = 1_000_000
 
@@ -41,6 +43,7 @@ async def test_sme_dispute_creates_dispute_with_investor_first(world):
 
 async def test_missed_day_dispute_has_sme_first(loan):
     world, _, tr = loan
+    await pay_days_through(world, ict(2026, 11, 5), paid_at=dt.time(17))  # the SME's proof, Wed 17:00
     day = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.tranche_id == tr[0].id, RepaymentDay.day_index == 1, RepaymentDay.kind == "INSTALMENT"))).scalar_one()
     await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="not received", file_id=None, now=ict(2026, 11, 5, 10), params=world.params)
     d = (await world.db.execute(select(Dispute).where(Dispute.repayment_day_id == day.id))).scalar_one()
@@ -174,6 +177,7 @@ async def test_late_receipt_revival_with_capacity_confirms(world):
 
 async def test_paid_outcome_matches_repayment_day(loan):
     world, _, tr = loan
+    await pay_days_through(world, ict(2026, 11, 5), paid_at=dt.time(17))  # the SME's proof, Wed 17:00
     day = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.tranche_id == tr[0].id, RepaymentDay.day_index == 1, RepaymentDay.kind == "INSTALMENT"))).scalar_one()
     await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="not received", file_id=None, now=ict(2026, 11, 5, 10), params=world.params)
     d = (await world.db.execute(select(Dispute).where(Dispute.repayment_day_id == day.id))).scalar_one()
@@ -186,6 +190,7 @@ async def test_paid_outcome_matches_repayment_day(loan):
 
 async def test_not_paid_outcome_makes_the_day_late(loan):
     world, _, tr = loan
+    await pay_days_through(world, ict(2026, 11, 5), paid_at=dt.time(17))  # the SME's proof, Wed 17:00
     day = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.tranche_id == tr[0].id, RepaymentDay.day_index == 1, RepaymentDay.kind == "INSTALMENT"))).scalar_one()
     await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="not received", file_id=None, now=ict(2026, 11, 5, 10), params=world.params)
     d = (await world.db.execute(select(Dispute).where(Dispute.repayment_day_id == day.id))).scalar_one()
