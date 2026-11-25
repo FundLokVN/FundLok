@@ -14,7 +14,7 @@ from sqlalchemy import select, update
 from app.admin import system_email
 from app.core.timezone import ICT
 from app.direct_transfer.models import RepaymentDay
-from app.scheduled_jobs import auth, reminders
+from app.scheduled_jobs import acceptance, auth, reminders
 from app.scheduled_jobs.models import RepaymentReminder
 from tests.direct_transfer.helpers import at, close_now, fund_window, make_world
 
@@ -26,6 +26,7 @@ FEES = "/internal/jobs/fee-invoice-emails"
 REPAYMENT_DAY = "/internal/jobs/repayment-day"
 INVOICES = "/internal/jobs/invoices"
 CIC_DAILY_BALANCE = "/internal/jobs/cic-daily-balance"
+FUNDING_ADVANCE = "/internal/jobs/funding-advance"
 
 
 @pytest.fixture
@@ -100,6 +101,22 @@ def _vnd(amount: int) -> str:
 # --------------------------------------------------------------------------- #
 # Only Cloud Scheduler
 # --------------------------------------------------------------------------- #
+
+
+async def test_funding_advance_answers_500_when_a_round_failed_so_the_scheduler_retries(client, scheduler, monkeypatch):
+    runs = iter([{"advanced": 2, "contracts": 1, "failed": 1}, {"advanced": 1, "contracts": 1, "failed": 0}])
+
+    async def run(db):
+        return next(runs)
+
+    monkeypatch.setattr(acceptance, "run_funding_advance", run)
+    client.cookies.clear()
+    headers = {"Authorization": "Bearer valid"}
+    failed = await client.post(FUNDING_ADVANCE, headers=headers)
+    assert failed.status_code == 500, failed.text
+    assert failed.json() == {"job": "funding-advance", "advanced": 2, "contracts": 1, "failed": 1}
+    retried = await client.post(FUNDING_ADVANCE, headers=headers)
+    assert retried.status_code == 200 and retried.json()["failed"] == 0
 
 
 @pytest.mark.parametrize("path", [REMINDERS, FEES])

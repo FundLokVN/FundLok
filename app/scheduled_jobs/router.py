@@ -8,7 +8,7 @@ Spec: docs/specs/scheduled_jobs/cloud-scheduler-jobs.md.
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -117,12 +117,17 @@ class AcceptanceReminderResult(BaseModel):
 
 
 @router.post("/funding-advance", response_model=FundingAdvanceResult)
-async def run_funding_advance(db: AsyncSession = Depends(get_db)):
+async def run_funding_advance(response: Response, db: AsyncSession = Depends(get_db)):
     """Daily, 00:00, 15:00 and 15:40 ICT: advance every commit-then-accept round with something due. At 00:00 on Day 13
     the pledge list is final and each lender's loan contract is generated; at 15:00 the silence rule decides a round
     the SME did not decide; from 15:40 on Day 14 the round closes and its pooled loan forms with everyone who paid
-    (Money flow FINAL v1.0). Idempotent."""
+    (Money flow FINAL v1.0). Idempotent.
+
+    500 when any round failed (the others are committed), so Cloud Scheduler retries in minutes instead of leaving the
+    round to the next scheduled run: a 00:00 failure would otherwise keep it OPEN through the SME's whole Day 13."""
     result = await acceptance.run_funding_advance(db)
+    if result["failed"]:
+        response.status_code = 500
     return FundingAdvanceResult(job="funding-advance", **result)
 
 
