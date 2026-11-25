@@ -2,7 +2,7 @@
 
 Scripts that drive the handbook's Appendix M test script against a **local** FundLok stack, through the real API, and record a PASS / FAIL / PARTIAL result for every step. They produced the pre-launch test report of 14 Nov 2026 (`reference/results-2026-11-15.jsonl`, the old pay-at-commit flow) and, rewritten for the commit-then-accept flow (pledges, Day-13 signing and decision, Day-14 contract code, 15-minute QR, 14:45 / 15:00 / 15:30, late money as a top-up pledge), the run of 19 Nov 2026 on backend `main` @ `1722dd1` (`reference/results-2026-11-19.jsonl`). A clean run takes about 8 minutes.
 
-> **Local, throwaway database only.** The run creates accounts and projects, moves deadlines directly in the database to fast-forward time, and runs worker jobs with a fake clock. Never point it at a shared, staging or production database.
+> **Local, throwaway database only.** The run creates accounts and projects, moves deadlines directly in the database to fast-forward time, and runs scheduler services with a fixed clock. Never point it at a shared, staging or production database.
 
 ## Prerequisites
 
@@ -67,7 +67,7 @@ The 14 Nov table below is kept for the scripts that did not change (s01, s02, s0
 | `s09_m5_fee_m2_6_second_project.py` | 5.6, 5.7, 2.6 | SME fee amount, due date, QR and late interest; with P1 repaying, the same SME tries the same business and another business again (refused since the one-borrower rule, d2ea9ee) |
 | `s10_p2_last_ticket.py` | 3.6, 3.7 | P2 at 45M: four 10M tickets, then F's 10M, 4M and 5M |
 | `s11_p3_sme_decision.py` | 4.1–4.7 | P3 at 100M with 40M confirmed; looks for accept/decline routes; manual accept; silence until the window ends gives REPAYING plus a fee |
-| `s12_m8_month_end.py` | 8.1–8.3, 7.3 | Runs the **undeployed** worker jobs with a month-end clock: presumed-paid days, the lender fee against the formula, lender visibility, the unpaid lender-fee block |
+| `s12_m8_month_end.py` | 8.1–8.3, 7.3 | Runs the repayment and invoice timers with a month-end clock: late days, the lender fee against the formula, lender visibility, the unpaid lender-fee block |
 | `s13_m12_platform_rules.py` | 12.1–12.3 | Account statuses available to staff; scans the rendered public pages for collection and custody wording |
 | `s14_manual_and_static.py` | 1.1, 2.2, 2.4, 5.8, 6.6, M9–M11 | Records the outcome of the manual browser checks below and of the not-built sections |
 

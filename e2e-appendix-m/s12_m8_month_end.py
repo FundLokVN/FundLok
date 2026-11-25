@@ -1,5 +1,5 @@
-"""M8 and M7.3/M10.1 at month end: run the worker jobs (app/direct_transfer/jobs.py repayment_day_job + invoice_job;
-the ARQ worker is not deployed, so they run in-process) with a clock just after month end, then two days later.
+"""M8 and M7.3/M10.1 at month end: run the repayment and invoice timers
+with a clock just after month end, then two days later.
 
 Checks: a day the SME never paid becomes LATE (never presumed paid); the lender fee counts only money received,
 divided by the balance at the start of the month or on the Disbursement Date if later, rounded to the nearest dong.

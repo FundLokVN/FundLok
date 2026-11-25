@@ -7,8 +7,7 @@ Each one is a documented workaround (see README "What is bypassed"):
                              conftest.make_eligible_investor(signed_agreement=True).
   * attach_and_activate   -- SME signing needs three CA-signed PDFs verified with NEAC. Same as
                              conftest.attach_signed_listing_documents, then the real activation service.
-  * run_jobs              -- worker jobs (app/direct_transfer/jobs.py) are not deployed in production; run once
-                             with a fixed clock to show what they would do.
+  * run_jobs              -- run the repayment and invoice scheduler services with a fixed clock.
 """
 import asyncio
 import datetime as dt
@@ -81,15 +80,19 @@ def attach_and_activate(application_id: str, admin_id: str) -> bool:
 
 
 def run_jobs(clocks: list[dt.datetime]) -> list[dict]:
-    """Run repayment_day_job then invoice_job once per clock, all in one event loop (the async engine's pool is
-    bound to the loop that first used it)."""
+    """Run the repayment and invoice timers at each supplied time."""
     async def go():
-        from app.direct_transfer import jobs
+        from app.core.database import SessionLocal
+        from app.scheduled_jobs.money_timers import run_invoices, run_repayment_day
+
         out = []
-        for clock in clocks:
-            ctx = {"clock": lambda clock=clock: clock}
-            out.append({"clock": clock.isoformat(), "repayment_day_job": await jobs.repayment_day_job(ctx),
-                        "invoice_job": await jobs.invoice_job(ctx)})
+        async with SessionLocal() as db:
+            for clock in clocks:
+                out.append({
+                    "clock": clock.isoformat(),
+                    "repayment_day": await run_repayment_day(db, now=clock),
+                    "invoices": await run_invoices(db, now=clock),
+                })
         return out
     return _run(go())
 
