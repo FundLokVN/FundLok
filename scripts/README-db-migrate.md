@@ -48,7 +48,7 @@ Works on **macOS, Linux and Windows**. It needs [Bun](https://bun.sh), **Python 
 
 You don't need to put the tools on your PATH. The tool searches those locations, version-checks every install it finds, and picks the oldest one that can dump the source. Use `--pg-bin-dir` to force a specific install, e.g. `--pg-bin-dir "C:\Program Files\PostgreSQL\16\bin"`.
 
-**2. Stop writes to the source.** Turn on maintenance mode (admin → System, system admins only) before copying a live database. Rows written after the copy starts are not copied, and the row-count check would flag them. The Didit KYC webhook (`/kyc/webhook`) is still allowed through during maintenance, so avoid copying while a KYC verification is in progress.
+**2. Stop writes to the source.** Turn on maintenance mode (admin → System, system admins only) before copying a live database. Rows written after the copy starts are not copied, and the row-count check would flag them.
 
 **3. Get the right connection URLs:**
 
