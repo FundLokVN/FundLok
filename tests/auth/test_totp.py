@@ -8,11 +8,12 @@ else — enrolment, recovery codes, disable — is guard rails around that.
 
 import pyotp
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.auth import totp, totp_crypto
 from app.core.config import settings
 from app.users.models import TotpRecoveryCode, User
+from app.utils.jwt import create_verification_token
 
 # The password make_user registers with. Imported rather than retyped so a
 # change to the fixture cannot leave these tests failing on a stale literal.
@@ -23,8 +24,16 @@ def code_for(secret: str) -> str:
     return pyotp.TOTP(secret).now()
 
 
+async def verify_address(client, user):
+    response = await client.get(
+        "/auth/verify-email", params={"token": create_verification_token(user["id"])}
+    )
+    assert response.status_code == 200, response.text
+
+
 async def enrol(client, user) -> tuple[str, list[str]]:
     """Take an account all the way through enrolment. Returns (secret, codes)."""
+    await verify_address(client, user)
     setup = await client.post(
         "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
     )
@@ -38,6 +47,15 @@ async def enrol(client, user) -> tuple[str, list[str]]:
     )
     assert enable.status_code == 200, enable.text
     return secret, enable.json()["recovery_codes"]
+
+
+async def enrol_legacy_unverified_totp(client, db_session, user):
+    """Seed the legacy state that email verification, reset and OAuth must handle."""
+    await enrol(client, user)
+    await db_session.execute(
+        update(User).where(User.id == user["id"]).values(email_verified=False)
+    )
+    await db_session.commit()
 
 
 # --------------------------------------------------------------------------- #
@@ -127,8 +145,59 @@ class TestChallengeToken:
 # --------------------------------------------------------------------------- #
 
 
+async def test_unverified_email_cannot_start_totp_setup(client, make_user, db_session):
+    user = await make_user(role="INVESTOR")
+    body = {"password": user["password"]}
+
+    refused = await client.post("/auth/2fa/setup", json=body, headers=user["headers"])
+
+    assert refused.status_code == 403, refused.text
+    row = (await db_session.execute(select(User).where(User.id == user["id"]))).scalar_one()
+    assert row.totp_secret is None
+
+    await verify_address(client, user)
+    assert (await client.post("/auth/2fa/setup", json=body, headers=user["headers"])).status_code == 201
+
+
+async def test_unverified_email_cannot_enable_a_previously_staged_secret(client, make_user, db_session):
+    user = await make_user(role="INVESTOR")
+    secret = totp.generate_secret()
+    row = (await db_session.execute(select(User).where(User.id == user["id"]))).scalar_one()
+    row.totp_secret = totp_crypto.encrypt_secret(secret)
+    await db_session.commit()
+
+    refused = await client.post(
+        "/auth/2fa/enable", json={"code": code_for(secret)}, headers=user["headers"]
+    )
+
+    assert refused.status_code == 403, refused.text
+    await db_session.refresh(row)
+    assert not row.totp_enabled
+
+    await verify_address(client, user)
+    await db_session.refresh(row)
+    assert row.totp_secret is None
+
+
+async def test_first_email_verification_clears_legacy_totp(client, make_user, db_session):
+    user = await make_user(role="INVESTOR")
+    await enrol_legacy_unverified_totp(client, db_session, user)
+
+    await verify_address(client, user)
+
+    row = (await db_session.execute(select(User).where(User.id == user["id"]))).scalar_one()
+    assert row.email_verified
+    assert not row.totp_enabled
+    assert row.totp_secret is None
+    assert row.totp_confirmed_at is None
+    assert not (await db_session.execute(
+        select(TotpRecoveryCode).where(TotpRecoveryCode.user_id == row.id)
+    )).scalars().all()
+
+
 async def test_setup_returns_a_secret_and_a_scannable_uri(client, make_user):
     user = await make_user(role="INVESTOR")
+    await verify_address(client, user)
 
     resp = await client.post(
         "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
@@ -143,6 +212,7 @@ async def test_setup_returns_a_secret_and_a_scannable_uri(client, make_user):
 async def test_setup_alone_does_not_enable_anything(client, make_user, db_session):
     # An abandoned setup must never lock anyone out of their account.
     user = await make_user(role="INVESTOR")
+    await verify_address(client, user)
     await client.post(
         "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
     )
@@ -160,6 +230,7 @@ async def test_setup_alone_does_not_enable_anything(client, make_user, db_sessio
 
 async def test_enable_requires_a_valid_code(client, make_user):
     user = await make_user(role="INVESTOR")
+    await verify_address(client, user)
     await client.post(
         "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
     )
@@ -174,6 +245,7 @@ async def test_enable_requires_a_valid_code(client, make_user):
 
 async def test_enable_without_setup_is_refused(client, make_user):
     user = await make_user(role="INVESTOR")
+    await verify_address(client, user)
 
     resp = await client.post(
         "/auth/2fa/enable", json={"code": "123456"}, headers=user["headers"]
@@ -603,6 +675,7 @@ async def test_the_stored_secret_is_encrypted_not_plaintext(
 ):
     """The point of the whole module: a database dump must not yield secrets."""
     user = await make_user(role="INVESTOR")
+    await verify_address(client, user)
 
     setup = await client.post(
         "/auth/2fa/setup", json={"password": user.get("password")}, headers=user["headers"]
@@ -688,6 +761,7 @@ async def test_setup_is_refused_when_no_encryption_key_is_configured(
 ):
     """Fail closed: no key, no enrolment — never a plaintext fallback."""
     user = await make_user(role="INVESTOR")
+    await verify_address(client, user)
     monkeypatch.setattr(settings, "TOTP_ENCRYPTION_KEY", None)
 
     resp = await client.post(
@@ -706,6 +780,7 @@ async def test_an_invalid_encryption_key_is_reported_not_ignored(
     client, make_user, monkeypatch
 ):
     user = await make_user(role="INVESTOR")
+    await verify_address(client, user)
     monkeypatch.setattr(settings, "TOTP_ENCRYPTION_KEY", "not-a-fernet-key")
 
     resp = await client.post(

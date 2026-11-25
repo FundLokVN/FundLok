@@ -196,24 +196,17 @@ async def delete_credential(
 # --------------------------------------------------------------------------
 
 
-def _require_verified_email(user: User) -> None:
-    """Only an account whose address has been proven may add a passkey.
-
-    /auth/register signs in an account for any address without proof that the
-    registrant owns it. A passkey added in that window is a sign-in credential
-    planted by someone who may not be the owner, and it never asks for the
-    password the owner later sets. The frontend already holds unverified
-    accounts on /verify-email; this makes the API agree.
-    """
+def require_verified_email(user: User, *, method: str = "a passkey") -> None:
+    """Require proof of email ownership before adding a sign-in credential."""
     if not user.email_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Verify your email address before adding a passkey.",
+            detail=f"Verify your email address before adding {method}.",
         )
 
 
 async def registration_options(db: AsyncSession, user: User) -> str:
-    _require_verified_email(user)
+    require_verified_email(user)
     existing = await credentials_for_user(db, user.id)
     if len(existing) >= MAX_CREDENTIALS_PER_USER:
         raise HTTPException(
@@ -259,7 +252,7 @@ async def registration_options(db: AsyncSession, user: User) -> str:
 async def verify_registration(
     db: AsyncSession, user: User, credential: dict, name: str | None
 ) -> WebAuthnCredential:
-    _require_verified_email(user)
+    require_verified_email(user)
     challenge_b64 = _expected_challenge(credential)
     row = await _consume_challenge(
         db, challenge_b64=challenge_b64, purpose=PURPOSE_REGISTRATION

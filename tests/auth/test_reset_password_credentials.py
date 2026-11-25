@@ -18,7 +18,7 @@ from sqlalchemy import select
 
 from app.lending.models import AuditLog
 from app.users.models import TotpRecoveryCode, User, WebAuthnChallenge, WebAuthnCredential
-from tests.auth.test_totp import enrol
+from tests.auth.test_totp import enrol, enrol_legacy_unverified_totp
 
 NEW_PASSWORD = "Brand-New-Passw0rd!"
 
@@ -176,7 +176,7 @@ async def test_a_reset_clears_2fa_enrolled_before_anyone_verified(
 ):
     # Left in place, the squatter's authenticator would lock the owner out.
     squatter = await make_user()
-    await enrol(client, squatter)
+    await enrol_legacy_unverified_totp(client, db_session, squatter)
 
     await _reset(client, squatter["email"], reset_links)
 
@@ -208,7 +208,7 @@ async def test_the_reset_audit_row_records_what_was_removed(
 ):
     user = await make_user()
     await _plant_passkey(db_session, user["id"])
-    await enrol(client, user)
+    await enrol_legacy_unverified_totp(client, db_session, user)
 
     await _reset(client, user["email"], reset_links)
 

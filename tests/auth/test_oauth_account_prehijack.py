@@ -19,7 +19,7 @@ from app.oauth.schema import OAuthProvider
 from app.oauth.service import GoogleOAuthProvider
 from app.users.models import RefreshToken, TotpRecoveryCode, User, WebAuthnCredential
 from conftest import DEFAULT_PASSWORD
-from tests.auth.test_totp import enrol
+from tests.auth.test_totp import enrol_legacy_unverified_totp
 
 
 @pytest.fixture
@@ -98,7 +98,7 @@ async def test_attackers_sessions_are_revoked(client, make_user, stub_google, db
 async def test_attackers_2fa_is_removed(client, make_user, stub_google, db_session):
     # Left in place, the attacker's authenticator would lock the owner out.
     attacker = await make_user()
-    await enrol(client, attacker)
+    await enrol_legacy_unverified_totp(client, db_session, attacker)
 
     stub_google(attacker["email"])
     await _victim_signs_in_with_google(client)
