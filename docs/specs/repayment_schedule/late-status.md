@@ -124,6 +124,7 @@ LATE ──[SME marks paid with receipt]─────────────�
 - [ ] `test_presume_paid_days_ignores_days_without_proof`
 - [ ] `test_late_day_posts_no_ledger_leg`
 - [ ] `test_late_day_is_not_counted_in_investor_fee_accrual`
+- [x] `test_late_days_settled_after_the_last_month_is_billed_are_billed_the_month_they_settle` (`tests/direct_transfer/test_fees.py`): rule 6 when every due month is already billed. The month the late day settles in gets one accrual once it has ended: the rest of the fee when everything has settled, otherwise pro rata.
 - [ ] `test_late_day_cleared_when_sme_pays_with_receipt`
 - [ ] `test_marking_a_newer_day_while_an_older_day_is_unpaid_is_refused`
 - [ ] `test_staff_not_paid_decision_makes_the_day_late`
