@@ -76,7 +76,7 @@ from app.notifications.models import (
     EVENT_APPLICATION_REJECTED,
 )
 from app.notifications import realtime
-from app.auth.service import password_fingerprint
+from app.auth.service import normalize_email, password_fingerprint, user_by_email
 from app.utils.email import send_admin_invite_email, send_application_updated_email
 from app.utils.jwt import create_password_reset_token
 from app.notifications.service import create_notification
@@ -1184,17 +1184,14 @@ async def invite_admin(
     for by the inviter and proven when the link is used; without it the
     frontend's verification gate would trap the new admin on /verify-email.
     """
-    # Emails are stored as entered (register does the same), so compare
-    # case-insensitively: "Ops@x.com" and "ops@x.com" must not become two
-    # accounts, one of them an admin.
-    existing = (
-        await db.execute(select(User.id).where(func.lower(User.email) == email.lower()))
-    ).scalar_one_or_none()
-    if existing is not None:
+    # Compared case-insensitively and stored lowercase, like every new account
+    # (auth.service.normalize_email): "Ops@x.com" and "ops@x.com" must not
+    # become two accounts, one of them an admin.
+    if await user_by_email(db, email) is not None:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
 
     user = User(
-        email=email,
+        email=normalize_email(email),
         full_name=full_name,
         role=Role.ADMIN.value,
         status=USER_STATUS_ACTIVE,

@@ -10,7 +10,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import totp
-from app.auth.service import create_token_pair, is_unseen_device
+from app.auth.service import create_token_pair, is_unseen_device, normalize_email, user_by_email
 from app.auth.user_agent import describe_browser, describe_device
 from app.utils.audit import append_audit
 from app.utils.email import send_new_device_signin_alert
@@ -176,8 +176,9 @@ class OAuthProviderBase(ABC):
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Your sign-in provider has not verified this email address",
             )
-        result = await db.execute(select(User).where(User.email == user_info.email))
-        user = result.scalar_one_or_none()
+        # Case-insensitive: Google sends "lan.nguyen@gmail.com" for an account registered as "Lan.Nguyen@gmail.com",
+        # and matching exactly would make that person a second account without their KYC or investments.
+        user = await user_by_email(db, user_info.email)
         if user:
             # The provider has already confirmed ownership of this email, so an
             # existing account that signed up via email/password should be
@@ -187,7 +188,7 @@ class OAuthProviderBase(ABC):
             return user
 
         user = User(
-            email=user_info.email,
+            email=normalize_email(user_info.email),
             phone=None,
             full_name=user_info.full_name,
             # No password: this account signs in through the provider. The
