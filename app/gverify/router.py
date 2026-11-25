@@ -2,8 +2,8 @@
 
 Spec: docs/specs/gverify/ekyc-kyc-verification.md
 
-Parallel to (not replacing) the Didit `/kyc/*` flow in app/verification/.
-GVerify has no hosted UI and no webhook: the investor submits ID images +
+The legacy Didit `/kyc/*` flow is removed; only its tables remain
+(app/verification/models.py). GVerify has no hosted UI and no webhook: the investor submits ID images +
 portrait in one request and the response carries the final verdict.
 
 Two ways to submit:

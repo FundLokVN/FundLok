@@ -4,10 +4,10 @@
 .env.*
 venv/
 .venv/
-node_modules/
-__pycache__/
-*.pyc
-*.pyo
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
 .pytest_cache/
 .ruff_cache/
 *.db
@@ -17,3 +17,23 @@ docker-compose.override.yml
 # React Email source (emails/). The API only reads the exported HTML in
 # app/email_templates/, so neither the sources nor node_modules belong in the image.
 emails/
+
+# Not read at runtime. The image runs docker/entrypoint.sh (alembic, then
+# uvicorn): it needs app/ (its YAML/JSON data, fonts, email templates and
+# assets live inside app/), alembic/, alembic.ini, docker/ and requirements.txt.
+# Tests run on the CI host or in scripts/docker_test.sh's own python container
+# (a bind mount), never inside this image.
+docs/
+tests/
+scripts/
+tools/
+references/
+.claude/
+.github/
+conftest.py
+pytest.ini
+requirements-dev.txt
+grading_demo.py
+grading_test_cases.csv
+GRADING_TEST_CASES_GUIDE.md
+STAKEHOLDER_EXCEL_DATA_DICTIONARY.md

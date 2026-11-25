@@ -22,10 +22,6 @@ In a route::
         cached = await redis.get(f"thing:{thing_id}")
 
 In a service or script, import `redis_client` directly.
-
-Not for ARQ: the ARQ worker (app/scheduler/worker.py) keeps its own
-connection, because ARQ stores pickled job payloads as bytes and this client
-decodes every reply to `str`.
 """
 from redis.asyncio import Redis
 
