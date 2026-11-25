@@ -4,7 +4,9 @@ in the last test, which runs only where `tesseract` with Vietnamese data is inst
 import datetime as dt
 import io
 import shutil
+import struct
 import subprocess
+import zlib
 
 import pytest
 
@@ -181,6 +183,51 @@ async def test_an_unreadable_image_sends_the_receipt_to_staff():
     reading = await reader.read(content=b"\x89PNG\r\n\x1a\nbroken", content_type="image/png")
 
     assert reading.confident is False and reading.notes == ("OCR_FAILED:UNREADABLE_IMAGE",)
+
+
+def _black_png(width: int, height: int) -> bytes:
+    """A valid 1-bit black PNG of any size, built row by row: neither the test nor the file is big (64 MP is ~8 KB),
+    yet Pillow would decode it to a byte per pixel."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    row = bytes(1 + (width + 7) // 8)  # filter byte + packed pixels
+    packer = zlib.compressobj(9)
+    idat = b"".join(packer.compress(row) for _ in range(height)) + packer.flush()
+    ihdr = struct.pack(">IIBBBBB", width, height, 1, 0, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+@pytest.mark.parametrize("width,height", [
+    (8_000, 8_000),  # 64 MP: under Pillow's own limit, so it used to be decoded and handed to Tesseract
+    (600, 34_000),  # 20 MP, but 82 MP once upscaled 2x for Tesseract
+    (20_000, 20_000),  # 400 MP: Pillow's DecompressionBombError, still only an unreadable image
+])
+async def test_an_image_too_large_to_read_is_refused_before_it_is_decoded(monkeypatch, width, height):
+    from PIL import ImageFile
+
+    decoded = []
+    load = ImageFile.ImageFile.load
+    monkeypatch.setattr(ImageFile.ImageFile, "load", lambda self: decoded.append(self.size) or load(self))
+    content = _black_png(width, height)
+    assert len(content) < 64 * 1024
+    # No engine here: had the image got as far as Tesseract, the note would be ENGINE_MISSING.
+    reader = TesseractReceiptReader(ReceiptOcrSettings(enabled=True), binary="/nonexistent/tesseract")
+
+    reading = await reader.read(content=content, content_type="image/png")
+
+    assert reading.confident is False and reading.fields is None
+    assert reading.notes == ("OCR_FAILED:UNREADABLE_IMAGE",)
+    assert decoded == []
+
+
+@pytest.mark.parametrize("width,height", [(4032, 3024), (1290, 9000)])  # a 12 MP phone photo, a long screenshot
+async def test_phone_photos_and_long_screenshots_are_still_read(width, height):
+    reader = TesseractReceiptReader(ReceiptOcrSettings(enabled=True), binary="/nonexistent/tesseract")
+
+    reading = await reader.read(content=_black_png(width, height), content_type="image/png")
+
+    assert reading.notes == ("OCR_FAILED:ENGINE_MISSING",)  # prepared and handed to the engine (absent here)
 
 
 def _text_pdf(lines: list[str]) -> bytes:

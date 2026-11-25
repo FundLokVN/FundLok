@@ -5,8 +5,9 @@ The engine is Tesseract, run as a local process inside the API container with th
 AI service is called (Q-025, transfer-and-evidence.md rule 15). A PDF the bank generated is read from its text
 layer instead (exact text, no OCR).
 
-`TesseractReceiptReader.read` never raises: any failure (engine missing, timeout, unreadable image) is a reading
-with no fields and a note, which sends the receipt to staff exactly as before OCR existed.
+`TesseractReceiptReader.read` never raises: any failure (engine missing, timeout, unreadable or oversized image,
+see MAX_OCR_PIXELS) is a reading with no fields and a note, which sends the receipt to staff exactly as before OCR
+existed.
 
 Switches (environment, read per request so a Cloud Run revision can flip them):
   RECEIPT_OCR_ENABLED            "1" to read receipts at all (default off)
@@ -34,6 +35,12 @@ logger = logging.getLogger("app.uploads.receipt_ocr")
 
 NOTE_OCR_FAILED = "OCR_FAILED"  # OCR_FAILED:<why>
 NOTE_NO_TEXT = "NO_TEXT"
+
+# The most pixels a receipt image may have, after the small-image upscale, to be decoded and read. The size comes
+# from the header, so a bigger image is refused before a pixel is decoded: a 1 MB PNG can claim 13,000 x 13,000
+# pixels (~676 MB decoded). Receipts are bank-app screenshots (3-5 MP, a long scrolling one ~12 MP) or phone photos
+# (12 MP); 40 MP leaves room for those. A 48-50 MP "full resolution" photo goes to staff, as an unreadable one does.
+MAX_OCR_PIXELS = 40_000_000
 
 
 def _flag(name: str) -> bool:
@@ -144,15 +151,24 @@ def tsv_to_lines(tsv: str) -> list[OcrLine]:
     return lines
 
 
+class ImageTooLarge(ValueError):
+    """The image would be more than MAX_OCR_PIXELS once upscaled; it was not decoded."""
+
+
 def _prepare_image(content: bytes) -> bytes:
-    """Grayscale PNG, upscaled when small (Tesseract reads phone-size text better at ~2x)."""
+    """Grayscale PNG, upscaled when small (Tesseract reads phone-size text better at ~2x). Raises ImageTooLarge,
+    before decoding, for an image over MAX_OCR_PIXELS (Pillow's own DecompressionBombError, raised by `open` above
+    ~179 MP, is an exception like any other here)."""
     from PIL import Image
 
-    with Image.open(io.BytesIO(content)) as img:
+    with Image.open(io.BytesIO(content)) as img:  # reads the header only
+        width, height = img.size
+        factor = 1 if width >= 1000 else 2 if width >= 500 else 3
+        if width * height * factor * factor > MAX_OCR_PIXELS:
+            raise ImageTooLarge(f"{width}x{height}")
         img.load()
         gray = img.convert("L")
-    if gray.width < 1000:
-        factor = 2 if gray.width >= 500 else 3
+    if factor > 1:
         gray = gray.resize((gray.width * factor, gray.height * factor), Image.LANCZOS)
     out = io.BytesIO()
     gray.save(out, format="PNG")
@@ -194,7 +210,10 @@ class TesseractReceiptReader:
 
         try:
             image = await asyncio.to_thread(_prepare_image, content)
-        except Exception:
+        except ImageTooLarge as exc:
+            logger.warning("receipt OCR: image too large to read (%s)", exc)
+            return _failed(self.engine, "UNREADABLE_IMAGE")
+        except Exception:  # also Pillow's DecompressionBombError (and its warning, where warnings are errors)
             logger.warning("receipt OCR: unreadable image")
             return _failed(self.engine, "UNREADABLE_IMAGE")
         try:

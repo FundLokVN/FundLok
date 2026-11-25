@@ -196,6 +196,30 @@ def test_a_workbook_part_over_the_cap_is_refused_before_parsing(monkeypatch):
     assert _code(archive(year_of_listings(months=1))) == "UNREADABLE_LISTING"
 
 
+def _workbook_with_sheet_of(size: int) -> bytes:
+    """A workbook whose one sheet is valid XML of exactly `size` bytes (blank padding inside sheetData)."""
+    head = b"<worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><sheetData>"
+    tail = b"</sheetData></worksheet>"
+    return archive({"xl/worksheets/sheet1.xml": head + b" " * (size - len(head) - len(tail)) + tail})
+
+
+def test_a_workbook_part_over_8_mb_is_refused_and_one_of_8_mb_is_read():
+    from app.uploads.parsers import xlsx
+
+    with pytest.raises(xlsx.XlsxError, match="too large"):
+        xlsx.read_first_sheet(_workbook_with_sheet_of(8 * 1024 * 1024 + 1))
+    assert xlsx.read_first_sheet(_workbook_with_sheet_of(8 * 1024 * 1024)) == []
+
+
+def test_a_busy_month_of_5000_invoices_fits_under_the_part_cap():
+    buyer = "CÔNG TY TNHH THƯƠNG MẠI VÀ DỊCH VỤ KHÁCH HÀNG MIỀN NAM"
+    invoices = [Inv(n, "0100000001", 1_000_000 + n, buyer_name=buyer) for n in range(1, 5001)]
+
+    listing = parser.parse_listing(listing_xlsx(2026, 10, invoices), "HDT10.xlsx")
+
+    assert len(listing.invoices) == 5000
+
+
 def test_grading_fields_map_onto_engine_names():
     fields = grading_fields(parse_einvoice_zip(archive(year_of_listings())).as_dict())
     assert len(fields["monthly_revenue_latest"]) == 12

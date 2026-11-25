@@ -50,7 +50,9 @@ import defusedxml.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-MAX_XML_BYTES = 20 * 1024 * 1024
+# ElementTree builds the whole tree (~15-30x the XML in memory), so the cap is kept small. A full HTKK statement
+# package, notes included, is expected well under 1 MB.
+MAX_XML_BYTES = 8 * 1024 * 1024
 _STATEMENT_FORMS = {"683", "684", "699"}  # HTKK statement-package form codes seen in the wild
 
 

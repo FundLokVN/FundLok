@@ -6,8 +6,8 @@
 | **Owner** | Phat (proposed) |
 | **Implementer(s)** | Phat (backend in `app/uploads/`, `app/market/`, `app/admin/`; admin UI). No change to `app/direct_transfer/` code |
 | **Module** | `app/uploads/parsers/bank_receipt.py`, `app/uploads/receipt_ocr.py`, `app/market/receipt_auto.py`, `app/market/funding_router.py`, `app/admin/funding.py`; repayment receipts (section 10): `app/market/repayment_receipt_check.py`, `app/market/repayment_router.py`, `app/market/repayment_receipts.py`, `app/admin/repayments.py` |
-| **Version** | 0.2 |
-| **Date** | 2026-11-14 |
+| **Version** | 0.3 |
+| **Date** | 2026-11-25 |
 | **Related ADR** | ADR-009 (point 4: evidence, not bank data; `ReceiptExtractor`) |
 | **Depends on** | `transfer-and-evidence.md` (receipt checks, rules 3-9), `funding-window.md` (tranche states), D-031 (verified holder name) |
 | **Decisions** | Phat, 2026-11-14: local OCR; a match confirms, a mismatch denies; an unsure read goes to staff; the loan waits for staff review; staff can reverse either verdict; the receiver's bank, account and holder name are checked |
@@ -81,7 +81,7 @@ round advanced or closed     -> CONFIRMED tickets form their loans (existing beh
 
 ## 6. Business Rules
 
-1. **Local only.** Images are read by Tesseract (`vie+eng`) inside the API container; PDFs from their text layer. A reading never raises: an engine failure, timeout or unreadable file is a reading with a note, and the receipt waits for staff.
+1. **Local only.** Images are read by Tesseract (`vie+eng`) inside the API container; PDFs from their text layer. A reading never raises: an engine failure, timeout or unreadable file is a reading with a note, and the receipt waits for staff. An image is read only up to **40 megapixels** (`receipt_ocr.MAX_OCR_PIXELS`), counted after the 2-3x upscale of a narrow image and taken from the file's header, so a bigger one is never decoded: it is a reading with `OCR_FAILED:UNREADABLE_IMAGE`, like an unreadable one (a small PNG can claim 13,000 x 13,000 pixels, ~676 MB decoded). Screenshots (3-12 MP) and 12 MP phone photos fit; a 48-50 MP full-resolution photo goes to staff.
 2. **Reading.** Fields are found by their Vietnamese or English labels (`bank_receipt.LABELS`), matched exactly first and fuzzily (similarity >= 0.88) only otherwise; the best label wins. A value that does not look like its field is skipped. Unlabelled, a single amount with a currency mark or a single date-and-time is used; two different ones are ambiguous. A time without seconds is the end of that minute.
 3. **Confident** means: every required field (`receipts.REQUIRED_FIELDS`) read; none ambiguous; the payee account not masked (a masked payer account is fine: it is not compared); each required field's line confidence >= `RECEIPT_OCR_MIN_CONFIDENCE`. Only a confident read can decide.
 4. **Checks.** `check_receipt` unchanged (amount exact, reference in the memo, payee account = the business's account, payer name = KYC name, time window), plus `DUPLICATE_BANK_TXN`, plus the receiver:
@@ -90,7 +90,7 @@ round advanced or closed     -> CONFIRMED tickets form their loans (existing beh
 5. **Verdict.** Any failed check: **DENIED**. All checks pass and the receiving bank and holder name are both shown, identified and verified: **ACCEPTED**. Otherwise **NEEDS_REVIEW**, with the reason: the reading's notes, `PAYEE_BANK_NOT_SHOWN`, `PAYEE_BANK_UNRECOGNIZED`, `PAYEE_NAME_NOT_SHOWN`, `PAYEE_NAME_UNVERIFIED`, `LATE_RECEIPT` (a late receipt is always staff's), `AUTO_VERDICT_OFF`.
 6. **Accepted, not yet lent.** An accepted ticket is CONFIRMED (it counts toward the round; the business's bell rings as for a staff approval and it is emailed as for any receipt) but its loan forms only when staff approve it, or when the round is advanced or closed. Until then staff can deny it.
 7. **Denied.** The receipt is rejected as staff reject one: the ticket waits for a receipt again while its hold lasts, the bank transaction id is not claimed (a correct receipt of the same transfer can still come), the business is not told. The same file cannot be uploaded again (`DUPLICATE_FILE`).
-8. **OCR runs before the ticket and round are locked** and is skipped on an idempotent replay.
+8. **OCR runs before the ticket and round are locked** and is skipped on an idempotent replay. It runs only on the caller's own ticket: for another investor's ticket (or, on `/sme-receipt`, a ticket outside the business's rounds) or an unknown id, the 404 `NOT_FOUND` "Ticket not found" the upload always returned comes first, and nothing is read.
 9. **Staff review** is once per automatic verdict, needs no typing, and its note is optional (an empty one records "Approved/Denied after viewing the receipt"). Nobody reviews their own transfer.
 
 ## 7. Error Cases
@@ -99,6 +99,8 @@ round advanced or closed     -> CONFIRMED tickets form their loans (existing beh
 |---|---|---|
 | Tesseract missing or crashes, or times out | Reading with `OCR_FAILED:<why>`; staff | 202 `AWAITING_FIELDS` |
 | Scanned PDF without text | `NO_TEXT`; staff | 202 `AWAITING_FIELDS` |
+| Image over 40 MP (after the upscale), or one Pillow refuses as a decompression bomb | Not decoded; `OCR_FAILED:UNREADABLE_IMAGE`; staff | 202 `AWAITING_FIELDS` |
+| Receipt for a ticket that is not the caller's, or an unknown id | Not read | 404 `NOT_FOUND` (as without OCR) |
 | Field misread with low confidence | `LOW_CONFIDENCE:<field>`; staff | 202 `AWAITING_FIELDS` |
 | Amount misread confidently | Denied; staff can approve it | 202 `REJECTED` `AMOUNT_MISMATCH` |
 | Paid to the same account number at another bank | Denied | 202 `REJECTED` `PAYEE_BANK_MISMATCH` |
@@ -114,6 +116,8 @@ round advanced or closed     -> CONFIRMED tickets form their loans (existing beh
 - [x] `test_the_payer_account_is_never_taken_for_the_payee_account`, `test_a_slightly_misread_label_still_matches_but_a_different_one_does_not`
 - [x] `test_a_masked_payee_account_cannot_decide_the_receipt`, `test_a_field_read_two_different_ways_is_left_for_staff`, `test_two_different_unlabelled_amounts_are_ambiguous`, `test_a_missing_field_or_a_low_confidence_line_is_not_confident`
 - [x] `test_a_missing_engine_sends_the_receipt_to_staff_instead_of_failing`, `test_an_unreadable_image_sends_the_receipt_to_staff`, `test_a_bank_pdf_is_read_from_its_text_layer_without_ocr`, `test_tesseract_reads_a_rendered_receipt` (runs where Tesseract with Vietnamese data is installed)
+- [x] `test_an_image_too_large_to_read_is_refused_before_it_is_decoded`, `test_phone_photos_and_long_screenshots_are_still_read`
+- [x] `test_a_receipt_for_a_ticket_that_is_not_the_investors_own_is_never_read`, `test_a_business_receipt_for_a_ticket_outside_its_own_rounds_is_never_read`
 - [x] `test_with_ocr_off_every_receipt_waits_for_staff`
 - [x] `test_a_matching_receipt_is_confirmed_automatically_and_its_loan_waits_for_staff`
 - [x] `test_a_receipt_that_does_not_match_is_denied_and_the_investor_can_upload_another`
@@ -189,3 +193,4 @@ round advanced or closed     -> CONFIRMED tickets form their loans (existing beh
 |---|---|---|---|
 | 0.1 | 2026-11-14 | Phat / Claude | First draft, with the implementation behind switches |
 | 0.2 | 2026-11-14 | Phat / Claude | Section 10: business repayment receipts read and checked; a clear mismatch refuses the upload, a match only advises the investor |
+| 0.3 | 2026-11-25 | Phat / Claude | Backend audit of 25 Nov: images over 40 MP are not decoded (rule 1); OCR only on the caller's own ticket (rule 8) |
