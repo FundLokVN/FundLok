@@ -288,6 +288,10 @@ async def expire_lapsed_holds(db: AsyncSession, *, window_id: UUID, now: dt.date
     Edward's `expire_holds_job` does this for every window on a timer, but only `app/direct_transfer/worker.py`
     schedules it and nothing runs that worker yet, so a lapsed hold would otherwise block its investor
     (ALREADY_HAS_LIVE_TRANCHE) and the window's capacity for good. Same rule as the job, so both can run.
+
+    Never on a window with Day-14 cut-offs (commit-then-accept): its holds end at 14:45, but receipts are taken until
+    15:30 and the 15:00 / 15:35 Day-14 step decides who is a no-show. Expiring them here, on any page view after
+    14:45, would hide every unpaid lender from that step.
     """
     lapsed = (
         Tranche.window_id == window_id,
@@ -295,7 +299,13 @@ async def expire_lapsed_holds(db: AsyncSession, *, window_id: UUID, now: dt.date
         Tranche.receipt_submitted_at.is_(None),
         Tranche.hold_expires_at <= now,
     )
-    if (await db.execute(select(Tranche.id).where(*lapsed).limit(1))).first() is None:
+    first = (
+        select(Tranche.id)
+        .join(FundingWindow, FundingWindow.id == Tranche.window_id)
+        .where(*lapsed, FundingWindow.pay_deadline_at.is_(None))
+        .limit(1)
+    )
+    if (await db.execute(first)).first() is None:
         return 0
     window = await lock_window(db, window_id)
     rows = (await db.execute(select(Tranche).where(*lapsed))).scalars().all()

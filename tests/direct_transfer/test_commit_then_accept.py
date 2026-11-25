@@ -35,7 +35,7 @@ from app.notifications.models import Notification
 from app.repayment_schedule.models import Facility
 from app.scheduled_jobs import acceptance
 
-from .helpers import T0, attested_tranche, good_fields, make_investor, make_world, open_window
+from .helpers import T0, attested_tranche, good_fields, make_investor, make_world, open_window, upload_receipt
 
 M = 1_000_000
 TERMS = "terms-1"
@@ -690,6 +690,49 @@ async def test_funding_advance_job_forms_the_loan_after_the_day14_no_show_step(w
     assert (await acceptance.run_funding_advance(world.db, now=FORMATION_RUN))["failed"] == 0
     window = await _reload(world)
     assert window.status == "REPAYING" and window.confirmed_total_vnd == 60 * M and tickets[0].status == "ACTIVE"
+
+
+async def _accepted_by_lender(world, amounts):
+    """An accepted round: each lender with its ticket, whose hold ends at 14:45 on Day 14."""
+    investors = await _awaiting_sme(world, amounts)
+    await _decide(world, "ACCEPT", now=COMMIT_CLOSES + dt.timedelta(hours=1))
+    out = []
+    for inv in investors:
+        ticket = (await world.db.execute(select(Tranche).where(Tranche.investor_id == inv.user.id))).scalar_one()
+        assert ticket.hold_expires_at == PAY_DEADLINE
+        out.append((inv, ticket))
+    return out
+
+
+async def test_reading_the_round_after_1445_expires_no_ticket_so_the_1535_step_finds_the_no_show(world):
+    (_, paid), (late, unpaid) = await _accepted_by_lender(world, [60 * M, 20 * M])
+    await _paid(world, paid)
+    after = PAY_DEADLINE + dt.timedelta(minutes=1)  # 14:46: anyone opens the listing page or the admin rounds page
+    assert await funding.expire_lapsed_holds(world.db, window_id=world.window.id, now=after) == 0
+    assert await tranches.expire_holds(world.db, now=after) == 0
+    assert unpaid.status == "RESERVED"  # still the Day-14 step's to decide
+
+    window = await _day14_close(world)
+    assert unpaid.status == "EXPIRED"
+    standing = await world.db.get(LenderStanding, late.user.id)
+    assert (standing.status, standing.no_show_count) == ("LOCKED", 1)  # a no-show, counted
+    assert window.status == "REPAYING" and window.confirmed_total_vnd == 60 * M
+
+
+async def test_a_receipt_uploaded_at_1450_for_money_paid_on_time_is_checked_not_set_aside(world):
+    ((inv, ticket),) = await _accepted_by_lender(world, [60 * M])
+    await transition_tranche(world.db, ticket, "SIGNED", now=PAY_DEADLINE - dt.timedelta(minutes=30))
+    pay = await tranches.payment_instructions(
+        world.db, tranche_id=ticket.id, investor_id=inv.user.id, now=PAY_DEADLINE - dt.timedelta(minutes=15),
+        params=world.params,
+    )
+    fields = good_fields(world, ticket, inv, when=PAY_DEADLINE - dt.timedelta(minutes=5), memo=pay.qr_code)
+    # Paid at 14:40 inside its QR's 15 minutes; the receipt arrives at 14:50, well before the 15:30 cut-off.
+    await upload_receipt(world, inv, ticket, now=PAY_DEADLINE + dt.timedelta(minutes=5), fields=fields)
+    assert ticket.status == "ATTESTED" and ticket.review_cause is None  # not a LATE_RECEIPT for staff
+
+    window = await _day14_close(world, now=FORMATION_RUN + dt.timedelta(days=2))  # its SME 24 hours have passed
+    assert window.status == "REPAYING" and window.confirmed_total_vnd == 60 * M and ticket.status == "ACTIVE"
 
 
 async def test_no_stub_interest_in_commit_then_accept_windows(world):
