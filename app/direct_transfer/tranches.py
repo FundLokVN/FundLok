@@ -264,8 +264,16 @@ async def submit_receipt(
         raise conflict("RECEIPT_DEADLINE_PASSED", "Receipts for this round could be uploaded until 15:30")
 
     # A hold that has lapsed but whose job has not yet run is treated as lapsed (lazy expiry): the money may have
-    # moved, so the receipt is accepted as a LATE_RECEIPT for staff rather than refused.
-    if tranche.status in ("RESERVED", "SIGNED") and tranche.receipt_submitted_at is None and now > tranche.hold_expires_at:
+    # moved, so the receipt is accepted as a LATE_RECEIPT for staff rather than refused. Not on a round with Day-14
+    # cut-offs: there the hold ends at 14:45 only to close signing and new QRs. Receipts are taken until 15:30, the
+    # Day-14 timing check below tells on-time money from late money, and the 15:00 / 15:35 step handles lenders who
+    # sent nothing (day14-transfer-rule.md rules 5, 6 and 8).
+    if (
+        cutoffs is None
+        and tranche.status in ("RESERVED", "SIGNED")
+        and tranche.receipt_submitted_at is None
+        and now > tranche.hold_expires_at
+    ):
         await _expire_now(db, tranche, now)
     late = tranche.status == "EXPIRED"
     if late and window.status not in ("OPEN", "FULL", "CLOSING", "AWAITING_PAYMENT"):
@@ -719,12 +727,17 @@ async def confirm_lapsed_tranches(
 
 
 async def expire_holds(db: AsyncSession, *, now: dt.datetime) -> int:
-    """RESERVED and SIGNED tranches whose hold has lapsed and that have no submitted receipt -> EXPIRED."""
+    """RESERVED and SIGNED tranches whose hold has lapsed and that have no submitted receipt -> EXPIRED. Not on
+    windows with Day-14 cut-offs, whose unpaid tickets are the Day-14 step's (see `submit_receipt`)."""
     candidates = (
         await db.execute(
-            select(Tranche.window_id).where(
-                Tranche.status.in_(("RESERVED", "SIGNED")), Tranche.receipt_submitted_at.is_(None), Tranche.hold_expires_at <= now
-            ).distinct()
+            select(Tranche.window_id)
+            .join(FundingWindow, FundingWindow.id == Tranche.window_id)
+            .where(
+                Tranche.status.in_(("RESERVED", "SIGNED")), Tranche.receipt_submitted_at.is_(None), Tranche.hold_expires_at <= now,
+                FundingWindow.pay_deadline_at.is_(None),
+            )
+            .distinct()
         )
     ).scalars().all()
     expired = 0
