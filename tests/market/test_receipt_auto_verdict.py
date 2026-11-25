@@ -276,6 +276,49 @@ async def test_a_replayed_upload_is_not_read_again(client, db_session, make_admi
     assert reader.calls == 1
 
 
+async def test_a_receipt_for_a_ticket_that_is_not_the_investors_own_is_never_read(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    s = await _reserved(client, db_session, make_admin, make_user, make_eligible_investor)
+    stranger = await make_eligible_investor(await make_user(role="INVESTOR"))
+    reader = _use_ocr(_reading(s["tranche"]))
+
+    for tranche_id in (s["tranche"]["id"], str(uuid.uuid4())):  # another investor's ticket, a made-up id
+        resp = await _upload(client, stranger, tranche_id, PNG + uuid.uuid4().bytes)
+        assert resp.status_code == 404 and resp.json()["detail"] == "Ticket not found"
+        assert resp.headers["X-Error-Code"] == "NOT_FOUND"
+    assert reader.calls == 0
+
+    assert (await _upload(client, s["investor"], s["tranche"]["id"], PNG + uuid.uuid4().bytes)).status_code == 202
+    assert reader.calls == 1
+
+
+async def test_a_business_receipt_for_a_ticket_outside_its_own_rounds_is_never_read(
+    client, db_session, make_admin, make_user, make_eligible_investor
+):
+    s = await _reserved(client, db_session, make_admin, make_user, make_eligible_investor)
+    other_sme = await make_user(role="SME")
+    reader = _use_ocr(_reading(s["tranche"]))
+
+    async def sme_receipt(user, tranche_id):
+        return await client.post(
+            f"/funding/tranches/{tranche_id}/sme-receipt",
+            files={"file": ("arrived.png", PNG + uuid.uuid4().bytes, "image/png")},
+            headers=user["headers"],
+        )
+
+    for tranche_id in (s["tranche"]["id"], str(uuid.uuid4())):  # another business's ticket, a made-up id
+        resp = await sme_receipt(other_sme, tranche_id)
+        assert resp.status_code == 404 and resp.json()["detail"] == "Ticket not found"
+        assert resp.headers["X-Error-Code"] == "NOT_FOUND"
+    assert reader.calls == 0
+
+    # Its own business is read as before (and told, as before, that the ticket is not yet waiting for it).
+    own = await sme_receipt(s["sme"], s["tranche"]["id"])
+    assert own.status_code == 400 and own.headers["X-Error-Code"] == "INVALID_TRANSITION"
+    assert reader.calls == 1
+
+
 # --------------------------------------------------------------------------- #
 # what staff see
 # --------------------------------------------------------------------------- #
