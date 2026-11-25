@@ -84,10 +84,9 @@ os.environ["ZALO_APP_ID"] = ""
 os.environ["ZALO_APP_SECRET"] = ""
 os.environ["ZALO_OA_REFRESH_TOKEN"] = ""
 os.environ["ZALO_ZBS_DEVELOPMENT_MODE"] = "False"
-# Belt-and-suspenders: never let tests touch real R2 / Didit even if a local
-# .env has them configured.
+# Belt-and-suspenders: never let tests touch real R2 even if a local
+# .env has it configured.
 os.environ["R2_ENDPOINT_URL"] = ""
-os.environ["DIDIT_API_KEY"] = ""
 
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy import select, text  # noqa: E402

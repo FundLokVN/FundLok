@@ -30,7 +30,7 @@ and Scoop installs are found automatically; --pg-bin-dir overrides. On Neon, use
 the direct (non "-pooler") host.
 
 Migrating a live database: switch maintenance mode on first so the source
-stops changing mid-copy. Paths in MAINTENANCE_ALLOW_PREFIXES (e.g. /kyc/webhook)
+stops changing mid-copy. Paths in MAINTENANCE_ALLOW_PREFIXES (e.g. /auth, /admin)
 can still write; anything they write after the dump starts is not copied.
 """
 

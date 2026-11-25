@@ -53,9 +53,8 @@ pyotp==2.10.0         # TOTP second factor (app/auth/totp.py); RFC 6238, no netw
 
 # ── Migrations, mail, storage ────────────────────────────────────────────────
 alembic==1.18.5          # CAPPED — see the header before bumping
-fastapi-mail==1.6.8
 email-validator==2.3.0
-google-cloud-storage==3.17.1
+Jinja2==3.1.6            # email templates (app/utils/email_templates.py); moved up from the transitive block, not bumped
 boto3==1.43.118          # Cloudflare R2 (S3-compatible) presigned uploads
 pypdf==6.21.4            # CIC credit-report PDFs (app/uploads/parsers/cic.py)
 fpdf2==2.8.9             # SME service agreement PDF the SME downloads and signs (app/loans/agreement/pdf.py); >=2.8.8 for CVE-2026-114609/114610
@@ -63,14 +62,9 @@ defusedxml==0.7.1        # safe XML parsing of uploaded XLSX / e-invoice files (
 python-multipart==0.0.32 # multipart file uploads (FastAPI UploadFile): investors' transfer receipts, app/market/funding_router.py
 PyYAML==6.0.3          # grading engine params loader (app/underwriting/grading/params.py)
 
-# ── Background jobs (ARQ worker, T2) ─────────────────────────────────────────
-# Scheduled/async jobs -- the daily repayment batch (reminders, cutoff, arrears,
-# backstop, T11) and ML scoring run through this, never BackgroundTasks, per
-# CLAUDE.md ("Background jobs go through ARQ -- never BackgroundTasks for
-# financial operations"). Needs a Redis instance (docker-compose `redis` service).
-arq==0.28.0
-# Direct dependency since app/core/redis_client.py imports it (it also comes
-# in through arq). Same pin the freeze produced -- moved here, not bumped.
+# ── Redis (per-IP rate limiter) ──────────────────────────────────────────────
+# Direct dependency since app/core/redis_client.py imports it. Needs a Redis
+# instance (docker-compose `redis` service).
 redis==5.3.1
 
 # ── HTTP client ─────────────────────────────────────────────────────────────
@@ -78,15 +72,20 @@ redis==5.3.1
 # in requirements-dev.txt and never reach the production image (SEC-07).
 httpx==0.28.1
 
+# ── Cloud Scheduler auth ─────────────────────────────────────────────────────
+# app/scheduled_jobs/auth.py verifies Cloud Scheduler's Google-signed OIDC token
+# (google.oauth2.id_token over google.auth.transport.requests). Same pins the
+# freeze produced -- moved up from the transitive block, not bumped.
+google-auth==2.62.0
+requests==2.34.2
+
 # ── Transitive dependencies, pinned for reproducibility ──────────────────────
 # Resolved by pip from the direct requirements above. Do not hand-edit; regenerate
 # with the freeze recipe in the header.
-aiosmtplib==5.1.3
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
 argon2-cffi-bindings==26.1.0
-blinker==1.9.0
 botocore==1.43.118
 certifi==2026.10.19
 cffi==2.1.1
@@ -95,34 +94,22 @@ click==8.5.0
 cryptography==50.0.2
 dnspython==2.9.2
 fonttools==4.68.0
-google-api-core==2.43.0
-google-auth==2.62.0
-google-cloud-core==2.8.0
-google-crc32c==1.9.0
-google-resumable-media==2.11.0
-googleapis-common-protos==1.76.0
 greenlet==3.5.6
 h11==0.16.0
-hiredis==3.5.0
 httpcore==1.0.9
 httptools==0.9.0
 idna==3.20
-Jinja2==3.1.6
 jmespath==1.1.0
 Mako==1.4.3
 MarkupSafe==3.0.4
 opentelemetry-api==1.45.2
 pillow==13.0.0
-proto-plus==1.29.0
-protobuf==7.36.2
 pyasn1==0.6.5
 pyasn1_modules==0.4.2
 pycparser==3.12
 pydantic_core==2.50.1
 pyOpenSSL==26.4.0
 python-dateutil==2.9.0.post0
-regex==2026.9.29
-requests==2.34.2
 s3transfer==0.19.3
 six==1.17.0
 starlette==1.9.0

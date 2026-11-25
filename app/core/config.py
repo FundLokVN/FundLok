@@ -179,19 +179,6 @@ class Settings(BaseSettings):
     # Reply-To, so replying from this inbox answers them directly.
     CONTACT_INBOX_EMAIL: str = "support@fundlok.com"
 
-    # Didit KYC / identity verification (https://docs.didit.me)
-    # The verification API authenticates with a static secret on x-api-key.
-    DIDIT_API_KEY: str | None = None
-    DIDIT_WORKFLOW_ID: str | None = None  # KYC workflow UUID (investors), passed per session
-    DIDIT_KYB_WORKFLOW_ID: str | None = None  # KYB workflow UUID (SMEs / business verification)
-    # Webhook destination secret_shared_key (X-Signature-V2 HMAC). Accepts the
-    # legacy DIDIT_WEBHOOK_SECRET_KEY name as a fallback alias.
-    DIDIT_WEBHOOK_SECRET: str | None = None
-    DIDIT_WEBHOOK_SECRET_KEY: str | None = None
-    DIDIT_BASE_URL: str = "https://verification.didit.me"
-    DIDIT_CALLBACK_URL: str | None = None  # FE return URL; defaults to FRONTEND_URL/kyc/callback
-    DIDIT_LANGUAGE: str = "vi"  # ISO 639-1 UI language for the hosted flow (Vietnamese)
-
     # GVerify / GHub eKYC (Datatrust, API v2.5.1) — direct-API KYC provider,
     # parallel to Didit. See docs/specs/gverify/ekyc-kyc-verification.md.
     GVERIFY_BASE_URL: str | None = None  # partner-provided {api-base-url}
@@ -257,8 +244,7 @@ class Settings(BaseSettings):
     # (app/scheduled_jobs/acceptance.py: company_name, amount, deadline). Unset: in-app and email only.
     ZALO_ZBS_ACCEPTANCE_TEMPLATE_ID: str | None = None
 
-    # ARQ worker (T2 -- HANDOFF-03). The daily repayment batch and ML scoring
-    # run through ARQ, never BackgroundTasks (CLAUDE.md). Points at the
+    # Redis for the per-IP rate limiter (app/core/redis_client.py). Points at the
     # docker-compose `redis` service locally; a managed Redis URL in prod.
     REDIS_URL: str = "redis://localhost:6379/0"
     @property

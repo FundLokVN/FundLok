@@ -6,7 +6,7 @@ API backend for the FundLok fintech platform. The app uses FastAPI, SQLAlchemy, 
 
 - User registration and login with JWT access and refresh tokens
 - Protected user profile endpoint
-- SME, investor, admin, files, loans, underwriting, contracts, market, and payments routes
+- SME, investor, admin, files, loans, underwriting, contracts and market routes
 - Swagger UI at `/docs`
 - Alembic migrations for schema management
 
@@ -53,7 +53,7 @@ bun run dev      # start Postgres/Mailpit/MinIO, then uvicorn --reload on :8000
 | `bun run seed` | Load `scripts/seed_data.sql` into the local DB |
 | `bun run psql` | Open a `psql` shell to `fundlok_dev` |
 | `bun run test` | Run `pytest -q` |
-| `bun run ngrok` | Expose the local API over a public URL (`ngrok http 8000`) — needed for Didit webhooks to reach `/kyc/webhook` in local dev |
+| `bun run ngrok` | Expose the local API over a public URL (`ngrok http 8000`) |
 | `bun run up` / `down` / `stop` / `logs` | Manage the infra containers (Postgres, Mailpit, MinIO) |
 
 Full-container run (builds the image and runs the API in Docker too, prod-like):
@@ -152,10 +152,10 @@ http://127.0.0.1:8000/docs
 If you want sample data in the local database:
 
 ```bash
-docker compose exec -T postgres psql -U fundlok -d fundlok_dev < scripts/Setup_Table_Inserts.sql
+docker compose exec -T postgres psql -U fundlok -d fundlok_dev < scripts/seed_data.sql
 ```
 
-The seed file is useful for reference data and relationship testing. The API smoke test still creates fresh users dynamically.
+(`bun run seed` runs the same command.) The seed file is useful for reference data and relationship testing.
 
 ## Running the tests
 
@@ -194,26 +194,6 @@ docker compose down -v
 docker compose up -d postgres
 ```
 
-## API Smoke Test Script
-
-End-to-end HTTP checks for the public and authenticated routes are available in `scripts/test_all_endpoints.py`.
-
-Prerequisites:
-
-- The API is running locally, default `http://127.0.0.1:8000`
-- `.env` exists in the project root with a valid `DATABASE_URL`
-
-Run:
-
-```bash
-python scripts/test_all_endpoints.py
-```
-
-Optional environment variables:
-
-- `FUNDL_API_BASE_URL` defaults to `http://127.0.0.1:8000`
-- `FUNDL_API_PASSWORD` defaults to `TestPassw0rd!`
-
 ## Cloud Run Notes
 
 For Cloud Run, set `DATABASE_URL` and `SECRET_KEY` in the service environment variables. If either value is missing, the app fails during import and the container never reaches the listening state.
@@ -225,10 +205,9 @@ FundLok/
 ├─ alembic/                     # Database migrations
 ├─ app/                         # Main application code
 ├─ docker/                      # Local Docker init scripts + container entrypoint
-├─ scripts/                     # SQL helpers, smoke tests, reset_db.sh, seed_data.sql
+├─ scripts/                     # SQL helpers, reset_db.sh, seed_data.sql
 ├─ docker-compose.yml           # Local Postgres/Mailpit/MinIO + api service
 ├─ package.json                 # `bun run` task shortcuts
-├─ main.py                      # Root entry point
 ├─ README.md
 └─ requirements.txt
 ```

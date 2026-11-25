@@ -351,9 +351,9 @@ limit would throttle them all as one caller.
    `fundlok:asia-southeast1:fundlok` (Cloud SQL), but `entrypoint.sh` is
    written for Neon ("this container only ever connects to Neon", SSL forced).
    One of the two is vestigial and should be removed/clarified.
-2. **Python version drift.** CI tests on **3.11** (matching `runtime.txt` and
-   CLAUDE.md), but the deployed container runs **3.12-slim**. Tests don't run
-   on the interpreter production uses.
+2. **Python version drift.** CI tests on **3.11** (matching CLAUDE.md), but
+   the deployed container runs **3.12-slim**. Tests don't run on the
+   interpreter production uses.
 3. **Prod `DATABASE_URL` is invisible to the repo.** It lives only in the
    Cloud Run service config (by design, since commit `36ad182`), so there is
    no versioned record of it. Consider Google Secret Manager references
@@ -367,10 +367,10 @@ limit would throttle them all as one caller.
 6. **No manual approval gate for production.** Deploys to `prod-api` are
    fully automatic on merge to `main`. Consider a GitHub *environment* with
    required reviewers on the `deploy-production` job.
-7. **Legacy files:** `Procfile` and `runtime.txt` are Heroku-era artifacts and
-   are not used by the Cloud Run pipeline. The `cloud-sql-proxy` binary that
-   used to sit at the repo root was removed on 2026-11-03 (built with an
-   unsupported Go, 32 known advisories); install it with
+7. **Legacy files:** the Heroku-era `Procfile` and `runtime.txt` were removed
+   on 2026-11-25 (the Cloud Run pipeline never used them). The
+   `cloud-sql-proxy` binary that used to sit at the repo root was removed on
+   2026-11-03 (built with an unsupported Go, 32 known advisories); install it with
    `brew install cloud-sql-proxy`.
 
 ---

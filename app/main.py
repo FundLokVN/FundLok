@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.admin.router import router as admin_router
 from app.admin.internal_email.router import router as admin_email_router
 from app.scheduled_jobs.router import router as scheduled_jobs_router
-from app.banking.router import router as banking_router
 from app.system.service import is_maintenance_active
 from app.utils.jwt import is_system_admin_session
 from app.system.router import router as system_router
@@ -30,7 +29,6 @@ from app.market.commitments_router import router as commitments_router
 from app.market.funding_router import router as funding_router
 from app.market.repayment_router import router as repayment_router
 from app.oauth.router import router as oauth_router
-from app.payments.router import router as payments_router
 from app.projects.router import router as projects_router
 from app.sme.router import router as sme_router
 from app.underwriting.router import router as underwriting_router
@@ -39,7 +37,6 @@ from app.users.router import router as users_router
 from app.consent.router import router as consent_router
 from app.users.payment_accounts_router import router as payment_accounts_router
 from app.phone_verification.router import router as phone_verification_router
-from app.verification.router import kyb_router, kyc_router
 from app.gverify.router import kyb_router as gverify_kyb_router, router as gverify_router
 from app.contact.router import router as contact_router
 from app.notifications.router import router as notifications_router
@@ -141,7 +138,6 @@ MAINTENANCE_ALLOW_PREFIXES = (
     "/auth",
     "/admin",
     "/system",  # public maintenance-status read must stay reachable
-    "/kyc/webhook",  # Didit verification callbacks must keep arriving
     "/health",
     "/test-db",
     "/docs",
@@ -225,8 +221,6 @@ app.include_router(payment_accounts_router)
 app.include_router(projects_router)
 app.include_router(sme_router)
 app.include_router(files_router)
-app.include_router(kyc_router)
-app.include_router(kyb_router)
 app.include_router(gverify_router)
 app.include_router(gverify_kyb_router)
 app.include_router(loans_router)
@@ -238,8 +232,6 @@ app.include_router(market_router)
 app.include_router(funding_router)
 app.include_router(commitments_router)
 app.include_router(repayment_router)
-app.include_router(payments_router)
-app.include_router(banking_router)
 app.include_router(admin_router)
 app.include_router(system_router)
 app.include_router(contact_router)
