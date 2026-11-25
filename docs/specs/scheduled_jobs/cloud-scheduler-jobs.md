@@ -6,7 +6,7 @@
 | **Owner** | Phat |
 | **Implementer(s)** | Phat; Edward wrote the `repayment-day` and `invoices` routes (HANDOFF-07 E1, Phat reviews) (`app/scheduled_jobs/`, `app/admin/system_email.py`, `app/phone_verification/zalo.py`) |
 | **Module** | `app/scheduled_jobs/` |
-| **Version** | 1.3 (repayment-day also hands expired dispute turns to staff; the unused ARQ worker is removed) |
+| **Version** | 1.4 (`funding-advance` also lapses the SME's 24 hours on every round, the loan formed or not). 1.3: repayment-day also hands expired dispute turns to staff; the unused ARQ worker is removed |
 | **Date** | 2026-11-25 |
 | **Related ADR** | ADR-009 |
 | **Depends on** | `docs/specs/admin/internal-email.md` v2.1 (reminder sender), `docs/specs/admin/fee-invoice-email.md`, Edward's `app/direct_transfer/repayment.todays_payments` |
@@ -201,6 +201,10 @@ call back and Cloud Scheduler retries). All are idempotent.
 - `test_the_money_timer_routes_need_the_scheduler_token`
 - `test_funding_advance_answers_500_when_a_round_failed_so_the_scheduler_retries`
 
+`funding-advance`'s lapse of the SME's 24 hours (`tests/direct_transfer/test_commit_then_accept.py`):
+- `test_a_ticket_attested_after_the_loan_formed_is_voided_with_a_refund_when_its_24_hours_pass`
+- `test_a_failed_lapse_is_counted_and_the_rounds_still_advance`
+
 Money timers (`tests/direct_transfer/test_money_timers.py`, the rest above in the first file):
 - `test_repayment_day_marks_an_unpaid_day_late_after_18h_and_not_before`
 - `test_repayment_day_settles_a_paid_day_after_the_investor_s_24_hours`
@@ -287,7 +291,13 @@ generated; at 15:00 the silence rule decides a round the SME did not decide; fro
 its pooled loan forms with everyone who paid, once no ticket is pending or 2 days after the 14:45 pay deadline.
 `POST /internal/jobs/acceptance-reminders` (no body) runs at 09:00 ICT and reminds the SME 3 days and 1 day before the
 15:00 Day-13 deadline (in the app, by email, and on Zalo once `ZALO_ZBS_ACCEPTANCE_TEMPLATE_ID` is set). Both are
-idempotent and only touch commit-then-accept rounds (`FUNDING_WINDOW_FLOW=COMMIT_THEN_ACCEPT`). `funding-advance`
+idempotent and only touch commit-then-accept rounds (`FUNDING_WINDOW_FLOW=COMMIT_THEN_ACCEPT`), with one exception:
+before the rounds, `funding-advance` confirms every ticket whose SME 24 hours have passed (`ATTESTED` past
+`confirm_deadline`), on any round and in its own transaction (`tranches.confirm_lapsed_tranches`, rows locked
+`FOR UPDATE SKIP LOCKED`, idempotent). That step used to run only from the removed ARQ worker. It matters most once a
+round's loan has formed: the round is `REPAYING` and no longer advanced, so a ticket left out of the loan would stay
+`ATTESTED` for ever; confirmed now, it is `VOID` and the SME owes its refund (`commit-then-accept-flow.md` rule 8). A
+failure in that step is rolled back, logged and counted in `failed` like a failed round. `funding-advance`
 commits each round on its own and answers 500 (same body) when any round failed, so the retries below run it again
 within minutes; rounds already advanced are no-ops on the retry. A round that fails every time keeps the job red
 until someone looks at it.

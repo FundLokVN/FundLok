@@ -177,7 +177,7 @@ Cloud Scheduler, Google OIDC, the same pattern as `/internal/jobs/repayment-remi
 3. **On time** = the receipt's memo, normalised (uppercase, spaces and punctuation removed), **equals** a valid QR code for that tranche, **and** the transaction time falls inside that QR's `[issued_at, expires_at]`. Today's check is a substring match (`receipts.py:134`), so `FLAB12CD34` + any 4 digits would pass; it must become an exact match.
 4. OCR reads a time shown without seconds as the end of that minute (`bank_receipt.py:191-202`, `:59`). For rule 3, treat such a time as the whole minute `[hh:mm:00, hh:mm:59]` and count it on time if that minute overlaps the QR window.
 5. Late money = a receipt that fails rule 3 (an expired or superseded code, no code, a ticket that never showed a QR, or paid after 14:45). It is never refunded by the SME. At 15:00 (`no_show_at`) the lender is locked. After the 15:30 receipt cut-off, a late receipt that matched in every other way (under review as `LATE_MONEY`, no open dispute) becomes a top-up pledge for the amount received; anything messier stays with staff (D-16).
-6. A lender with no receipt at 15:00 is locked; if there is still none after 15:30 the ticket expires as a no-show (`commit-then-accept-flow.md` rule 7), counted once, with no pledge. A lender whose receipt, uploaded between 15:00 and 15:30, proves they paid in time is unlocked again.
+6. A lender with no receipt at 15:00 is locked; if there is still none after 15:30 the ticket expires as a no-show (`commit-then-accept-flow.md` rule 7), counted once, with no pledge. A lender whose receipt, uploaded between 15:00 and 15:30, proves they paid in time is unlocked again: by the 15:35 run if the ticket is `ATTESTED`, `CONFIRMED` or `ACTIVE` by then, otherwise (the receipt could not be read and staff typed it in later) when the pooled loan forms with the ticket (`close._form_loan`), since the Day-14 job stops looking at a round once its loan has formed. Never if another round locked them or something else on this round still holds them.
 7. A top-up pledge can be signed only after unlocking, on any day of the 7-day reopening, before 15:00 ICT. The SME then confirms the money already arrived, through the existing SME receipt/confirm path.
 8. Receipts upload until 15:30 (`receipt_deadline_at`). After that the upload is refused, and the lender contacts support.
 9. The ARQ worker isn't deployed, so the 15:00 lock and pledge need a trigger: a Cloud Scheduler endpoint in `app/scheduled_jobs` (Phat) calling Edward's service function, or a lazy check on each request. Pick one (question 6).
@@ -224,6 +224,7 @@ Backend (Edward, pytest):
 - `test_receipt_refused_after_1530`.
 - `test_top_up_signable_only_after_unlock_before_1500_within_reopening`.
 - Rule 13 (`tests/direct_transfer/test_commit_then_accept.py`, real commit-then-accept rounds whose holds end at 14:45): `test_reading_the_round_after_1445_expires_no_ticket_so_the_1535_step_finds_the_no_show`, `test_a_receipt_uploaded_at_1450_for_money_paid_on_time_is_checked_not_set_aside`.
+- Rule 6, unlock at formation (same file): `test_a_lender_locked_at_1500_whose_receipt_joins_the_loan_is_unlocked_when_it_forms`.
 
 Reminder (Phat, pytest):
 - `test_day14_reminder_targets_unpaid_lenders_on_disbursement_day`.

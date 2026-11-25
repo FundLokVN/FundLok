@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import BackgroundTasks, HTTPException, status
 
 from app.auth import totp, totp_crypto
+from app.auth.email_verification import require_verified_email
 from app.auth.password_policy import reject_breached_password
 from app.auth.user_agent import describe_browser, describe_device
 from app.utils.email import send_new_device_signin_alert
@@ -55,9 +56,30 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def normalize_email(email: str) -> str:
+    """How a new account's address is stored: lowercase. A mailbox is case-insensitive in practice, and a person
+    or a sign-in provider may send Lan.Nguyen@ one day and lan.nguyen@ the next."""
+    return email.strip().lower()
+
+
+async def user_by_email(db: AsyncSession, email: str) -> User | None:
+    """The account for this address, whatever its letter case. Every sign-in path finds accounts here, so
+    "Lan.Nguyen@gmail.com" and Google's "lan.nguyen@gmail.com" are one person, not two accounts.
+
+    Accounts created before addresses were stored lowercase keep the case they were typed in, so two old accounts
+    may differ only in case: the exact spelling wins, then the oldest, and the lookup never fails on them."""
+    return (
+        await db.execute(
+            select(User)
+            .where(func.lower(User.email) == normalize_email(email))
+            .order_by((User.email == email).desc(), User.created_at, User.id)
+            .limit(1)
+        )
+    ).scalars().first()
+
+
 async def authenticate_user(db: AsyncSession, email: str, password: str):
-    result = await db.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
+    user = await user_by_email(db, email)
     # `password_hash` is nullable (OAuth accounts have none until the user sets
     # one). Reject those before passlib sees a None hash -- it would raise
     # rather than return False, turning a normal failed login into a 500.
@@ -526,9 +548,8 @@ async def _record_failed_login(
     # When the address has an account, the row is on the owner's security
     # history (actor = the account, as for TWO_FACTOR_FAILED), so a stream of
     # wrong passwords is something they can see.
-    owner_id = (
-        await db.execute(select(User.id).where(User.email == email))
-    ).scalar_one_or_none()
+    owner = await user_by_email(db, email)
+    owner_id = owner.id if owner is not None else None
     append_audit(
         db,
         entity_type="AUTH",
@@ -750,12 +771,10 @@ async def register_user(
         "message": "If these details are available, a verification email has been sent.",
     }
 
-    existing_email = (
-        await db.execute(select(User).where(User.email == user_in.email))
-    ).scalar_one_or_none()
+    existing_email = await user_by_email(db, user_in.email)
     if existing_email is not None:
         # Don't create or reveal — tell the genuine owner someone used their email.
-        background_tasks.add_task(send_existing_account_notice, to_email=user_in.email)
+        background_tasks.add_task(send_existing_account_notice, to_email=existing_email.email)
         return ack
 
     if user_in.phone:
@@ -769,7 +788,7 @@ async def register_user(
             )
 
     new_user = User(
-        email=user_in.email,
+        email=normalize_email(user_in.email),
         phone=user_in.phone,
         full_name=user_in.full_name,
         password_hash=hash_password(user_in.password),
@@ -798,7 +817,7 @@ async def register_user(
 async def verify_email(db: AsyncSession, token: str) -> dict:
     uid = _parse_user_id(verify_email_token(token))
 
-    result = await db.execute(select(User).where(User.id == uid))
+    result = await db.execute(select(User).where(User.id == uid).with_for_update())
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -806,6 +825,9 @@ async def verify_email(db: AsyncSession, token: str) -> dict:
     if user.email_verified:
         return {"status": "success", "message": "Email already verified"}
 
+    # A secret staged or enabled before this check existed has no proof of ownership.
+    if user.totp_enabled or user.totp_secret:
+        await _clear_totp(db, user)
     user.email_verified = True
     await db.commit()
     return {"status": "success", "message": "Email verified successfully"}
@@ -842,8 +864,7 @@ async def resend_verification(
     """
     await verify_turnstile_token_async(body.turnstile_token)
 
-    result = await db.execute(select(User).where(User.email == body.email))
-    user = result.scalar_one_or_none()
+    user = await user_by_email(db, body.email)
     if user is None or user.email_verified:
         return dict(RESEND_VERIFICATION_ACK)
 
@@ -890,8 +911,7 @@ async def forgot_password(db: AsyncSession, body: ForgotPasswordRequest, backgro
     # Same response whether or not the email exists, to avoid user enumeration.
     response = {"status": "success", "message": "If the email is registered, a password reset link has been sent."}
 
-    result = await db.execute(select(User).where(User.email == body.email))
-    user = result.scalar_one_or_none()
+    user = await user_by_email(db, body.email)
     if not user:
         return response
 
@@ -1037,6 +1057,7 @@ async def start_totp_setup(db: AsyncSession, current_user: User) -> tuple[str, s
     invalidate the authenticator the user is currently relying on. Disable
     first, which requires the password.
     """
+    require_verified_email(current_user, method="an authenticator app")
     if current_user.totp_enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1060,6 +1081,7 @@ async def start_totp_setup(db: AsyncSession, current_user: User) -> tuple[str, s
 
 async def enable_totp(db: AsyncSession, current_user: User, code: str) -> list[str]:
     """Verify a code, turn 2FA on, and return one-time recovery codes."""
+    require_verified_email(current_user, method="an authenticator app")
     if current_user.totp_enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
