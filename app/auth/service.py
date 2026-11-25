@@ -799,7 +799,7 @@ async def register_user(
 async def verify_email(db: AsyncSession, token: str) -> dict:
     uid = _parse_user_id(verify_email_token(token))
 
-    result = await db.execute(select(User).where(User.id == uid))
+    result = await db.execute(select(User).where(User.id == uid).with_for_update())
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
