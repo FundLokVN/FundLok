@@ -389,15 +389,13 @@ async def marketplace_listings(db: AsyncSession, application_ids: list[UUID]):
     (create_contract refuses a second) and a contract at most one listing
     (listings.contract_id is unique), so the mapping is one to one.
 
-    A listing investors join through a funding window (ADR-009) is measured by
-    the window, not by the legacy orders it never gets: raised is what staff
-    confirmed received (CONFIRMED or ACTIVE tickets), investors are the people
-    behind those tickets, and the minimum ticket and closing date are the
-    window's.
+    Commit-then-accept windows show pledges through the payment phase, when
+    the total still represents lenders' commitments. During settlement and
+    repayment the figures come from confirmed or active tickets.
     """
     from sqlalchemy import func
 
-    from app.direct_transfer.models import FundingWindow, Tranche
+    from app.direct_transfer.models import Commitment, FundingWindow, Tranche
     from app.lending.models import Contract, Listing, Order
     from app.projects.schemas import MarketplaceListingOut
 
@@ -428,23 +426,35 @@ async def marketplace_listings(db: AsyncSession, application_ids: list[UUID]):
             await db.execute(select(FundingWindow).where(FundingWindow.listing_id.in_(listing_ids)))
         ).scalars()
     }
-    confirmed = {
-        window_id: (int(raised), int(backers))
-        for window_id, raised, backers in (
+    pledge_window_ids = {
+        window.id
+        for window in windows.values()
+        if window.flow == "COMMIT_THEN_ACCEPT"
+        and window.status in ("OPEN", "FULL", "AWAITING_SME", "AWAITING_PAYMENT")
+    }
+    confirmed_window_ids = {window.id for window in windows.values()} - pledge_window_ids
+    progress = {}
+    for model, window_ids, statuses in (
+        (Commitment, pledge_window_ids, ("PLEDGED", "FOLDED")),
+        (Tranche, confirmed_window_ids, ("CONFIRMED", "ACTIVE")),
+    ):
+        if not window_ids:
+            continue
+        totals = (
             await db.execute(
                 select(
-                    Tranche.window_id,
-                    func.coalesce(func.sum(Tranche.amount_vnd), 0),
-                    func.count(func.distinct(Tranche.investor_id)),
+                    model.window_id,
+                    func.sum(model.amount_vnd),
+                    func.count(func.distinct(model.investor_id)),
                 )
                 .where(
-                    Tranche.window_id.in_([w.id for w in windows.values()]),
-                    Tranche.status.in_(("CONFIRMED", "ACTIVE")),
+                    model.window_id.in_(window_ids),
+                    model.status.in_(statuses),
                 )
-                .group_by(Tranche.window_id)
+                .group_by(model.window_id)
             )
         ).all()
-    } if windows else {}
+        progress.update({window_id: (int(raised), backers) for window_id, raised, backers in totals})
 
     def listing_out(listing: Listing) -> MarketplaceListingOut:
         window = windows.get(listing.id)
@@ -459,7 +469,7 @@ async def marketplace_listings(db: AsyncSession, application_ids: list[UUID]):
                 open_at=listing.open_at,
                 close_at=listing.close_at,
             )
-        raised, backers = confirmed.get(window.id, (0, 0))
+        raised, backers = progress.get(window.id, (0, 0))
         return MarketplaceListingOut(
             id=listing.id,
             status=listing.status,
@@ -467,6 +477,7 @@ async def marketplace_listings(db: AsyncSession, application_ids: list[UUID]):
             funded_amount=raised,
             min_ticket=int(window.min_ticket_vnd),
             investor_count=backers,
+            is_pledge_progress=window.id in pledge_window_ids,
             open_at=window.window_start,
             close_at=window.window_end,
         )

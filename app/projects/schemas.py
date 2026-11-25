@@ -169,6 +169,7 @@ class MarketplaceListingOut(BaseModel):
     funded_amount: int
     min_ticket: int | None
     investor_count: int
+    is_pledge_progress: bool = False
     open_at: datetime | None
     close_at: datetime | None
 
