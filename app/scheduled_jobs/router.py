@@ -8,13 +8,13 @@ Spec: docs/specs/scheduled_jobs/cloud-scheduler-jobs.md.
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.fee_notice.service import send_pending_fee_invoice_emails
 from app.core.database import get_db
-from app.scheduled_jobs import acceptance, day14, reminders, zalo_reminders
+from app.scheduled_jobs import acceptance, day14, money_timers, reminders, zalo_reminders
 from app.scheduled_jobs.auth import require_scheduler
 
 router = APIRouter(
@@ -117,12 +117,17 @@ class AcceptanceReminderResult(BaseModel):
 
 
 @router.post("/funding-advance", response_model=FundingAdvanceResult)
-async def run_funding_advance(db: AsyncSession = Depends(get_db)):
+async def run_funding_advance(response: Response, db: AsyncSession = Depends(get_db)):
     """Daily, 00:00, 15:00 and 15:40 ICT: advance every commit-then-accept round with something due. At 00:00 on Day 13
     the pledge list is final and each lender's loan contract is generated; at 15:00 the silence rule decides a round
     the SME did not decide; from 15:40 on Day 14 the round closes and its pooled loan forms with everyone who paid
-    (Money flow FINAL v1.0). Idempotent."""
+    (Money flow FINAL v1.0). Idempotent.
+
+    500 when any round failed (the others are committed), so Cloud Scheduler retries in minutes instead of leaving the
+    round to the next scheduled run: a 00:00 failure would otherwise keep it OPEN through the SME's whole Day 13."""
     result = await acceptance.run_funding_advance(db)
+    if result["failed"]:
+        response.status_code = 500
     return FundingAdvanceResult(job="funding-advance", **result)
 
 
@@ -134,3 +139,42 @@ async def run_acceptance_reminders(db: AsyncSession = Depends(get_db)):
     return AcceptanceReminderResult(
         job="acceptance-reminders", **{channel: ChannelResult(**value) for channel, value in counts.items()}
     )
+
+
+class RepaymentDayResult(BaseModel):
+    job: str
+    late: int  # days newly marked LATE by this run
+    settled: int  # days newly settled by this run
+
+
+class InvoicesResult(BaseModel):
+    job: str
+    overdue: int  # invoices newly marked OVERDUE
+    accrued: int  # investor fee accruals created
+    invoiced: int  # investor invoices issued
+
+
+class CicDailyBalanceResult(BaseModel):
+    job: str
+    events: int  # DAILY_BALANCE events newly logged
+
+
+@router.post("/repayment-day", response_model=RepaymentDayResult)
+async def run_repayment_day(db: AsyncSession = Depends(get_db)):
+    """Daily, 00:10 and 18:10 ICT: a day with no payment proof by 18:00 on its due date becomes LATE; a day with proof
+    settles once the investor's 24 hours pass with no report. Idempotent."""
+    return RepaymentDayResult(job="repayment-day", **await money_timers.run_repayment_day(db))
+
+
+@router.post("/invoices", response_model=InvoicesResult)
+async def run_invoices(db: AsyncSession = Depends(get_db)):
+    """Daily, 00:20 ICT: mark unpaid invoices overdue, accrue investor service fees for ended months and issue the
+    investors' invoices. Idempotent."""
+    return InvoicesResult(job="invoices", **await money_timers.run_invoices(db))
+
+
+@router.post("/cic-daily-balance", response_model=CicDailyBalanceResult)
+async def run_cic_daily_balance(db: AsyncSession = Depends(get_db)):
+    """Daily, 00:30 ICT: log the previous business day's outstanding balance for every active ticket in the CIC event
+    log (Decree 94). Nothing the morning after a weekend or holiday. Idempotent."""
+    return CicDailyBalanceResult(job="cic-daily-balance", **await money_timers.run_cic_daily_balance(db))

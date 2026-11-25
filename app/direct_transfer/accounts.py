@@ -80,7 +80,8 @@ async def register_payment_account(
     bank_name_returned: str | None = None
     if lookup is not None and bank_bin is not None:
         bank_name_returned = await lookup.lookup(bank_bin=bank_bin, account_number=account_number)
-    auto_approved = names_match(bank_name_returned or "", expected) is True
+    # Only a name the BANK returned approves (never an empty one), compared with the verified name.
+    auto_approved = bool(bank_name_returned) and names_match(bank_name_returned, expected) is True
     if auto_approved:
         account.status = "APPROVED"
         account.approved_at = now
@@ -222,15 +223,16 @@ async def list_payment_accounts(db: AsyncSession, *, user_id: UUID) -> list[Paym
 async def expected_holder_name(db: AsyncSession, *, user_id: UUID, holder_role: str) -> str | None:
     """The verified name an account should be held in, or None when there is none to compare against.
 
-    INVESTOR: the KYC name (the same name the receipt check uses). SME: the business name from the newest
-    eKYB attempt, and only if that attempt was APPROVED: the project's own `legal_name` is self-declared, so it
-    is not used here."""
+    INVESTOR: the latest APPROVED eKYC name only, never the self-editable `full_name` (security review
+    2026-11-20): an investor who has not passed eKYC has no name to check against, so staff cannot approve the
+    account until they do. SME: the business name from the newest eKYB attempt, and only if that attempt was
+    APPROVED: the project's own `legal_name` is self-declared, so it is not used here."""
     from app.gverify.models import STATUS_APPROVED, GVerifyKybVerification
 
     if holder_role == "INVESTOR":
-        from app.direct_transfer.tranches import resolve_kyc_name
+        from app.direct_transfer.tranches import approved_kyc_name
 
-        return (await resolve_kyc_name(db, user_id)) or None
+        return await approved_kyc_name(db, user_id)
     row = (
         await db.execute(
             select(GVerifyKybVerification.status, GVerifyKybVerification.business_name)
@@ -246,12 +248,14 @@ async def expected_holder_name(db: AsyncSession, *, user_id: UUID, holder_role: 
 
 def names_match(account_name: str, expected: str | None) -> bool | None:
     """True/False on the receipt check's normalization (case, accents, punctuation, spacing ignored); None when
-    there is no verified name to compare with."""
+    there is no verified name to compare with, including one with nothing left after normalization ("." or a
+    non-Latin name), which would otherwise equal any other empty name."""
     from app.direct_transfer.receipts import normalize_name
 
-    if not expected:
+    want = normalize_name(expected or "")
+    if not want:
         return None
-    return normalize_name(account_name) == normalize_name(expected)
+    return normalize_name(account_name) == want
 
 
 async def annotate_name_match(db: AsyncSession, accounts: list[PaymentAccount]) -> None:

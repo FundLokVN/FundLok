@@ -20,7 +20,10 @@ from app.rates.schemas import (
     RateCalculationResponse,
     RateInquiriesAdminListResponse,
     RateInquiryAdminItem,
+    SmeQuizLeadCreate,
+    SmeQuizLeadResponse,
 )
+from app.rates.quiz_service import create_quiz_lead
 from app.rates.service import (
     get_rate_inquiry_by_id_admin,
     list_rate_inquiries_admin,
@@ -98,6 +101,37 @@ async def calculate_rate(
     )
 
 
+@router.post(
+    "/sme/quiz-leads",
+    response_model=SmeQuizLeadResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_sme_quiz_lead(
+    body: SmeQuizLeadCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Save a lead from the illustrative SME quiz on /rate.
+
+    The rate was computed in the visitor's browser from the published quiz
+    formula; it is stored as shown, after a bounds check. Nothing here prices
+    anything or calls the underwriting engine (docs/specs/rates/sme-rate-quiz.md).
+    Captcha-checked because it writes a row on a public route.
+    """
+    await verify_turnstile_token_async(body.turnstile_token)
+
+    user_agent = request.headers.get("user-agent")
+    if user_agent:
+        user_agent = user_agent[:_MAX_USER_AGENT]
+
+    return await create_quiz_lead(
+        db=db,
+        body=body,
+        client_ip=_extract_client_ip(request),
+        user_agent=user_agent,
+    )
+
+
 @router.get(
     "/inquiries",
     response_model=RateInquiriesAdminListResponse,
@@ -113,17 +147,19 @@ async def list_rate_inquiries(
     page_size: int = Query(default=20, ge=1, le=100),
     industry: str | None = Query(default=None, max_length=100),
     risk_tier: str | None = Query(default=None, pattern=r"^TIER_[ABC]$"),
+    source: str | None = Query(default=None, pattern=r"^(CALCULATOR|QUIZ)$"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """Retrieve submitted rate inquiries formatted for the Admin dashboard data table.
 
-    Requires ADMIN or SYSTEM_ADMIN role.
+    Requires ADMIN or SYSTEM_ADMIN role. `source=QUIZ` lists only quiz leads.
     """
     return await list_rate_inquiries_admin(
         db=db,
         page=page,
         page_size=page_size,
+        source=source,
         industry=industry,
         risk_tier=risk_tier,
     )

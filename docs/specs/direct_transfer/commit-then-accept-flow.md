@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT (Edward, 2026-11-15). Provisional until handbook v3.2 (D-052); Loc's open points are in section 9 |
+| **Status** | **IMPLEMENTED** (build slices S1 to S6 merged; Loc's end-to-end Appendix M re-run on `main` 6977af7 passed, 2026-11-21). Provisional until handbook v3.2 (D-052); Loc's open points are in section 9 |
 | **Owner** | Edward |
 | **Implementer(s)** | Edward's modules: a Claude Sonnet implementer (HANDOFF-06 Phase 2). Phat: routers in `app/market`, all UI, notification wording (D-051) |
 | **Module** | `app/direct_transfer/` (backend), `app/market/funding_router.py` and `app/market/funding.py` (Phat's routers, calling the service functions here), `app/market/investor_agreement/` (shared, section 3) |
-| **Version** | 1.1 (Money flow FINAL v1.0 amendments, see the box below) |
+| **Version** | 1.2 (status only; 1.1 is the Money flow FINAL v1.0 amendment, see the box below) |
 | **Date** | 2026-11-15 |
 | **Related ADR** | ADR-011 (this spec implements it), ADR-009 |
 | **Depends on** | `end-to-end-payment-flow.md` (4 Nov design), `funding-window.md`, `transfer-and-evidence.md`, `fees.md`, `ledger-amendment.md`, D-036 to D-057, `docs/appendix-m/appendix-m-remediation-decisions.md` (A1 to A7) |
@@ -397,3 +397,4 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 |---|---|---|---|
 | 1.0 | 2026-11-15 | Edward / Claude | First draft, from D-036 to D-057 and the code inventory of 2026-11-15 |
 | 1.1 | 2026-11-18 | Phat / Claude | Money flow FINAL v1.0: no service agreement at commit (signed on Day 14), withdrawal until the end of Day 12, fixed deadlines (`WINDOW_FULL`), Day-14 cut-offs 14:45 / 15:00 / 15:30; `FUNDING_WINDOW_FLOW` switches new windows to this flow |
+| 1.2 | 2026-11-21 | Edward / Claude | Status DRAFT to IMPLEMENTED; no behaviour change |

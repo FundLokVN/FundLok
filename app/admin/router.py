@@ -6,16 +6,19 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin import analytics as admin_analytics
 from app.admin import fees as admin_fees
 from app.admin import funding as admin_funding
 from app.admin.fee_schemas import AdminFeeInvoiceOut, AdminFeeMarkPaidRequest, FeeInvoiceFilter
 from app.admin import repayments as admin_repayments
+from app.admin import role_change
 from app.admin.fee_notice.service import run_fee_invoice_emails
 from app.admin import service
 from app.admin.access_log import audit_admin_read
 from app.admin.schemas import (
     AdminSignatureCheck,
     AdminFundingActivityOut,
+    AdminFundingAnalyticsOut,
     AdminFundingRoundOut,
     AdminInvestorTransferOut,
     AdminPaymentAccountDecisionRequest,
@@ -26,6 +29,7 @@ from app.admin.schemas import (
     AdminOverdueRepaymentsOut,
     AdminRepaymentPreviewOut,
     AdminRepaymentReceiptOut,
+    AdminLateMoneyApprovalRequest,
     AdminTransferDecisionRequest,
     AdminDecisionRequest,
     AdminDocumentUrlResponse,
@@ -33,6 +37,7 @@ from app.admin.schemas import (
     AdminKybCertificateUrlResponse,
     AdminKybResolveRequest,
     AdminKybReviewOut,
+    AdminKybResolveOut,
     AdminKybVerificationOut,
     AdminKycImageUrlResponse,
     AdminKycResolveRequest,
@@ -43,6 +48,7 @@ from app.admin.schemas import (
     AdminProjectDetail,
     AdminUserDetail,
     AdminUserFullDetail,
+    AdminUserRoleRequest,
     AdminUserStatusRequest,
     AuditLogOut,
     Page,
@@ -124,7 +130,7 @@ async def open_project_for_funding(
 
 @router.post(
     "/kyb-verifications/{verification_id}/resolve",
-    response_model=AdminKybVerificationOut,
+    response_model=AdminKybResolveOut,
 )
 async def resolve_kyb_verification(
     verification_id: UUID,
@@ -146,6 +152,9 @@ async def resolve_kyb_verification(
         business_name=body.business_name,
         tax_code=body.tax_code,
         representative_id_numbers=body.representative_id_numbers,
+        legal_representative_name=body.legal_representative_name,
+        legal_representative_position=body.legal_representative_position,
+        company_address=body.company_address,
     )
 
 
@@ -519,6 +528,17 @@ async def mark_fee_invoice_paid(
     )
 
 
+@router.get("/funding/analytics", response_model=AdminFundingAnalyticsOut)
+async def read_funding_analytics(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Platform-wide totals for the admin overview: what investors have put into businesses and what businesses
+    have repaid them, with the last 12 months of each. Totals only, no names or accounts, so the read is not
+    access-logged (app/admin/analytics.py)."""
+    return await admin_analytics.funding_analytics(db)
+
+
 @router.get(
     "/funding/transfers",
     response_model=Page[AdminInvestorTransferOut],
@@ -648,6 +668,26 @@ async def decide_investor_receipt(
     )
 
 
+@router.post("/funding/transfers/{transfer_id}/approve-late-money", response_model=AdminInvestorTransferOut)
+async def approve_late_money(
+    transfer_id: UUID,
+    body: AdminLateMoneyApprovalRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Approve a clean Day-14 late-money transfer into the round, until the 15:30 receipt cut-off. The ticket becomes
+    an ordinary paid one (the business still has 24 hours to check the money). 409: NOT_LATE_MONEY,
+    ALREADY_APPROVED, LATE_MONEY_APPROVAL_CLOSED, CAPACITY_EXCEEDED, DUPLICATE_BANK_TXN. Audited."""
+    return await admin_funding.approve_late_money_transfer(
+        db,
+        transfer_id,
+        reason=body.reason,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
 @router.post("/funding/reviews/{dispute_id}/decision", response_model=AdminInvestorTransferOut)
 async def decide_investor_transfer(
     dispute_id: UUID,
@@ -751,6 +791,30 @@ async def set_user_status(
         db,
         user_id,
         new_status=body.status,
+        note=body.note,
+        actor=current_user,
+        ip_address=request.client.host if request.client else None,
+    )
+
+
+@router.patch("/users/{user_id}/role", response_model=AdminUserDetail)
+async def change_user_role(
+    user_id: UUID,
+    body: AdminUserRoleRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Promote an existing account to admin, or demote an admin account.
+
+    ADMIN and SYSTEM_ADMIN may promote a member to ADMIN; only a SYSTEM_ADMIN
+    may grant SYSTEM_ADMIN or change an admin account's role. Audited, and the
+    account is signed out everywhere. docs/specs/admin/user-role-change.md.
+    """
+    return await role_change.change_user_role(
+        db,
+        user_id,
+        new_role=body.role,
         note=body.note,
         actor=current_user,
         ip_address=request.client.host if request.client else None,

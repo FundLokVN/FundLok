@@ -172,6 +172,27 @@ class AdminKybResolveRequest(AdminDecisionRequest):
     business_name: str | None = Field(default=None, max_length=300)
     tax_code: str | None = Field(default=None, max_length=32)
     representative_id_numbers: list[str] = Field(default_factory=list, max_length=20)
+    # What the contracts print for the SME's legal representative and address. A provider read fills them from the
+    # certificate; in manual mode staff type them here. Optional, but never blank when sent.
+    legal_representative_name: str | None = Field(default=None, max_length=200)
+    legal_representative_position: str | None = Field(default=None, max_length=100)
+    company_address: str | None = Field(default=None, max_length=500)
+
+    @field_validator("legal_representative_name", "legal_representative_position", "company_address")
+    @classmethod
+    def _not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError("must not be blank when given")
+        return value
+
+    @model_validator(mode="after")
+    def _position_needs_a_name(self) -> "AdminKybResolveRequest":
+        if self.legal_representative_position and not self.legal_representative_name:
+            raise ValueError("legal_representative_position needs legal_representative_name")
+        return self
 
     @field_validator("representative_id_numbers")
     @classmethod
@@ -206,6 +227,20 @@ class AdminUserStatusRequest(BaseModel):
 
     status: Literal["ACTIVE", "PENDING_KYC", "SUSPENDED"]
     note: str | None = None
+
+
+class AdminUserRoleRequest(BaseModel):
+    """Change an existing account's role (docs/specs/admin/user-role-change.md).
+
+    INVESTOR and SME are here only as demotion targets for an admin account;
+    the service refuses them for a member account. No "no role" value: a
+    demoted admin is given a member role explicitly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["ADMIN", "SYSTEM_ADMIN", "INVESTOR", "SME"]
+    note: str | None = Field(default=None, max_length=500)
 
 
 class AdminInviteRequest(BaseModel):
@@ -392,6 +427,13 @@ class AdminKybVerificationOut(BaseModel):
     updated_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+class AdminKybResolveOut(AdminKybVerificationOut):
+    """The resolved attempt, plus what the SME's contracts would still print as blanks after this decision
+    (LEGAL_REPRESENTATIVE, COMPANY_ADDRESS), so staff see what is missing. Empty for a rejection."""
+
+    missing_signing_details: list[str] = []
 
 
 # --- KYC manual review ------------------------------------------------------ #
@@ -878,6 +920,9 @@ class AdminInvestorTransferOut(BaseModel):
     attested_at: datetime | None = None
     confirmed_at: datetime | None = None
     needs_action: bool
+    # Late money (UNDER_REVIEW, LATE_MONEY) staff can still approve into the round, and until when (the round's 15:30).
+    can_approve_late_money: bool = False
+    approve_late_money_until: datetime | None = None
     transfer: AdminTransferReceiptOut | None = None
     dispute: AdminTransferDisputeOut | None = None
     expected: AdminTransferExpectedOut
@@ -917,6 +962,12 @@ class AdminTransferDecisionRequest(BaseModel):
     """Settle a ticket under review: whether the money reached the business's account."""
 
     outcome: Literal["RECEIVED", "NOT_RECEIVED"]
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class AdminLateMoneyApprovalRequest(BaseModel):
+    """Approve a Day-14 late-money ticket into the round before 15:30 (late-money-approval.md). A reason is required."""
+
     reason: str = Field(min_length=1, max_length=1000)
 
 
@@ -1041,6 +1092,44 @@ class AdminOverdueRepaymentsOut(BaseModel):
     overdue_days: int
     overdue_net_vnd: int
     items: list[AdminOverdueRepaymentOut]
+
+
+class AdminMonthAmountOut(BaseModel):
+    month: str  # "YYYY-MM"
+    amount_vnd: int
+
+
+class AdminInvestmentAnalyticsOut(BaseModel):
+    """Investments the businesses have received (CONFIRMED or ACTIVE), and those still on their way."""
+
+    invested_vnd: int
+    investments: int
+    investors: int
+    businesses: int
+    in_progress_vnd: int  # reserved, signed, or sent and waiting for FundLok's check
+    in_progress: int
+    monthly: list[AdminMonthAmountOut]  # received per month (ICT), the last 12 months
+
+
+class AdminRepaymentAnalyticsOut(BaseModel):
+    """What the businesses have repaid their investors. A day is one due date of one ticket."""
+
+    repaid_vnd: int  # paid days, principal and interest, the investors' tax included
+    principal_repaid_vnd: int
+    outstanding_principal_vnd: int
+    days_due: int  # days whose due date has passed
+    days_on_time: int  # of those, paid and never marked late
+    late_days: int  # not marked paid after their due date (the late-repayments list's rule)
+    late_tickets: int
+    monthly: list[AdminMonthAmountOut]  # paid, by due date, the last 12 months
+
+
+class AdminFundingAnalyticsOut(BaseModel):
+    """Platform-wide totals for the admin overview, as of ``as_of`` (today, ICT). No names or accounts."""
+
+    as_of: date
+    investments: AdminInvestmentAnalyticsOut
+    repayments: AdminRepaymentAnalyticsOut
 
 
 class AdminRepaymentPreviewOut(ProjectedScheduleOut):

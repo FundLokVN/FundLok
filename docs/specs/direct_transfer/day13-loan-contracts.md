@@ -52,7 +52,7 @@ SME (the round's owner; another SME gets 404):
 - `POST /funding/windows/{window_id}/decision` (S2) now refuses `ACCEPT` with `409 CONTRACTS_NOT_SIGNED` until every contract is SME-signed. `DECLINE` needs nothing; it voids the contracts.
 
 Scheduler (`require_scheduler`):
-- `POST /internal/jobs/funding-advance` (00:00 and 15:00 ICT) → `{ job, advanced, contracts, failed }`.
+- `POST /internal/jobs/funding-advance` (00:00 and 15:00 ICT) → `{ job, advanced, contracts, failed }`; status 500 (same body) when `failed > 0`, so Cloud Scheduler retries.
 - `POST /internal/jobs/acceptance-reminders` (09:00 ICT) → per channel `{ sent, failed, skipped }` for `in_app`, `email`, `zalo`, `sms`.
 
 ## 5. State Machine
@@ -67,7 +67,7 @@ AWAITING_SME ──DECLINE / silence < 50%──► FAILED (contracts VOID)
 
 ## 6. Business Rules
 
-1. **Generation.** At 00:00 on Day 13 (`funding-advance`, or staff Advance) one contract per lender with PLEDGED commitments, for their total. Idempotent.
+1. **Generation.** At 00:00 on Day 13 (`funding-advance`, or staff Advance) one contract per lender with PLEDGED commitments, for their total. Idempotent. A round that fails is rolled back and `funding-advance` answers 500, so Cloud Scheduler retries it within minutes. If every 00:00 attempt fails, the 15:00 run ends the commit phase and applies the silence rule in one step; the contracts are then made from the same pledges (now FOLDED into tickets) by that run or staff Advance, until 14:45 on Day 14, when signing closes.
 2. **Accepting means signing.** An explicit ACCEPT needs every live contract SME-signed (enterprise signature, NEAC-checked, the right contract by number and check code).
 3. **Noon cut-off.** Below 50% of target, signed uploads close at 12:00 on Day 13. The time signing completed is logged (`LOAN_CONTRACTS_SIGNING_COMPLETED`).
 4. **Silence.** At 15:00 with 50% or more the round is AUTO_ACCEPTED and the SME is bound by every contract unsigned; below, AUTO_DECLINED.
@@ -89,6 +89,8 @@ See section 4.
 - [x] `test_a_declined_round_voids_its_contracts`
 - [x] `test_the_guarantor_signs_every_contract_with_one_zalo_code_and_it_is_not_a_condition`
 - [x] `test_funding_advance_job_ends_the_commit_phase_and_generates_the_contracts`
+- [x] `test_a_failed_midnight_run_is_counted_and_its_retry_makes_the_contracts`
+- [x] `test_a_round_accepted_before_its_contracts_were_made_still_gets_them_until_14_45`
 - [x] `test_acceptance_reminders_sent_once_per_channel_and_logged`
 - [x] `test_reminder_skipped_when_window_already_decided`
 

@@ -114,6 +114,14 @@ class LoanApprovalOut(BaseModel):
     estimated_daily_repayment_vnd: int | None
     engine_version: str | None
     params_version: str | None
+    # DRR: the run's daily repayment rate, a fraction (0.085 = 8.5%), as on the investor listing. Null on a run scored
+    # before it was stored (docs/specs/projects/sme-offer-fields.md).
+    daily_repayment_rate: float | None = None
+    # The revenue share the Standing Offer prints: today the same figure as DRR (D-044, D-060), its own field.
+    revenue_share: float | None = None
+    # The Personal Guarantor the Standing Offer will name: the signed-in SME as their approved eKYC names them. Name
+    # only, never the ID number or the address.
+    guarantor_name: str | None = None
 
 
 class ProjectLoanApplicationOut(BaseModel):
@@ -198,6 +206,19 @@ class MarketplaceLoanApplicationOut(BaseModel):
     # bank rate in force (bank_rate_config.rate_pct), the same on every card.
     # A target, never a promise; the card says so beside it.
     bank_rate_pct: float | None = None
+    # DRR, the LOCKED run's daily repayment rate: the daily instalment over the
+    # average daily revenue the assessment used, as a fraction (0.085 = 8.5%).
+    # Null until a run is locked, or on a run scored before it was stored.
+    daily_repayment_rate: float | None = None
+    # s, the revenue share for extensions that the Standing Offer prints: the
+    # share of a month's revenue the automatic extension tests the payments
+    # against. Today the same figure as DRR (D-044; Loc, 16 Nov, D-060), kept
+    # as its own field so the screen never has to know that.
+    revenue_share: float | None = None
+    # The Personal Guarantor the signed Standing Offer names: their name only,
+    # never the ID number or address it also prints. Null until the Offer is on
+    # file.
+    guarantor_name: str | None = None
 
     model_config = {"from_attributes": True}
 

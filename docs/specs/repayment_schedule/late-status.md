@@ -2,9 +2,9 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT (Edward, 2026-11-15). Provisional until handbook v3.2 (D-052) |
+| **Status** | **IMPLEMENTED** (AM-P8, PR #130; Loc's end-to-end Appendix M re-run on `main` 6977af7 passed, 2026-11-21). Provisional until handbook v3.2 (D-052) |
 | **Owner** | Edward |
-| **Implementer(s)** | Edward's modules: a Claude Sonnet implementer (HANDOFF-06 Phase 2). Phat: repayment router wiring, SME and lender screens, reminder wording (D-051) |
+| **Implementer(s)** | **Phat** (D-058, Jira AM-P8 / SCRUM-633): the repayment engine, router wiring, SME and lender screens, reminder wording. Edward approves, in writing, any PR touching the ledger, the tranche state machine, fees or a migration |
 | **Module** | `app/direct_transfer/repayment.py`, `jobs.py`, `worker.py`, `schemas.py`; `app/market/repayment_router.py` and `app/market/schemas.py` (Phat's) |
 | **Version** | 1.0 |
 | **Date** | 2026-11-15 |
@@ -151,3 +151,4 @@ LATE ──[SME marks paid with receipt]─────────────�
 |---|---|---|---|
 | 1.0 | 2026-11-15 | Edward / Claude | First draft, from D-041, D-055 and the Appendix M findings 7.3, 7.4, 7.6, 8.1 |
 | 1.1 | 2026-11-19 | Phat / Claude | Implemented (AM-P8): 18:00 cut-off, proof = receipt, `presume_paid_days` removed |
+| 1.2 | 2026-11-21 | Edward | Status DRAFT to IMPLEMENTED; implementer is Phat (D-058) |

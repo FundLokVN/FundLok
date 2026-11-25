@@ -145,6 +145,29 @@ class PayeeOut(BaseModel):
     account_name: str
 
 
+class WithholdingRowOut(BaseModel):
+    """One individual lender's month: what the SME paid them and withheld (withholding-report.md)."""
+
+    investor_id: UUID
+    lender_name: str | None
+    lender_id_number: str | None
+    paid_days: int
+    interest_vnd: int
+    tax_withheld_vnd: int
+
+
+class WithholdingTotalsOut(BaseModel):
+    paid_days: int
+    interest_vnd: int
+    tax_withheld_vnd: int
+
+
+class WithholdingReportOut(BaseModel):
+    month: str  # YYYY-MM, the month the instalments were paid
+    rows: list[WithholdingRowOut]
+    totals: WithholdingTotalsOut
+
+
 class RepaymentRowOut(BaseModel):
     repayment_day_id: UUID
     tranche_id: UUID

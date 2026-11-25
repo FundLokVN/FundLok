@@ -141,13 +141,24 @@ async def generate_for_window(
     db: AsyncSession, *, window: FundingWindow, storage: EvidenceStorage, now: dt.datetime
 ) -> int:
     """One loan contract per lender with PLEDGED commitments, for its total, once the pledge list is final
-    (AWAITING_SME). Idempotent: a lender who already has one is skipped. Returns how many were made."""
-    if window.flow != COMMIT_THEN_ACCEPT or window.status != "AWAITING_SME":
+    (AWAITING_SME). Idempotent: a lender who already has one is skipped. Returns how many were made.
+
+    Also on an accepted round (AWAITING_PAYMENT) that has none yet, from the same pledges now FOLDED into tickets,
+    while lenders can still sign (before 14:45 on Day 14). That happens when every 00:00 attempt failed: the 15:00
+    run then ends the commit phase and applies the silence rule in one step, so AWAITING_SME is never seen here,
+    and without contracts every lender would be refused CONTRACT_UNAVAILABLE and locked as a no-show."""
+    if window.flow != COMMIT_THEN_ACCEPT:
+        return 0
+    if window.status == "AWAITING_SME":
+        source = "PLEDGED"
+    elif window.status == "AWAITING_PAYMENT" and now < window.pay_deadline_at:
+        source = "FOLDED"
+    else:
         return 0
     pledges = (
         await db.execute(
             select(Commitment)
-            .where(Commitment.window_id == window.id, Commitment.status == "PLEDGED")
+            .where(Commitment.window_id == window.id, Commitment.status == source)
             .order_by(Commitment.committed_at, Commitment.created_at, Commitment.id)
         )
     ).scalars().all()

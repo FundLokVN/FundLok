@@ -18,10 +18,11 @@ from app.core.config import settings
 from app.core.timezone import ICT
 from app.direct_transfer import commit_flow
 from app.direct_transfer.errors import DirectTransferError
-from app.direct_transfer.models import AcceptanceReminder, FundingWindow, WindowLoanContract
+from app.direct_transfer.models import AcceptanceReminder, FundingWindow, Tranche, WindowLoanContract
+from app.direct_transfer.storage import InMemoryStorage
 from app.gverify.models import STATUS_APPROVED, GVerifyVerification
 from app.loans.guarantor_models import GuarantorSignature
-from app.market import day13_contracts, funding
+from app.market import day13_contracts, day14_signing, funding
 from app.notifications.models import Notification
 from app.phone_verification import zalo
 from app.scheduled_jobs import acceptance
@@ -242,6 +243,56 @@ async def test_funding_advance_job_ends_the_commit_phase_and_generates_the_contr
     again = await acceptance.run_funding_advance(world.db, now=COMMIT_CLOSES)
     assert again["contracts"] == 0
     assert (await world.db.execute(select(func.count()).select_from(WindowLoanContract))).scalar_one() == 1
+
+
+class _StorageDown(InMemoryStorage):
+    async def put(self, key, content, content_type):
+        raise ConnectionError("R2 unreachable")
+
+
+async def test_a_failed_midnight_run_is_counted_and_its_retry_makes_the_contracts(world, monkeypatch):
+    storage = {"current": _StorageDown()}
+    monkeypatch.setattr(funding, "evidence_storage", lambda: storage["current"])
+    await _open(world)
+    await _commit(world, await make_investor(world), 60 * M)
+    window_id = world.window.id
+    await world.db.commit()  # the job rolls a failed round back to here
+
+    failed = await acceptance.run_funding_advance(world.db, now=COMMIT_CLOSES)
+    assert failed["failed"] == 1 and failed["contracts"] == 0
+    assert (await world.db.get(FundingWindow, window_id, populate_existing=True)).status == "OPEN"
+
+    storage["current"] = world.storage  # Cloud Scheduler's retry, minutes later
+    retry = await acceptance.run_funding_advance(world.db, now=COMMIT_CLOSES + dt.timedelta(minutes=2))
+    assert retry["failed"] == 0 and retry["contracts"] == 1
+    assert (await world.db.get(FundingWindow, window_id, populate_existing=True)).status == "AWAITING_SME"
+
+
+async def test_a_round_accepted_before_its_contracts_were_made_still_gets_them_until_14_45(world, monkeypatch):
+    # Every 00:00 attempt failed, so the 15:00 run is the first to see the round: it ends the commit phase and
+    # applies the silence rule in one step, and AWAITING_SME never reaches contract generation.
+    monkeypatch.setattr(funding, "evidence_storage", lambda: world.storage)
+    await _open(world)
+    a, b = await make_investor(world), await make_investor(world)
+    await _commit(world, a, 30 * M, now=T0 + dt.timedelta(hours=1))
+    await _commit(world, b, 30 * M, now=T0 + dt.timedelta(hours=2))
+    window = await commit_flow.advance_window(world.db, window_id=world.window.id, now=SME_DEADLINE)
+    assert window.status == "AWAITING_PAYMENT" and window.sme_decision == "AUTO_ACCEPTED"
+    # Too late to be signed, so too late to make: signing closes at 14:45 on Day 14.
+    assert await day13_contracts.generate_for_window(
+        world.db, window=window, storage=world.storage, now=window.pay_deadline_at
+    ) == 0
+
+    result = await acceptance.run_funding_advance(world.db, now=SME_DEADLINE)
+    assert result["failed"] == 0 and result["contracts"] == 2
+    rows = await day13_contracts.contracts_for(world.db, window.id)
+    assert [(r.investor_id, r.amount_vnd, r.status) for r in rows] == [
+        (a.user.id, 30 * M, "GENERATED"), (b.user.id, 30 * M, "GENERATED")
+    ]
+    assert rows[0].contract_no.endswith("-01/HĐCV-FL") and rows[1].contract_no.endswith("-02/HĐCV-FL")
+    # Each lender's Day-14 ticket now has its contract to sign.
+    for tranche in (await world.db.execute(select(Tranche).where(Tranche.window_id == window.id))).scalars():
+        assert (await day14_signing.contract_for(world.db, tranche)) is not None
 
 
 @pytest.fixture

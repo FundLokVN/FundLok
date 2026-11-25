@@ -178,6 +178,11 @@ async def test_public_listing_hides_the_applicant_only_fields(client, make_user,
         "business_score",
         "listing",
         "bank_rate_pct",
+        # The offer's DRR and s (one figure, the locked run's) and the Personal
+        # Guarantor's name only (SCRUM-637).
+        "daily_repayment_rate",
+        "revenue_share",
+        "guarantor_name",
     }
     assert "prior default" not in listed.text
 

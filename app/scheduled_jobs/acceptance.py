@@ -53,8 +53,8 @@ _COMPANY_MAX = 200
 # --------------------------------------------------------------------------- #
 async def run_funding_advance(db: AsyncSession, *, now: dt.datetime | None = None) -> dict:
     """Advance every commit-then-accept round with something due, one per transaction. Returns {"advanced",
-    "contracts", "failed"}: rounds looked at, loan contracts generated, rounds that failed (rolled back, retried by
-    the next run)."""
+    "contracts", "failed"}: rounds looked at, loan contracts generated, rounds that failed (rolled back; the route
+    answers 500 for them so Cloud Scheduler retries the whole run, which the rounds already advanced skip)."""
     now = now or dt.datetime.now(dt.timezone.utc)
     ids = (
         await db.execute(

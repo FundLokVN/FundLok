@@ -44,6 +44,7 @@ from app.gverify.router import kyb_router as gverify_kyb_router, router as gveri
 from app.contact.router import router as contact_router
 from app.notifications.router import router as notifications_router
 from app.rates.router import admin_rates_router, router as rates_router
+from app.blog.router import admin_blog_router, router as blog_router
 
 # /docs, /redoc and /openapi.json are development tools. Served publicly they
 # hand any visitor the full route inventory and request/response schemas of the
@@ -245,6 +246,8 @@ app.include_router(contact_router)
 app.include_router(notifications_router)
 app.include_router(rates_router)
 app.include_router(admin_rates_router)
+app.include_router(blog_router)
+app.include_router(admin_blog_router)
 app.include_router(admin_email_router)
 app.include_router(scheduled_jobs_router)
 

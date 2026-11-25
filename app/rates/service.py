@@ -308,7 +308,74 @@ def _format_loan_ask(amount: int, tenor: int) -> str:
     return f"{amount_str} / {tenor} mos"
 
 
+_OPERATING_BAND_DISPLAY = {
+    "LT_1Y": "< 1 yr (quiz)",
+    "Y1_3": "1–3 yrs (quiz)",
+    "GT_3Y": "> 3 yrs (quiz)",
+}
+
+
+def _vnd(amount: int) -> str:
+    return f"{amount:,.0f} ₫".replace(",", ".")
+
+
+def _format_quiz_row(row: RateInquiry) -> RateInquiryAdminItem:
+    """A lead from the illustrative quiz. It has no calculator figures, so the
+    display strings carry the quiz answers instead and the numbers stay null."""
+    rate = float(row.estimated_rate_min) if row.estimated_rate_min is not None else None
+    return RateInquiryAdminItem(
+        id=row.id,
+        source="QUIZ",
+        created_at=row.created_at,
+        created_at_formatted=row.created_at.strftime("%d/%m/%Y %H:%M") if row.created_at else "",
+        industry=row.industry,
+        industry_display=_format_industry(row.industry),
+        operating_months=None,
+        employee_count=None,
+        tenure_staff_display=_OPERATING_BAND_DISPLAY.get(row.operating_band or "", "—"),
+        revenue_l12m=None,
+        revenue_l12m_formatted=f"{_vnd(row.monthly_revenue)} / mo" if row.monthly_revenue else "—",
+        revenue_prev_12m=None,
+        cogs_l12m=None,
+        fixed_costs_l12m=None,
+        variable_costs_l12m=None,
+        yoy_growth_pct=None,
+        yoy_growth_display="—",
+        requested_amount=row.requested_amount,
+        tenor_months=row.tenor_months,
+        loan_ask_display=_format_loan_ask(row.requested_amount, row.tenor_months),
+        estimated_rate_min=rate,
+        estimated_rate_max=rate,
+        calculated_rate_display=f"{rate:.2f}% / mo" if rate is not None else "Declined",
+        risk_tier=None,
+        tier_display="Quiz",
+        calculated_monthly_payment=None,
+        calculated_monthly_payment_formatted=None,
+        session_id=row.session_id,
+        ip_address=str(row.ip_address) if row.ip_address else None,
+        user_agent=row.user_agent,
+        full_name=row.full_name,
+        company_name=row.company_name,
+        email=row.email,
+        phone=row.phone,
+        consented_contact_at=row.consented_contact_at,
+        monthly_revenue=row.monthly_revenue,
+        operating_band=row.operating_band,
+        quiz_outcome=row.quiz_outcome,
+        quiz_params_version=row.quiz_params_version,
+        utm_source=row.utm_source,
+        utm_medium=row.utm_medium,
+        utm_campaign=row.utm_campaign,
+        utm_content=row.utm_content,
+        utm_term=row.utm_term,
+        fbclid=row.fbclid,
+    )
+
+
 def format_inquiry_row(row: RateInquiry) -> RateInquiryAdminItem:
+    if row.source == "QUIZ":
+        return _format_quiz_row(row)
+
     # Calculate YoY growth
     if row.revenue_prev_12m > 0:
         growth_pct = round(((row.revenue_l12m - row.revenue_prev_12m) / row.revenue_prev_12m) * 100, 2)
@@ -364,6 +431,12 @@ def format_inquiry_row(row: RateInquiry) -> RateInquiryAdminItem:
         email=row.email,
         phone=row.phone,
         consented_contact_at=row.consented_contact_at,
+        utm_source=row.utm_source,
+        utm_medium=row.utm_medium,
+        utm_campaign=row.utm_campaign,
+        utm_content=row.utm_content,
+        utm_term=row.utm_term,
+        fbclid=row.fbclid,
     )
 
 
@@ -373,8 +446,11 @@ async def list_rate_inquiries_admin(
     page_size: int = 20,
     industry: str | None = None,
     risk_tier: str | None = None,
+    source: str | None = None,
 ) -> RateInquiriesAdminListResponse:
     query = select(RateInquiry).order_by(desc(RateInquiry.created_at))
+    if source:
+        query = query.where(RateInquiry.source == source)
     if industry:
         # Parameterised, so not injectable -- but `%` and `_` are LIKE
         # wildcards, and unescaped they let a filter of "%" match everything.

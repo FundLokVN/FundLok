@@ -63,6 +63,7 @@ SENSITIVE_PATHS = frozenset(
         "/contact",
         "/api/v1/rates/calculate",
         "/api/v1/rates/investor/leads",
+        "/api/v1/rates/sme/quiz-leads",
         "/users/me/phone/send-code",
     }
 )

@@ -15,7 +15,8 @@ Where each blank comes from:
                                Disbursement Date and the Investor's signing time are each Investor's own, filled in
                                their copy at commitment: this copy states the rule each follows
                                (loan_contract_text.PER_INVESTOR), with I, T and A worked out at the minimum ticket
-  revenue share (s)            not computed by the platform yet, so a dotted blank
+  revenue share (s)            as the Standing Offer prints it: the LOCKED score run's daily repayment rate
+                               (terms.ListingTerms.revenue_share), a dotted blank on a run scored before it was stored
 
 Two empty signature fields sit over the signature boxes, SME_Signature and Guarantor_Signature, and every page
 carries a check code over everything it is filled in with (pdf.check_code).
@@ -43,7 +44,7 @@ from app.loans.agreement.pdf import (
     signer_name,
 )
 from app.loans.agreement.standing_offer import StandingOfferData, _clean, _vnd_digits, offer_data
-from app.loans.agreement.terms import repayment_estimate
+from app.loans.agreement.terms import repayment_estimate, share_pct
 from app.loans.agreement.text import BLANK
 from app.users.models import User
 
@@ -89,6 +90,7 @@ def contract_check_code(data: StandingOfferData, signed_on: date | None) -> str:
             "sme": sme,
             "guarantor": [data.guarantor.name, data.guarantor.id_number, data.guarantor.address],
             "terms": [str(terms.rate_pct), terms.term_months] if terms else None,
+            "revenue_share": share_pct(terms.revenue_share) if terms else None,
             "schedule": [estimate.instalment_days, estimate.backstop_day] if estimate else None,
             "target": terms.amount_vnd if terms else None,
             "min_ticket_vnd": data.min_ticket_vnd,
@@ -211,6 +213,7 @@ def terms_rows(data: StandingOfferData, copy: InvestorCopy | None = None) -> lis
         backstop = BLANK
         principal = interest = total = f"{BLANK}{text.VND_SUFFIX}"
         daily = text.DAILY.format(daily=BLANK, last=BLANK)
+    share = share_pct(terms.revenue_share) if terms is not None else None
     return [
         (labels["principal"], principal),
         (labels["rate"], rate_value),
@@ -223,7 +226,7 @@ def terms_rows(data: StandingOfferData, copy: InvestorCopy | None = None) -> lis
         (labels["cut_off"], text.CUT_OFF),
         (labels["first_instalment"], text.FIRST_INSTALMENT),
         (labels["backstop"], backstop),
-        (labels["revenue_share"], text.REVENUE_SHARE.format(share=BLANK)),
+        (labels["revenue_share"], text.REVENUE_SHARE.format(share=share or BLANK)),
         (labels["pit"], text.PIT),
     ]
 

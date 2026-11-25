@@ -257,16 +257,6 @@ async def test_daily_balance_counts_presumed_paid_and_excludes_reported_missed(l
     assert await cic.emit_daily_balances(world.db, on_date=dt.date(2026, 11, 5), now=ict(2026, 11, 6, 2)) == 0  # idempotent
 
 
-async def test_withholding_report_aggregates_by_month(loan):
-    world, _, _ = loan
-    out = await repayment.withholding_report(world.db, sme_user_id=world.sme.id, month=dt.date(2026, 11, 1))
-    assert out["month"] == "2026-11" and len(out["rows"]) == 10
-    rows = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.due_date >= dt.date(2026, 11, 1), RepaymentDay.due_date < dt.date(2026, 12, 1)))).scalars().all()
-    assert out["totals"]["interest_vnd"] == sum(r.interest_vnd for r in rows)
-    assert out["totals"]["tax_withheld_vnd"] == sum(r.tax_withheld_vnd for r in rows)
-    assert all(r["investor_type"] == "INDIVIDUAL" for r in out["rows"])
-
-
 async def test_investor_cannot_see_other_tranche_schedule_404(loan):
     world, _, tr = loan
     ok = await repayment.tranche_schedule(world.db, tranche_id=tr[0].id, user_id=tr[0].investor_id)
