@@ -33,6 +33,7 @@ from app.lending.models import Holding, Listing
 from app.market import funding
 from app.models import RepaymentDay
 from app.notifications.models import Notification
+from app.projects.service import marketplace_listings
 from app.repayment_schedule.models import Facility
 from app.scheduled_jobs import acceptance
 
@@ -425,6 +426,34 @@ async def test_sme_decision_after_deadline_is_refused(world):
 # --------------------------------------------------------------------------- #
 # acceptance
 # --------------------------------------------------------------------------- #
+async def test_marketplace_shows_pledges_until_payment_closes_then_confirmed_money(world):
+    window = await _open(world)
+    a, b, c = [await make_investor(world) for _ in range(3)]
+    await _commit(world, a, 10 * M)
+    await _commit(world, a, 20 * M)
+    await _commit(world, b, 40 * M)
+    withdrawn = await _commit(world, c, 10 * M)
+    withdrawn.status = "VOID"
+    await world.db.flush()
+
+    async def progress():
+        listing = (await marketplace_listings(world.db, [world.application.id]))[world.application.id]
+        return listing.funded_amount, listing.investor_count, listing.is_pledge_progress
+
+    assert await progress() == (70 * M, 2, True)
+    await commit_flow.advance_window(world.db, window_id=window.id, now=COMMIT_CLOSES, params=world.params)
+    assert await progress() == (70 * M, 2, True)
+    await _decide(world, "ACCEPT", now=COMMIT_CLOSES)
+    assert await progress() == (70 * M, 2, True)
+
+    # Only one lender actually paid. Folded pledges cannot count once repayment starts.
+    paid = (await world.db.execute(select(Tranche).where(Tranche.investor_id == a.user.id))).scalar_one()
+    paid.status = "ACTIVE"
+    window.status = "REPAYING"
+    await world.db.flush()
+    assert await progress() == (30 * M, 1, False)
+
+
 async def test_acceptance_creates_one_tranche_per_lender_with_summed_amount(world):
     await _open(world)
     a, b = await make_investor(world), await make_investor(world, holder_type="ENTITY")
