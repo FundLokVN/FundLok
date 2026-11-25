@@ -56,7 +56,7 @@ from app.direct_transfer.models import (
 from app.direct_transfer.receipts import ReceiptFields
 from app.direct_transfer.schemas import FundingWindowOut
 from app.direct_transfer.tranche_state import transition_tranche
-from app.direct_transfer.tranches import resolve_kyc_name
+from app.direct_transfer.tranches import _void_if_excluded, resolve_kyc_name
 from app.direct_transfer.windows import get_window_progress, lock_window, refresh_window_fullness
 from app.lending.models import AuditLog, Project
 from app.market.emails import receipt_notice
@@ -627,10 +627,12 @@ async def _settle_attested(
     db: AsyncSession, transfer: Transfer, tranche: Tranche, *, approve: bool, reason: str, actor: User, now: dt.datetime
 ) -> None:
     """A ticket left ATTESTED, waiting for the business to confirm (approved before approval meant received, or
-    checked field by field): staff settle it. Approve: CONFIRMED. Deny: reviewed and void, its place freed."""
+    checked field by field): staff settle it. Approve: CONFIRMED, as the business confirming it would; if the round's
+    loan already formed without it, it can no longer join, so it is void and the business refunds it (the same as
+    `sme_confirm_tranche`). Deny: reviewed and void, its place freed."""
     await db.refresh(transfer, with_for_update=True)
     await db.refresh(tranche, with_for_update=True)
-    await lock_window(db, tranche.window_id)
+    window = await lock_window(db, tranche.window_id)
     if tranche.status != "ATTESTED":
         raise HTTPException(
             status_code=409, detail="This transfer was already decided", headers={"X-Error-Code": "ALREADY_DECIDED"}
@@ -638,6 +640,7 @@ async def _settle_attested(
     if approve:
         transfer.confirmation_level = "CONFIRMED"
         await transition_tranche(db, tranche, "CONFIRMED", now=now, actor_id=actor.id, actor_role="ADMIN", reason=reason)
+        await _void_if_excluded(db, tranche, window, now=now, params=resolve(None))
         return
     # ATTESTED cannot go straight to VOID: through a review, decided as not received.
     await transition_tranche(
