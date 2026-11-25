@@ -70,6 +70,14 @@ async def test_repayment_day_hands_an_expired_dispute_turn_to_staff(loan):
     day = (await world.db.execute(select(RepaymentDay).where(
         RepaymentDay.tranche_id == tr[0].id, RepaymentDay.day_index == 1, RepaymentDay.kind == "INSTALMENT",
     ))).scalar_one()
+    same_day_ids = (await world.db.execute(select(RepaymentDay.id).where(
+        RepaymentDay.tranche_id == day.tranche_id, RepaymentDay.due_date == day.due_date,
+    ))).scalars().all()
+    await repayment.mark_days_paid(
+        world.db, sme_user_id=world.sme.id, repayment_day_ids=same_day_ids,
+        receipt_file_id=(await receipt_file(world)).id,
+        idempotency_key="dispute-repayment-proof", now=ict(2026, 11, 5, 9), params=world.params,
+    )
     await repayment.report_missing_day(
         world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="not received", file_id=None,
         now=ict(2026, 11, 5, 10), params=world.params,
