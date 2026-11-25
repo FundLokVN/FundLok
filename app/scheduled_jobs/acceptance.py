@@ -7,7 +7,8 @@ Two Cloud Scheduler jobs on prod-api (app/scheduled_jobs/router.py):
   15:40 Day 14, after the 15:35 no-show step: the round closes and the pooled loan forms with everyone who paid, or
   waits for pending tickets, at most 2 days), then what the new state asks of the round's loan contracts
   (`day13_contracts.after_advance`: generated at the end of the commit phase, void when the round fails). One round
-  per transaction; idempotent.
+  per transaction; idempotent. Before the rounds, every ticket whose SME 24 hours have passed is confirmed, on any
+  round (`tranches.confirm_lapsed_tranches`), so one left out of a loan that already formed is voided and refunded.
 * `acceptance-reminders`, 09:00 ICT: 3 days and 1 day before the SME's 15:00 Day-13 deadline, the SME is reminded in
   the app, by email and on Zalo (once the ZBS template is approved and ZALO_ZBS_ACCEPTANCE_TEMPLATE_ID is set), each
   logged in acceptance_reminders (one per round, kind and channel). SMS has no provider (D-056): logged SKIPPED. A round
@@ -27,7 +28,7 @@ from app.admin import system_email
 from app.admin.internal_email.schemas import EmailContent
 from app.core.config import settings
 from app.core.timezone import ICT
-from app.direct_transfer import close, commit_flow
+from app.direct_transfer import close, commit_flow, tranches
 from app.direct_transfer.calendar_utils import ict_date
 from app.direct_transfer.models import AcceptanceReminder, FundingWindow
 from app.lending.models import Project
@@ -54,8 +55,20 @@ _COMPANY_MAX = 200
 async def run_funding_advance(db: AsyncSession, *, now: dt.datetime | None = None) -> dict:
     """Advance every commit-then-accept round with something due, one per transaction. Returns {"advanced",
     "contracts", "failed"}: rounds looked at, loan contracts generated, rounds that failed (rolled back; the route
-    answers 500 for them so Cloud Scheduler retries the whole run, which the rounds already advanced skip)."""
+    answers 500 for them so Cloud Scheduler retries the whole run, which the rounds already advanced skip).
+
+    First, in its own transaction, every ticket whose SME 24 hours have passed is confirmed, on any round, including
+    one whose loan already formed (it is then void and the SME refunds it): the per-round loop below never looks at a
+    round once it is REPAYING. A failure there is rolled back and counted like a failed round."""
     now = now or dt.datetime.now(dt.timezone.utc)
+    totals = {"advanced": 0, "contracts": 0, "failed": 0}
+    try:
+        await tranches.confirm_lapsed_tranches(db, now=now)
+        await db.commit()
+    except Exception:  # noqa: BLE001 - the rounds below still run; the route answers 500 so the scheduler retries
+        await db.rollback()
+        logger.exception("funding-advance: confirming lapsed tickets failed")
+        totals["failed"] += 1
     ids = (
         await db.execute(
             select(FundingWindow.id)
@@ -66,7 +79,6 @@ async def run_funding_advance(db: AsyncSession, *, now: dt.datetime | None = Non
             .order_by(FundingWindow.id)
         )
     ).scalars().all()
-    totals = {"advanced": 0, "contracts": 0, "failed": 0}
     for window_id in ids:
         try:
             window = await close.advance_window(db, window_id=window_id, now=now)

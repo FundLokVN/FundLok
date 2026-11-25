@@ -6,7 +6,7 @@
 | **Owner** | Edward |
 | **Implementer(s)** | Edward's modules: a Claude Sonnet implementer (HANDOFF-06 Phase 2). Phat: routers in `app/market`, all UI, notification wording (D-051) |
 | **Module** | `app/direct_transfer/` (backend), `app/market/funding_router.py` and `app/market/funding.py` (Phat's routers, calling the service functions here), `app/market/investor_agreement/` (shared, section 3) |
-| **Version** | 1.2 (status only; 1.1 is the Money flow FINAL v1.0 amendment, see the box below) |
+| **Version** | 1.3 (late Day-14 tickets after formation, rules 8 and 9; 1.2 was status only; 1.1 is the Money flow FINAL v1.0 amendment, see the box below) |
 | **Date** | 2026-11-15 |
 | **Related ADR** | ADR-011 (this spec implements it), ADR-009 |
 | **Depends on** | `end-to-end-payment-flow.md` (4 Nov design), `funding-window.md`, `transfer-and-evidence.md`, `fees.md`, `ledger-amendment.md`, D-036 to D-057, `docs/appendix-m/appendix-m-remediation-decisions.md` (A1 to A7) |
@@ -295,8 +295,8 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 5. **At acceptance** the system creates one tranche per lender with PLEDGED commitments: amount = their sum, a unique reference code, `hold_expires_at = pay_deadline_at`, state `RESERVED`; the commitments become FOLDED; every lender is notified (`CONTRACT_SIGNING_OPEN`). `s`, the rate and the term stay as in the offer even if the round is not full (A4).
 6. **Day-14 contract (A1b, A7).** One loan contract per lender for its total; signed with an OTP code plus a logged click; the VietQR appears only after signing. The Lender Service Agreement is not re-signed.
 7. **No-show (A6).** At `pay_deadline_at` every tranche still `RESERVED`, or `SIGNED` with no receipt, becomes `EXPIRED` (`NO_SHOW`); its commitments become VOID; the lender is `LOCKED` and `no_show_count` increases. At the second counted no-show the lender is `CLOSED` permanently. A staff waiver (force majeure or bank outage) lifts the lock without counting the miss. Shortfall reopening and top-up are Phase 3.
-8. **SME receipt check (A5).** The SME has 24 calendar hours from the moment a lender's receipt is checked to confirm (by uploading its own receipt), dispute, or stay silent (counts as received). A 30-day dispute with a bank statement stays open after any confirmation by silence; staff decide under Finance's interim policy, then the bank's trace decides.
-9. **Loan formation.** At `CLOSING`, once no tranche is pending (or `close_wait_until`, default 2 calendar days after `pay_deadline_at`; open question 6), one pooled facility forms from the CONFIRMED tranches: same rate, start date, end date and payment day for every lender; each lender keeps its own tranche, holding and contract. Start date = the first working day after formation (Monday to Friday). **No stub interest.** The loan still forms if the confirmed total is below 50% after no-shows (A4; open question 5). If no tranche is CONFIRMED the window is `FAILED`, no fee.
+8. **SME receipt check (A5).** The SME has 24 calendar hours from the moment a lender's receipt is checked to confirm (by uploading its own receipt), dispute, or stay silent (counts as received). A 30-day dispute with a bank statement stays open after any confirmation by silence; staff decide under Finance's interim policy, then the bank's trace decides. The silence lapse runs on every `funding-advance` run for every round, the loan formed or not (`cloud-scheduler-jobs.md`). A ticket confirmed after the loan formed without it (it was still `ATTESTED` at formation, so `excluded_at_close`), whether by silence, by the SME or by staff approving it, never joins: it becomes `VOID` (`EXCLUDED_AT_CLOSE`) and the SME owes the lender a tracked refund (PROVISIONAL(Q-D7), as for a review decided after formation). A ticket confirmed before formation is left as it is and joins the loan.
+9. **Loan formation.** At `CLOSING`, once no tranche is pending (or `close_wait_until`, default 2 calendar days after `pay_deadline_at`; open question 6), one pooled facility forms from the CONFIRMED tranches: same rate, start date, end date and payment day for every lender; each lender keeps its own tranche, holding and contract. Start date = the first working day after formation (Monday to Friday). **No stub interest.** The loan still forms if the confirmed total is below 50% after no-shows (A4; open question 5). If no tranche is CONFIRMED the window is `FAILED`, no fee. A lender locked at 15:00 on Day 14 whose ticket joins the loan paid in time, so formation unlocks them (`day14-transfer-rule.md` rule 6), unless another round locked them or something else on this round still holds them.
 10. **Fees.** SME 3% activation invoice is issued at formation on the confirmed total (unchanged, `fees.py`); never on a window that failed. Investor fee formula unchanged.
 11. **Ledger.** Unchanged. Claim legs post when a tranche becomes ACTIVE, from `tranche.amount_vnd` (final at that point). No cash account, no leg before ACTIVE.
 12. **Jobs are idempotent and time-driven.** One function, `advance_window(window_id, now)`, performs every due transition for a window: end of the commit phase, the SME auto-decision, the no-show cut-off, the 24-hour silence lapse, the `CLOSING` finalize. The Cloud Scheduler endpoints (D-049) and the staff Advance button both call it; running it twice changes nothing. The 2-hour `expire_holds_job` does not apply to this flow.
@@ -322,6 +322,7 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 | Same lender no-shows twice | Second miss closes the account | `CLOSED`; 409 `LENDER_CLOSED` thereafter |
 | `advance_window` runs twice, or the scheduler and staff overlap | Second run finds nothing due | no change |
 | Two tranches' receipts are both unresolved at `close_wait_until` | Those tranches are excluded and the loan forms without them (existing `excluded_at_close`) | — |
+| An excluded tranche is confirmed after formation (its 24 hours lapse, or staff approve it) | `VOID` (`EXCLUDED_AT_CLOSE`); a refund transfer the SME owes is recorded (rule 8) | — |
 | A dispute raised on day 29 after silence-confirmation | Opens for staff | 202 |
 | A dispute raised on day 31 | Refused | 409 `DISPUTE_WINDOW_CLOSED` |
 | Window created before this change | `flow = LEGACY`, old behaviour | unchanged |
@@ -366,6 +367,10 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 - [ ] `test_window_with_no_confirmed_tranche_fails_with_no_fee`
 - [ ] `test_sme_activation_invoice_issued_at_formation_on_confirmed_total`
 - [ ] `test_ledger_claims_post_only_when_tranche_becomes_active`
+- [ ] `test_a_ticket_attested_after_the_loan_formed_is_voided_with_a_refund_when_its_24_hours_pass`
+- [ ] `test_staff_approving_a_ticket_attested_after_the_loan_formed_voids_it_with_a_refund`
+- [ ] `test_a_lender_locked_at_1500_whose_receipt_joins_the_loan_is_unlocked_when_it_forms`
+- [ ] `test_a_failed_lapse_is_counted_and_the_rounds_still_advance`
 - [ ] `test_advance_window_is_idempotent_and_time_driven`
 - [ ] `test_acceptance_reminders_sent_once_per_channel_and_logged`
 - [ ] `test_reminder_skipped_when_window_already_decided`
@@ -398,3 +403,4 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 | 1.0 | 2026-11-15 | Edward / Claude | First draft, from D-036 to D-057 and the code inventory of 2026-11-15 |
 | 1.1 | 2026-11-18 | Phat / Claude | Money flow FINAL v1.0: no service agreement at commit (signed on Day 14), withdrawal until the end of Day 12, fixed deadlines (`WINDOW_FULL`), Day-14 cut-offs 14:45 / 15:00 / 15:30; `FUNDING_WINDOW_FLOW` switches new windows to this flow |
 | 1.2 | 2026-11-21 | Edward / Claude | Status DRAFT to IMPLEMENTED; no behaviour change |
+| 1.3 | 2026-11-25 | Claude (for Edward's approval) | After the pooled loan forms: an excluded ticket confirmed later (24-hour lapse on every `funding-advance` run, or staff approval) is voided with a refund (rule 8); formation unlocks a lender locked at 15:00 whose ticket joins (rule 9) |

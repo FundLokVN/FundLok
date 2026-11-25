@@ -12,7 +12,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.direct_transfer import commit_flow, fees
+from app.direct_transfer import commit_flow, day14, fees
 from app.direct_transfer.calendar_utils import (
     calendar_deadline,
     count_business_days,
@@ -503,6 +503,13 @@ async def _form_loan(
         t.holding_id = holding.id
         t.investor_fee_total_vnd = fees.investor_fee_total(t.amount_vnd, term, params) if params.fees_enabled else 0
         await transition_tranche(db, t, "ACTIVE", now=now, reason="WINDOW_CLOSED")
+    if window_cutoffs(window, params) is not None:
+        # Day-14 rule 6: a lender locked at 15:00 whose money joins the loan paid in time. The 15:35 run unlocks
+        # them only if their ticket was attested by then (not a receipt still being read), and the Day-14 job stops
+        # looking at a round once it is REPAYING, so it happens here too. A lender never locked, locked by another
+        # round, or still held by something else on this one is left as is.
+        for t in confirmed:
+            await day14._release_if_only_this_window(db, investor_id=t.investor_id, window_id=window.id, now=now)
 
     window.status = "REPAYING"
     window.repayment_start_date = start_date

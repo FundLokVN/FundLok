@@ -10,6 +10,7 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 
+from app.admin import funding as admin_funding
 from app.core.timezone import ICT
 from app.direct_transfer import close, commit_flow, disputes, reservation, tranches, windows
 from app.direct_transfer.config import DirectTransferParams
@@ -791,3 +792,159 @@ async def test_ledger_claims_post_only_when_tranche_becomes_active(world):
         legs = (await world.db.execute(select(LedgerEntry).where(LedgerEntry.reference == t.reference_code))).scalars().all()
         assert sorted(leg.type for leg in legs) == ["DISBURSEMENT", "FUNDING"]
         assert {int(leg.amount) for leg in legs} == {t.amount_vnd}
+
+
+# --------------------------------------------------------------------------- #
+# after the pooled loan forms: Day-14 tickets settled late (day14-transfer-rule.md rule 6, rules 8 and 9 here)
+# --------------------------------------------------------------------------- #
+READ_ON_DAY_16 = dt.datetime(2026, 11, 18, 10, 0, tzinfo=ICT)  # Wednesday: staff type a receipt in by hand
+DAY_16_RUN = dt.datetime(2026, 11, 18, 15, 0, tzinfo=ICT)  # the 15:00 run, past close_wait_until (14:45)
+TUESDAY_RUN = dt.datetime(2026, 11, 17, 15, 0, tzinfo=ICT)  # the 15:00 run on Day 15
+
+
+async def _formed_while_a_receipt_waited(world, monkeypatch):
+    """A 60M lender paid and was confirmed. A 20M lender paid on time at 14:10 but the receipt could not be read, so
+    the round waits for it; staff type it in on Day 16 at 10:00 (ATTESTED, the SME's 24 hours running), and the
+    15:00 run that day forms the pooled loan without it (close_wait_until has passed)."""
+    monkeypatch.setattr(funding, "evidence_storage", lambda: world.storage)
+    (_, paid), (inv, late) = await _accepted_by_lender(world, [60 * M, 20 * M])
+    await _paid(world, paid)
+    await transition_tranche(world.db, late, "SIGNED", now=PAY_DEADLINE - dt.timedelta(hours=1))
+    pay = await tranches.payment_instructions(
+        world.db, tranche_id=late.id, investor_id=inv.user.id, now=PAY_DEADLINE - dt.timedelta(minutes=40),
+        params=world.params,
+    )
+    await upload_receipt(world, inv, late, now=PAY_DEADLINE - dt.timedelta(minutes=30), fields=None)
+    transfer = (await world.db.execute(select(Transfer).where(Transfer.tranche_id == late.id))).scalar_one()
+    assert late.status == "SIGNED" and transfer.check_status == "AWAITING_FIELDS"
+    await process_day14_no_shows(world.db, now=RECEIPT_DEADLINE + dt.timedelta(minutes=5), params=world.params)
+    assert (await acceptance.run_funding_advance(world.db, now=FORMATION_RUN))["failed"] == 0
+    assert (await _reload(world)).status == "CLOSING"  # waits for the receipt still to be read
+
+    fields = good_fields(world, late, inv, when=PAY_DEADLINE - dt.timedelta(minutes=35), memo=pay.qr_code)
+    await tranches.staff_enter_receipt_fields(
+        world.db, transfer_id=transfer.id, fields=fields, reason="Read by hand", staff_id=world.admin.id,
+        now=READ_ON_DAY_16, params=world.params,
+    )
+    assert late.status == "ATTESTED" and late.confirm_deadline == READ_ON_DAY_16 + dt.timedelta(hours=24)
+    assert (await acceptance.run_funding_advance(world.db, now=DAY_16_RUN))["failed"] == 0
+    window = await _reload(world)
+    assert window.status == "REPAYING" and window.confirmed_total_vnd == 60 * M
+    assert late.status == "ATTESTED" and late.excluded_at_close  # the loan formed without it
+    return inv, late, transfer
+
+
+async def _refunds(world, tranche_id):
+    return (
+        await world.db.execute(select(Transfer).where(Transfer.tranche_id == tranche_id, Transfer.kind == "REFUND"))
+    ).scalars().all()
+
+
+async def test_a_ticket_attested_after_the_loan_formed_is_voided_with_a_refund_when_its_24_hours_pass(
+    world, monkeypatch
+):
+    inv, late, _ = await _formed_while_a_receipt_waited(world, monkeypatch)
+    # The 00:00 run on Day 17: the SME's 24 hours run to 10:00.
+    assert (await acceptance.run_funding_advance(world.db, now=READ_ON_DAY_16 + dt.timedelta(hours=14)))["failed"] == 0
+    assert late.status == "ATTESTED"
+
+    # The 15:00 run on Day 17: silence counts as received, too late to join the loan: void, and the SME refunds.
+    assert (await acceptance.run_funding_advance(world.db, now=DAY_16_RUN + dt.timedelta(days=1)))["failed"] == 0
+    assert (late.status, late.void_reason) == ("VOID", "EXCLUDED_AT_CLOSE")
+    [refund] = await _refunds(world, late.id)
+    assert refund.amount_vnd == 20 * M and refund.check_status == "DUE" and refund.to_account_id == inv.account_id
+    window = await _reload(world)
+    assert window.status == "REPAYING" and window.confirmed_total_vnd == 60 * M
+    assert (await world.db.execute(select(Facility))).scalar_one().principal_vnd == 60 * M
+
+    assert (await acceptance.run_funding_advance(world.db, now=DAY_16_RUN + dt.timedelta(days=2)))["failed"] == 0
+    assert len(await _refunds(world, late.id)) == 1  # once
+
+
+async def test_staff_approving_a_ticket_attested_after_the_loan_formed_voids_it_with_a_refund(world, monkeypatch):
+    _, late, transfer = await _formed_while_a_receipt_waited(world, monkeypatch)
+    monkeypatch.setattr(admin_funding, "_now", lambda: DAY_16_RUN + dt.timedelta(hours=1))
+    late_id = late.id  # the wrapper expires the session
+
+    row = await admin_funding.decide_receipt(
+        world.db, transfer.id, outcome="APPROVED", reason="Statement checked", actor=world.admin, ip_address=None
+    )
+
+    assert row.status == "VOID"  # not CONFIRMED with no loan to join
+    await world.db.refresh(late)
+    assert late.void_reason == "EXCLUDED_AT_CLOSE"
+    [refund] = await _refunds(world, late_id)
+    assert refund.amount_vnd == 20 * M and refund.check_status == "DUE"
+    assert (await world.db.execute(select(Facility))).scalar_one().principal_vnd == 60 * M
+    # Money the SME must send back is not news of money arriving.
+    assert await _count(world.db, Notification, Notification.event == "INVESTMENT_TRANSFER_APPROVED") == 0
+
+
+async def test_a_lender_locked_at_1500_whose_receipt_joins_the_loan_is_unlocked_when_it_forms(world, monkeypatch):
+    monkeypatch.setattr(funding, "evidence_storage", lambda: world.storage)
+    (a, on_time), (b, read_late), (c, no_show), (d, locked_elsewhere) = await _accepted_by_lender(
+        world, [40 * M, 20 * M, 20 * M, 10 * M]
+    )
+    await _paid(world, on_time)
+    await _paid(world, locked_elsewhere)
+    other = await make_world(world.db)
+    await open_window(other)
+    world.db.add(
+        LenderStanding(
+            investor_id=d.user.id, status="LOCKED", no_show_count=0, locked_at=T0, locked_window_id=other.window.id
+        )
+    )
+    # The 20M lender B pays at 14:30, inside its QR's 15 minutes, but uploads the receipt only at 15:10.
+    await transition_tranche(world.db, read_late, "SIGNED", now=PAY_DEADLINE - dt.timedelta(hours=1))
+    pay = await tranches.payment_instructions(
+        world.db, tranche_id=read_late.id, investor_id=b.user.id, now=PAY_DEADLINE - dt.timedelta(minutes=20),
+        params=world.params,
+    )
+    await process_day14_no_shows(world.db, now=NO_SHOW_AT, params=world.params)
+    await upload_receipt(world, b, read_late, now=NO_SHOW_AT + dt.timedelta(minutes=10), fields=None)  # unreadable
+    await process_day14_no_shows(world.db, now=RECEIPT_DEADLINE + dt.timedelta(minutes=5), params=world.params)
+    assert read_late.status == "SIGNED" and no_show.status == "EXPIRED"
+    assert (await world.db.get(LenderStanding, b.user.id)).status == "LOCKED"  # nothing proved by 15:35
+    assert (await acceptance.run_funding_advance(world.db, now=FORMATION_RUN))["failed"] == 0
+    assert (await _reload(world)).status == "CLOSING"
+
+    # Day 15: staff type the receipt in (on time), the SME presses Received, and the 15:00 run forms the loan.
+    transfer = (await world.db.execute(select(Transfer).where(Transfer.tranche_id == read_late.id))).scalar_one()
+    fields = good_fields(world, read_late, b, when=PAY_DEADLINE - dt.timedelta(minutes=15), memo=pay.qr_code)
+    await tranches.staff_enter_receipt_fields(
+        world.db, transfer_id=transfer.id, fields=fields, reason="Read by hand", staff_id=world.admin.id,
+        now=TUESDAY_RUN - dt.timedelta(hours=6), params=world.params,
+    )
+    await tranches.sme_confirm_tranche(
+        world.db, tranche_id=read_late.id, sme_user_id=world.sme.id, now=TUESDAY_RUN - dt.timedelta(hours=5),
+        params=world.params,
+    )
+    assert (await acceptance.run_funding_advance(world.db, now=TUESDAY_RUN))["failed"] == 0
+    window = await _reload(world)
+    assert window.status == "REPAYING" and window.confirmed_total_vnd == 70 * M and read_late.status == "ACTIVE"
+    # The Day-14 job no longer looks at a round whose loan has formed.
+    await process_day14_no_shows(world.db, now=TUESDAY_RUN + dt.timedelta(minutes=35), params=world.params)
+
+    async def standing(inv):
+        return await world.db.get(LenderStanding, inv.user.id, populate_existing=True)
+
+    assert (await standing(b)).status == "GOOD"  # unlocked: its money is in the loan
+    assert ((await standing(c)).status, (await standing(c)).no_show_count) == ("LOCKED", 1)  # the no-show stays locked
+    assert (await standing(d)).status == "LOCKED"  # locked for another round
+    assert await standing(a) is None  # never locked: nothing written
+
+
+async def test_a_failed_lapse_is_counted_and_the_rounds_still_advance(world, monkeypatch):
+    monkeypatch.setattr(funding, "evidence_storage", lambda: world.storage)
+    tickets = await _accepted(world, [60 * M, 20 * M])
+    await _paid(world, tickets[0])
+    await process_day14_no_shows(world.db, now=FORMATION_RUN, params=world.params)
+    await world.db.commit()  # the job rolls a failure back to here
+
+    async def down(db, **kwargs):
+        raise ConnectionError("database went away")
+
+    monkeypatch.setattr(tranches, "confirm_lapsed_tranches", down)
+    result = await acceptance.run_funding_advance(world.db, now=FORMATION_RUN)
+    assert result["failed"] == 1 and result["advanced"] == 1  # counted like a failed round: the route answers 500
+    assert (await _reload(world)).status == "REPAYING"  # and the round still formed its loan
