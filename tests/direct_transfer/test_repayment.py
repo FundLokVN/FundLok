@@ -144,6 +144,7 @@ async def test_report_deadline_is_24_hours_after_the_proof(loan):
 
 async def test_report_missing_before_deadline_marks_reported_missed_and_opens_dispute(loan):
     world, _, tr = loan
+    await pay_days_through(world, ict(2026, 11, 5), paid_at=dt.time(17))  # marked paid Wed 17:00: 24 hours to report
     day = (await day_rows(world.db, tranche_id=tr[0].id, kind="INSTALMENT", day_index=1))[0]
     out = await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="Nothing arrived", file_id=None, now=ict(2026, 11, 5, 10), params=world.params)
     assert out.status == "REPORTED_MISSED" and out.reported_at == ict(2026, 11, 5, 10)
@@ -177,8 +178,9 @@ async def test_late_report_within_cap_goes_to_reconciliation_without_changing_st
 
 async def test_late_report_beyond_cap_refused(loan):
     world, _, tr = loan
+    await pay_days_through(world, ict(2026, 11, 5))
     day = (await day_rows(world.db, tranche_id=tr[0].id, kind="INSTALMENT", day_index=1))[0]
-    # report_deadline Fri 6 Nov 00:00; +30 calendar days = Sun 6 Dec 00:00 ICT
+    # marked paid Wed 4 Nov 10:00: report_deadline Thu 5 Nov 10:00; +30 calendar days = Sat 5 Dec 10:00 ICT
     with pytest.raises(DirectTransferError) as info:
         await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="too late", file_id=None, now=ict(2026, 12, 6), params=world.params)
     assert info.value.code == "REPORT_WINDOW_CLOSED" and info.value.persist is True

@@ -95,6 +95,7 @@ async def test_daily_balance_counts_presumed_paid_excludes_reported_missed(loan)
 
 async def test_missed_day_correction_emitted_on_report_and_on_resolution(loan):
     world, _, tr = loan
+    await pay_days_through(world, ict(2026, 11, 5), paid_at=dt.time(17))  # the SME's proof, Wed 17:00
     day = (await world.db.execute(select(RepaymentDay).where(RepaymentDay.tranche_id == tr[0].id, RepaymentDay.day_index == 1, RepaymentDay.kind == "INSTALMENT"))).scalar_one()
     await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="x", file_id=None, now=ict(2026, 11, 5, 10), params=world.params)
     d = (await world.db.execute(select(__import__("app.direct_transfer.models", fromlist=["Dispute"]).Dispute))).scalar_one()

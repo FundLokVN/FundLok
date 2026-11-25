@@ -89,6 +89,32 @@ async def test_marking_a_newer_day_while_an_older_day_is_unpaid_is_refused(loan)
     assert {d.status for d in await _pay(world, [*older, thursday.id], now=ict(11, 5, 10))} == {"PRESUMED_PAID"}
 
 
+async def test_not_received_needs_the_smes_proof_first(loan):
+    world, _, tr = loan
+    mine = await _days(world.db, tranche_id=tr[0].id, due_date=dt.date(2026, 11, 4))
+    day = mine[-1]
+
+    async def report(now):
+        return await repayment.report_missing_day(
+            world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="Nothing arrived", file_id=None,
+            now=now, params=world.params,
+        )
+
+    # Due today and not marked paid: still the SME's to pay, nothing to report. The day stays DUE, so it stays on the
+    # SME's payment list and becomes LATE at 18:00.
+    with pytest.raises(DirectTransferError) as due:
+        await report(ict(11, 4, 10))
+    assert (due.value.status_code, due.value.code) == (409, "NOT_MARKED_PAID") and day.status == "DUE"
+    assert await repayment.mark_late_days(world.db, now=ict(11, 4, 18), params=world.params) > 0
+    with pytest.raises(DirectTransferError) as late:
+        await report(ict(11, 4, 19))
+    assert late.value.code == "NOT_MARKED_PAID" and day.status == "LATE"
+    assert (await world.db.execute(select(Dispute).where(Dispute.repayment_day_id == day.id))).first() is None
+
+    await _pay(world, [d.id for d in mine], now=ict(11, 4, 20))  # the SME's receipt
+    assert (await report(ict(11, 4, 21))).status == "REPORTED_MISSED"
+
+
 async def test_staff_not_paid_decision_makes_the_day_late(loan):
     world, _, tr = loan
     mine = await _days(world.db, tranche_id=tr[0].id, due_date=dt.date(2026, 11, 4))

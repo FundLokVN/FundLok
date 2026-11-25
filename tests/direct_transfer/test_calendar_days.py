@@ -14,7 +14,7 @@ from app.direct_transfer.config import DirectTransferParams
 from app.direct_transfer.errors import DirectTransferError
 from app.direct_transfer.models import Dispute, Transfer
 
-from .helpers import at, attested_tranche, close_now, fund_window, make_investor, open_window
+from .helpers import at, attested_tranche, close_now, fund_window, make_investor, open_window, pay_days_through
 from .test_disputes import sme_disputed
 from .test_repayment import day_rows, ict
 
@@ -43,9 +43,10 @@ async def test_lender_report_window_is_24_hours_after_the_due_date_ends(loan):
 
 async def test_late_report_cap_is_30_calendar_days(loan):
     world, _, tr = loan
+    await pay_days_through(world, ict(2026, 11, 5))  # marked paid Wed 4 Nov 10:00
     day = (await day_rows(world.db, tranche_id=tr[0].id, kind="INSTALMENT", day_index=1))[0]
-    assert day.report_deadline == ict(2026, 11, 6)
-    cap = ict(2026, 12, 6)  # report_deadline + 30 days
+    assert day.report_deadline == ict(2026, 11, 5, 10)  # the proof plus 24 hours
+    cap = ict(2026, 12, 5, 10)  # report_deadline + 30 days
     with pytest.raises(DirectTransferError) as info:
         await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="too late", file_id=None, now=cap, params=world.params)
     assert info.value.code == "REPORT_WINDOW_CLOSED"
@@ -77,6 +78,7 @@ async def test_refund_deadline_is_calendar_days(world):
 async def test_dispute_response_deadline_is_calendar_days(loan):
     world, _, tr = loan
     friday = ict(2026, 11, 6, 10)
+    await pay_days_through(world, ict(2026, 11, 7), paid_at=dt.time(9))  # each day marked paid 09:00 on its due date
     day = (await day_rows(world.db, tranche_id=tr[0].id, kind="INSTALMENT", day_index=3))[0]  # due Fri 6 Nov
     await repayment.report_missing_day(world.db, day_id=day.id, investor_id=tr[0].investor_id, statement="not received", file_id=None, now=friday, params=world.params)
     d = (await world.db.execute(select(Dispute).where(Dispute.repayment_day_id == day.id))).scalar_one()
