@@ -118,7 +118,8 @@ async def test_monthly_accrual_pro_rata_to_received_and_sums_to_total(loan):
         assert total == 83_333
 
 
-async def test_late_days_settled_after_the_last_month_is_billed_are_billed_the_month_they_settle(world):
+@pytest.mark.parametrize("catch_up", [False, True], ids=["on-time", "catch-up"])
+async def test_late_days_settled_after_the_last_month_is_billed_are_billed_the_month_they_settle(world, catch_up):
     # Repaying from Wed 11 Nov: the last month (March) has six days. The first investor's last three, 4, 5 and 8
     # March, go unpaid and turn LATE; every other day is paid on its due date. (late-status.md rule 6)
     tr = await fund_window(world, [10 * M] * 10)
@@ -152,16 +153,24 @@ async def test_late_days_settled_after_the_last_month_is_billed_are_billed_the_m
     await repayment.settle_days(world.db, now=ict(2027, 4, 5))
     await fees.accrue_investor_fees(world.db, now=ict(2027, 4, 20))
     assert await billed() == before  # April has not ended
-    await fees.accrue_investor_fees(world.db, now=ict(2027, 5, 1))
-    april = (await billed())[dt.date(2027, 4, 1)]
+    if catch_up:
+        # April's invoice job resumes after a May settlement. April is still billable in May.
+        await pay(world, [late[2].id], now=ict(2027, 5, 4, 10))
+        await repayment.settle_days(world.db, now=ict(2027, 5, 6))
+    may_run = ict(2027, 5, 6) if catch_up else ict(2027, 5, 1)
+    await fees.accrue_investor_fees(world.db, now=may_run)
+    may_accruals = await billed()
+    assert max(may_accruals) == dt.date(2027, 4, 1)
+    april = may_accruals[dt.date(2027, 4, 1)]
     unpaid = sum(r.gross_vnd for r in late)
     assert april.received_gross_vnd == late[0].gross_vnd + late[1].gross_vnd
     assert april.fee_vnd == fees.investor_fee_for_month(83_333, charged, april.received_gross_vnd, unpaid)
-    assert await fees.accrue_investor_fees(world.db, now=ict(2027, 5, 1)) == 0  # idempotent
+    assert await fees.accrue_investor_fees(world.db, now=may_run) == 0  # idempotent
 
     # The last one is paid in May: June's run completes the fee to exactly its total.
-    await pay(world, [late[2].id], now=ict(2027, 5, 4, 10))
-    await repayment.settle_days(world.db, now=ict(2027, 5, 6))
+    if not catch_up:
+        await pay(world, [late[2].id], now=ict(2027, 5, 4, 10))
+        await repayment.settle_days(world.db, now=ict(2027, 5, 6))
     await fees.accrue_investor_fees(world.db, now=ict(2027, 6, 1))
     after = await billed()
     assert after[dt.date(2027, 5, 1)].received_gross_vnd == late[2].gross_vnd

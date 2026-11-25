@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+from collections import defaultdict
 from typing import Protocol
 from uuid import UUID
 
@@ -307,32 +308,40 @@ async def accrue_investor_fees(db: AsyncSession, *, now: dt.datetime, params: Di
             existing[month] = accrual
             accrued_so_far += fee
             created += 1
-        # Late days that settle after every due month has its accrual: nothing above bills them, so they are billed
-        # for the month they settle in, once it has ended (late-status.md rule 6), and never in a due month's row.
-        # Everything settled: the fee is completed to its total; days still unpaid: pro rata, as in any month.
-        settled = [r for r in rows if r.settled_at is not None]
-        if last_month in existing and settled:
-            counted = sum(a.received_gross_vnd for a in existing.values())
-            uncounted = sum(r.gross_vnd for r in settled) - counted
-            month = max(_first_of_month(ict_date(max(r.settled_at for r in settled))), _next_month(last_month))
-            if uncounted > 0 and month < this_month and month not in existing:
-                if all_settled:
-                    fee = tranche.investor_fee_total_vnd - accrued_so_far
-                else:
-                    fee = investor_fee_for_month(
-                        tranche.investor_fee_total_vnd, accrued_so_far, uncounted, scheduled_total - counted
-                    )
-                if fee > 0:
-                    db.add(
-                        InvestorFeeAccrual(
-                            tranche_id=tranche.id,
-                            investor_id=tranche.investor_id,
-                            period_month=month,
-                            received_gross_vnd=uncounted,
-                            fee_vnd=fee,
-                        )
-                    )
-                    created += 1
+        if last_month not in existing:
+            continue
+
+        # A due month's accrual counted the receipts that had settled by then.
+        # Consume that gross oldest-first before grouping the remaining receipts.
+        billed_by_due_month = {month: existing[month].received_gross_vnd for month in months if month in existing}
+        catch_up_gross = defaultdict(int)
+        first_catch_up_month = _next_month(last_month)
+        for row in sorted((r for r in rows if r.settled_at is not None), key=lambda r: r.settled_at):
+            due_month = _first_of_month(row.due_date)
+            if due_month not in billed_by_due_month:
+                continue  # Its first accrual still belongs to the due-month loop.
+            billed = min(row.gross_vnd, billed_by_due_month[due_month])
+            billed_by_due_month[due_month] -= billed
+            month = max(_first_of_month(ict_date(row.settled_at)), first_catch_up_month)
+            catch_up_gross[month] += row.gross_vnd - billed
+
+        counted = sum(a.received_gross_vnd for a in existing.values())
+        for month, received in sorted(catch_up_gross.items()):
+            if month >= this_month or month in existing or received <= 0:
+                continue
+            fee = investor_fee_for_month(tranche.investor_fee_total_vnd, accrued_so_far, received, scheduled_total - counted)
+            db.add(
+                InvestorFeeAccrual(
+                    tranche_id=tranche.id,
+                    investor_id=tranche.investor_id,
+                    period_month=month,
+                    received_gross_vnd=received,
+                    fee_vnd=fee,
+                )
+            )
+            counted += received
+            accrued_so_far += fee
+            created += 1
     await db.flush()
     return created
 
