@@ -26,9 +26,10 @@ services:
       MP_MAX_MESSAGES: 5000
 
   # Local stand-in for Upstash Redis (deployed environments). The app speaks
-  # plain Redis protocol (ARQ), which Upstash also serves over TLS, so going
-  # from here to Upstash is only a REDIS_URL change -- see .env.example.
-  # `--save 60 1` snapshots to the redis_data volume so queued jobs survive
+  # plain Redis protocol (the rate limiter, app/core/redis_client.py), which
+  # Upstash also serves over TLS, so going from here to Upstash is only a
+  # REDIS_URL change -- see .env.example.
+  # `--save 60 1` snapshots to the redis_data volume so its data survives
   # `docker compose down`.
   redis:
     image: redis:7-alpine
@@ -97,26 +98,6 @@ services:
       PORT: "8080"
     depends_on:
       postgres:
-        condition: service_healthy
-
-  # ARQ worker (T2, HANDOFF-03 Issue 8) -- runs the daily repayment batch
-  # and ML scoring jobs registered on app.scheduler.worker.WorkerSettings.
-  # Separate process from `api`; both share the same image and .env.
-  worker:
-    build: .
-    restart: unless-stopped
-    command: ["arq", "app.scheduler.worker.WorkerSettings"]
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://fundlok:fundlok@postgres:5432/fundlok_dev
-      REDIS_URL: redis://redis:6379/0
-      SMTP_HOST: mailpit
-      SMTP_PORT: "1025"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
 
   pgweb:

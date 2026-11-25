@@ -110,6 +110,7 @@ LATE ──[SME marks paid with receipt]─────────────�
 | SME pays a LATE day with a receipt on D+3 | Day leaves LATE, enters the confirmation path; `late_cleared_at` set | 200 |
 | Lender silent after proof | 24 hours later `PRESUMED_PAID`, settles | — |
 | Lender reports Not received, staff say NOT_PAID | Day becomes LATE | — |
+| Lender reports Not received on a day with no proof (DUE or LATE) | Refused: the day stays the SME's to pay, on its list, QR and reminders, and still becomes LATE at 18:00. The app shows the button only on a day marked paid | 409 `NOT_MARKED_PAID` |
 | Job runs twice | Second run finds nothing to mark | no change |
 | Existing settled presumed-paid rows from before this change | Untouched; ledger is append-only | — |
 
@@ -123,6 +124,7 @@ LATE ──[SME marks paid with receipt]─────────────�
 - [ ] `test_presume_paid_days_ignores_days_without_proof`
 - [ ] `test_late_day_posts_no_ledger_leg`
 - [ ] `test_late_day_is_not_counted_in_investor_fee_accrual`
+- [x] `test_late_days_settled_after_the_last_month_is_billed_are_billed_the_month_they_settle` (`tests/direct_transfer/test_fees.py`): rule 6 when every due month is already billed. Each closed settlement month gets its own accrual, even if the job catches up after a later settlement. The fee is pro rata until the final settlement month, which takes the remainder.
 - [ ] `test_late_day_cleared_when_sme_pays_with_receipt`
 - [ ] `test_marking_a_newer_day_while_an_older_day_is_unpaid_is_refused`
 - [ ] `test_staff_not_paid_decision_makes_the_day_late`
@@ -133,6 +135,7 @@ LATE ──[SME marks paid with receipt]─────────────�
 - [ ] `test_mark_late_days_is_idempotent`
 - [ ] `test_lender_and_sme_notified_when_a_day_becomes_late`
 - [ ] `test_report_missing_window_is_24_hours_then_30_days_with_bank_statement`
+- [x] `test_not_received_needs_the_smes_proof_first`
 - [ ] `test_migration_adds_late_status_and_keeps_existing_rows`
 
 ## 9. Open Questions

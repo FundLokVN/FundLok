@@ -66,7 +66,7 @@ os.environ.setdefault("REFRESH_TOKEN_EXPIRE_DAYS", "14")
 # same underlying reason (plain-http uvicorn).
 os.environ.setdefault("COOKIE_SECURE", "False")
 # Explicitly blank (not just "unset") so a developer's local .env can't leak a
-# real Turnstile secret into the test run and make verify_turnstile_token try
+# real Turnstile secret into the test run and make the captcha verifier try
 # a real network call.
 os.environ["CLOUDFLARE_TURNSTILE_SECRET_KEY"] = ""
 # With no secret, captcha must be explicitly not required, or every protected
@@ -84,10 +84,9 @@ os.environ["ZALO_APP_ID"] = ""
 os.environ["ZALO_APP_SECRET"] = ""
 os.environ["ZALO_OA_REFRESH_TOKEN"] = ""
 os.environ["ZALO_ZBS_DEVELOPMENT_MODE"] = "False"
-# Belt-and-suspenders: never let tests touch real R2 / Didit even if a local
-# .env has them configured.
+# Belt-and-suspenders: never let tests touch real R2 even if a local
+# .env has it configured.
 os.environ["R2_ENDPOINT_URL"] = ""
-os.environ["DIDIT_API_KEY"] = ""
 
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy import select, text  # noqa: E402

@@ -145,6 +145,7 @@ class RepaymentDayResult(BaseModel):
     job: str
     late: int  # days newly marked LATE by this run
     settled: int  # days newly settled by this run
+    disputes: int  # disputes newly handed to staff because the required party missed its deadline
 
 
 class InvoicesResult(BaseModel):
@@ -162,7 +163,8 @@ class CicDailyBalanceResult(BaseModel):
 @router.post("/repayment-day", response_model=RepaymentDayResult)
 async def run_repayment_day(db: AsyncSession = Depends(get_db)):
     """Daily, 00:10 and 18:10 ICT: a day with no payment proof by 18:00 on its due date becomes LATE; a day with proof
-    settles once the investor's 24 hours pass with no report. Idempotent."""
+    settles once the investor's 24 hours pass with no report; a dispute whose required party missed its deadline
+    passes to staff. Idempotent."""
     return RepaymentDayResult(job="repayment-day", **await money_timers.run_repayment_day(db))
 
 

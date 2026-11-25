@@ -11,7 +11,6 @@
     "logs": "docker compose logs -f",
     "dev": "docker compose up -d postgres mailpit minio redis srh && ./scripts/dev.sh",
     "ngrok": "ngrok http 8000",
-    "worker": "docker compose up -d redis && ./.venv/bin/arq app.scheduler.worker.WorkerSettings",
     "start": "docker compose up -d postgres mailpit minio redis srh && ./.venv/bin/alembic upgrade head && ./.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers",
     "reset": "./scripts/reset_db.sh",
     "db:reset": "./scripts/reset_db.sh",

@@ -48,7 +48,7 @@ from app.utils.email import (
     send_verification_email,
 )
 from app.utils.audit import append_audit
-from app.utils.captcha import verify_turnstile_token, verify_turnstile_token_async
+from app.utils.captcha import verify_turnstile_token_async
 from app.utils.locks import advisory_xact_lock
 from app.core.config import settings
 
@@ -372,7 +372,7 @@ async def login(
     ip_address: str | None = None,
     background_tasks: BackgroundTasks | None = None,
 ) -> tuple[User, dict]:
-    verify_turnstile_token(login_data.turnstile_token)
+    await verify_turnstile_token_async(login_data.turnstile_token)
 
     # Checked before the password, so a locked account answers the same way
     # whether or not the guess was right. The lock makes count, verify and
@@ -738,7 +738,7 @@ async def register_user(
     able to fix their own signup beats phone-number enumeration resistance,
     which the email branch does not provide anyway once you know the address.
     """
-    verify_turnstile_token(user_in.turnstile_token)
+    await verify_turnstile_token_async(user_in.turnstile_token)
     # Before the email lookup, so a refusal says nothing about the account.
     await reject_breached_password(user_in.password)
 
@@ -885,7 +885,7 @@ async def resend_verification(
 
 
 async def forgot_password(db: AsyncSession, body: ForgotPasswordRequest, background_tasks: BackgroundTasks) -> dict:
-    verify_turnstile_token(body.turnstile_token)
+    await verify_turnstile_token_async(body.turnstile_token)
 
     # Same response whether or not the email exists, to avoid user enumeration.
     response = {"status": "success", "message": "If the email is registered, a password reset link has been sent."}
