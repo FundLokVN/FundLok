@@ -473,7 +473,12 @@ async def report_missing_day(
         raise conflict("ALREADY_REPORTED", "This day was already reported")
     if day.due_date > ict_date(now):
         raise conflict("NOT_DUE_YET", "This day is not due yet")
-    if day.status in ("MATCHED", "LATE"):  # a LATE day is already overdue: nothing to report
+    if day.status in ("DUE", "LATE"):
+        # "Not received" answers the SME's proof (late-status.md: DUE (proof) -> REPORTED_MISSED). A day with none is
+        # still the SME's to pay: due today, or already LATE and overdue. Reporting it would take it out of the SME's
+        # payment list, its QR and reminders, and out of mark_late_days, and block extension filing.
+        raise conflict("NOT_MARKED_PAID", "The business has not marked this day paid yet, so there is nothing to report")
+    if day.status == "MATCHED":
         raise DirectTransferError(400, f"Invalid state transition: {day.status} → REPORTED_MISSED", "INVALID_TRANSITION")
 
     if now < day.report_deadline:
