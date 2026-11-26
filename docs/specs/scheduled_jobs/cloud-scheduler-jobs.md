@@ -166,8 +166,7 @@ call back and Cloud Scheduler retries). All are idempotent.
   so up to about 18 hours late. `late` and `settled` are the days changed by this call, `disputes` the disputes handed
   to staff; a second call changes none.
 - `POST /internal/jobs/invoices` runs at 00:20 ICT. `fees.mark_overdue_invoices`, `fees.accrue_investor_fees` (ended
-  months, pro rata to money received) and `fees.issue_investor_invoices`. `invoiced` is the investor invoices issued by
-  this call.
+  months, pro rata to money received). Scheduled investor invoice issuance is paused, so `invoiced` is zero.
 - `POST /internal/jobs/cic-daily-balance` runs at 00:30 ICT. `cic.emit_daily_balances` for the previous day when it was
   a business day: one `DAILY_BALANCE` event per ACTIVE tranche (Decree 94 CIC event log; no sender). `events` is the
   number newly logged; a second call logs none, and a call the morning after a weekend or holiday logs none.
@@ -210,7 +209,7 @@ Money timers (`tests/direct_transfer/test_money_timers.py`, the rest above in th
 - `test_repayment_day_settles_a_paid_day_after_the_investor_s_24_hours`
 - `test_repayment_day_called_twice_changes_nothing_the_second_time`
 - `test_repayment_day_hands_an_expired_dispute_turn_to_staff`
-- `test_invoices_issues_an_investor_invoice_once`
+- `test_invoices_marks_sme_overdue_and_accrues_without_issuing_investor_invoices`
 - `test_invoices_marks_an_unpaid_invoice_overdue`
 - `test_cic_daily_balance_logs_the_previous_business_day_once`
 

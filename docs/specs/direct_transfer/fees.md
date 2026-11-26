@@ -6,7 +6,7 @@
 | **Owner** | Edward |
 | **Implementer(s)** | Edward (`app/direct_transfer/fees.py`); Phat (invoice views) |
 | **Module** | `app/direct_transfer/` |
-| **Version** | 0.1 |
+| **Version** | 0.2 |
 | **Date** | 2026-10-28 |
 | **Related ADR** | ADR-009 |
 | **Depends on** | `funding-window.md`, `repayment-collection.md`, `ledger-amendment.md`, `transfer-and-evidence.md` |
@@ -16,7 +16,7 @@
 
 ## 1. Context & Goal
 
-Both fees can be collected without touching customer money, because each is paid separately into FundLok's own account as FundLok's revenue. Under E1 the fee-free MVP (S6) is over: fees are **live by default**. The SME activation fee is a separate VAT invoice, never netted from principal; the investor service fee accrues monthly and is invoiced on a credit model. Unpaid invoices block the next listing or the next reservation.
+Both fees can be collected without touching customer money, because each is paid separately into FundLok's own account as FundLok's revenue. Under E1 the fee-free MVP (S6) is over: fees are **live by default**. The SME activation fee is a separate VAT invoice, never netted from principal; the investor service fee accrues monthly and is invoiced on a credit model. Unpaid SME invoices block the next listing. Investor fees still accrue monthly. Scheduled investor invoicing and its commitment block are paused until lenders can access and pay invoices and staff can record payment.
 
 **Goal:** specify the invoice and accrual tables, the formulas (with the golden numbers), due dates, late fee, the blocks, the invoice-provider interface and the commission-eligibility flag.
 
@@ -110,8 +110,8 @@ ISSUED | OVERDUE ──[admin void with reason]──► VOID
 2. **Never netted.** The invoice is paid separately by transfer to FundLok's own account with the invoice reference in the memo; it is never deducted from principal or repayments, and appears in no `repayment_days` row (I-11). The INV-5 cap test runs both ways at finalize (`funding-window.md` rule 13).
 3. **Investor service fee** (D-023): fixed at signing/close per tranche: `investor_fee_total = amount * 2.5% * term_months / 12`, rounded to the nearest dong, stored on the tranche (PROVISIONAL(Q-D15)); **golden:** 10,000,000, 4 months -> 83,333 per ticket; for the whole 100M loan the same formula gives 833,333; 40,000,000, 2 months -> 166,667 (not 166,666).
 4. **Monthly accrual** (pro rata to what was actually received): for each tranche and each calendar month that has ended, `accrual = (fee_total - fee already accrued) * received_gross_in_month / gross owed at the start of the month (or at disbursement if later)`, rounded to the nearest dong, where `received_gross_in_month` sums rows **settled** with `due_date` in the month and the gross owed is the scheduled gross total less what earlier accruals received; **worked example:** fee_total 166,667, month 1 = 166,667 x 20,499,990 / 41,000,000 = 83,333; the accrual in which the last row settles takes the remainder (`fee_total - SUM(earlier accruals)`), so the accruals sum exactly to `fee_total` when fully received. `UNIQUE (tranche_id, period_month)` makes the job idempotent.
-5. **Monthly investor invoice:** `issue_investor_invoices` groups un-invoiced accruals per investor and month into one `INVESTOR_SERVICE` invoice (`base = SUM(received_gross)`, `fee = SUM(accruals)`, VAT as above, due 7 days after issue).
-6. **Blocks (D-047, 14 Nov 2026):** an SME with an `SME_ACTIVATION` invoice unpaid 7 days after issue (`now > due_at`) cannot open a new window (`SME_INVOICE_UNPAID`); inside the 7 days nothing is blocked. An investor with an `INVESTOR_SERVICE` invoice unpaid 7 days after issue cannot make a NEW commitment (`INVESTOR_FEE_UNPAID`) and nothing else is locked. No late interest on the SME fee (`late_fee_bps_per_day` stays 0). A SUSPENDED account takes no new offers or investments, but the repayment endpoints stay open to it. The SME invoice payload carries `vietqr_payload` built from `FUNDLOK_FEE_BANK_BIN` / `FUNDLOK_FEE_ACCOUNT_NUMBER` / `FUNDLOK_FEE_ACCOUNT_NAME` (deployment config only; null when unset). When `fees_enabled` is false no invoice is created and no block applies (kill switch for tests and incidents).
+5. **Monthly investor invoice (issuance paused):** `issue_investor_invoices` groups un-invoiced accruals per investor and month into one `INVESTOR_SERVICE` invoice (`base = SUM(received_gross)`, `fee = SUM(accruals)`, VAT as above, due 7 days after issue).
+6. **Blocks (D-047, 14 Nov 2026):** an SME with an `SME_ACTIVATION` invoice unpaid 7 days after issue (`now > due_at`) cannot open a new window (`SME_INVOICE_UNPAID`); inside the 7 days nothing is blocked. During the pause, existing investor invoices do not block new commitments or reservations. No late interest on the SME fee (`late_fee_bps_per_day` stays 0). A SUSPENDED account takes no new offers or investments, but the repayment endpoints stay open to it. The SME invoice payload carries `vietqr_payload` built from `FUNDLOK_FEE_BANK_BIN` / `FUNDLOK_FEE_ACCOUNT_NUMBER` / `FUNDLOK_FEE_ACCOUNT_NAME` (deployment config only; null when unset). When `fees_enabled` is false no invoice is created and no block applies (kill switch for tests and incidents).
 7. **Late fee:** `late_fee = floor(fee_vnd * late_fee_bps_per_day * days_overdue / 10000)` recomputed by the overdue job; with the default 0 bps it is 0 but the block still applies (PROVISIONAL(Q-D11)).
 8. **Overdue job** `mark_overdue_invoices(now)`: `ISSUED` with `due_at < now` -> `OVERDUE`; idempotent; appends an `evidence_log` row.
 9. **Mark paid:** records a `FEE_PAYMENT` transfer (bank txn id, evidence), sets `PAID`, posts the `FEE` ledger leg (`ledger-amendment.md` rule 5); replays return the same invoice.
@@ -148,10 +148,10 @@ ISSUED | OVERDUE ──[admin void with reason]──► VOID
 - [ ] `test_accrual_job_idempotent`
 - [ ] `test_monthly_invoice_groups_accruals_per_investor`
 - [ ] `test_unpaid_sme_invoice_blocks_new_window`
-- [ ] `test_unpaid_investor_invoice_blocks_reservation_and_paying_lifts_it`
+- [x] `test_existing_investor_invoice_is_not_listed_as_a_block_and_can_be_recorded_paid`
 - [ ] `test_paying_invoice_lifts_blocks`
 - [ ] `test_sme_fee_blocks_next_listing_only_after_seven_days`
-- [ ] `test_lender_fee_unpaid_after_seven_days_blocks_new_commitments_only`
+- [x] `test_lender_with_an_existing_overdue_fee_invoice_can_commit` (in `test_commit_then_accept.py`)
 - [ ] `test_suspended_account_can_still_repay`
 - [ ] `test_sme_fee_invoice_carries_a_qr`
 - [ ] `test_overdue_job_marks_overdue_and_assesses_late_fee`

@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 import app.direct_transfer
 from app.core.timezone import ICT
 from app.direct_transfer import repayment
-from app.direct_transfer.models import Dispute, FeeInvoice, RepaymentDay
+from app.direct_transfer.models import Dispute, FeeInvoice, InvestorFeeAccrual, RepaymentDay
 from app.scheduled_jobs import money_timers
 
 from .helpers import pay_days_through, receipt_file
@@ -94,27 +94,16 @@ async def test_repayment_day_hands_an_expired_dispute_turn_to_staff(loan):
     assert (await money_timers.run_repayment_day(world.db, now=deadline))["disputes"] == 0
 
 
-async def test_invoices_issues_an_investor_invoice_once(loan):
-    world, _, tr = loan
-    now = ict(2026, 12, 3)
-    await pay_days_through(world, now)
-    await repayment.settle_days(world.db, now=now)
-    first = await money_timers.run_invoices(world.db, now=now)
-    assert first["accrued"] == 10 and first["invoiced"] == 10
-    issued = (await world.db.execute(select(FeeInvoice).where(FeeInvoice.kind == "INVESTOR_SERVICE"))).scalars().all()
-    assert {i.payer_user_id for i in issued} == {t.investor_id for t in tr}
-    again = await money_timers.run_invoices(world.db, now=now)
-    assert again["accrued"] == 0 and again["invoiced"] == 0
-
-
-async def test_invoices_marks_overdue_accrues_and_invoices_in_one_run(loan):
+async def test_invoices_marks_sme_overdue_and_accrues_without_issuing_investor_invoices(loan):
     world, _, _ = loan
     await pay_days_through(world, ict(2026, 12, 3))  # November paid with proof, so it settles and accrues
     await money_timers.run_repayment_day(world.db, now=ict(2026, 12, 3))
     out = await money_timers.run_invoices(world.db, now=ict(2026, 12, 3))
-    assert out == {"overdue": 1, "accrued": 10, "invoiced": 10}  # the SME invoice (issued 3 Nov, due 10 Nov) is overdue
+    assert out == {"overdue": 1, "accrued": 10, "invoiced": 0}  # the SME invoice (issued 3 Nov, due 10 Nov) is overdue
     assert await money_timers.run_invoices(world.db, now=ict(2026, 12, 3)) == {"overdue": 0, "accrued": 0, "invoiced": 0}
-    assert (await world.db.execute(select(func.count()).select_from(FeeInvoice))).scalar_one() == 11
+    assert (await world.db.execute(select(func.count()).select_from(FeeInvoice))).scalar_one() == 1
+    accruals = (await world.db.execute(select(InvestorFeeAccrual))).scalars().all()
+    assert len(accruals) == 10 and all(row.invoice_id is None for row in accruals)
 
 
 async def test_invoices_marks_an_unpaid_invoice_overdue(loan):

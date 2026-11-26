@@ -143,26 +143,20 @@ async def sme_has_unpaid_invoice(
     return await _has_overdue_invoice(db, user_id, "SME_ACTIVATION", now)
 
 
-async def investor_has_unpaid_invoice(
-    db: AsyncSession, user_id: UUID, params: DirectTransferParams | None = None, *, now: dt.datetime
-) -> bool:
-    """Blocks NEW commitments only, and only after the 7 days from issue (D-047, Appendix M 8.3)."""
-    if not resolve(params).fees_enabled:
-        return False
-    return await _has_overdue_invoice(db, user_id, "INVESTOR_SERVICE", now)
-
-
 async def blocked_parties(db: AsyncSession) -> dict[str, list[dict]]:
     rows = (
-        await db.execute(select(FeeInvoice).where(FeeInvoice.status.in_(UNPAID)).order_by(FeeInvoice.issued_at))
+        await db.execute(
+            select(FeeInvoice)
+            .where(FeeInvoice.kind == "SME_ACTIVATION", FeeInvoice.status.in_(UNPAID))
+            .order_by(FeeInvoice.issued_at)
+        )
     ).scalars().all()
-    out: dict[str, dict[UUID, list[str]]] = {"smes": {}, "investors": {}}
+    smes: dict[UUID, list[str]] = {}
     for inv in rows:
-        bucket = out["smes"] if inv.kind == "SME_ACTIVATION" else out["investors"]
-        bucket.setdefault(inv.payer_user_id, []).append(str(inv.id))
+        smes.setdefault(inv.payer_user_id, []).append(str(inv.id))
     return {
-        "smes": [{"user_id": str(u), "invoice_ids": ids} for u, ids in out["smes"].items()],
-        "investors": [{"user_id": str(u), "invoice_ids": ids} for u, ids in out["investors"].items()],
+        "smes": [{"user_id": str(u), "invoice_ids": ids} for u, ids in smes.items()],
+        "investors": [],
     }
 
 
