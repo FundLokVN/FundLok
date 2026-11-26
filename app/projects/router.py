@@ -4,6 +4,7 @@ from typing import List
 from uuid import UUID
 from app.core.database import get_db
 from app.utils.jwt import get_current_user
+from app.projects.borrower import tax_base
 from app.projects.schemas import (
     LoanApplicationCreateInline,
     MarketplaceLoanApplicationOut,
@@ -101,6 +102,10 @@ async def list_projects(
     results = []
     for project in projects:
         out = MarketplaceProjectOut.model_validate(project)
+        if len(tax_base(project.tax_id) or "") == 12:
+            # A household tax code can identify its owner, and its registered address can be their home.
+            out.tax_id = None
+            out.address = None
         if project.loan_applications:
             application = project.loan_applications[0]
             out.loan_application = MarketplaceLoanApplicationOut.model_validate(application)
