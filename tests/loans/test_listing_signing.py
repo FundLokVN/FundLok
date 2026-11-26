@@ -109,8 +109,8 @@ def approved(client, db_session, make_user, make_admin, attach_required_document
         sme = await make_user(role="SME")
         if phone:
             await _verified_phone(db_session, sme)
-        app_id = await _apply(client, sme, tax_id=tax_id)
         await _verified_with_bank(db_session, sme, tax_id=tax_id)
+        app_id = await _apply(client, db_session, sme, tax_id=tax_id)
         if kyc:
             await _kyc(db_session, sme)
         if guarantor_address:
@@ -236,9 +236,9 @@ def _text(pdf: bytes) -> str:
     return " ".join("\n".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages).split())
 
 
-async def test_submitting_no_longer_needs_a_signed_agreement(client, make_user):
+async def test_submitting_no_longer_needs_a_signed_agreement(client, db_session, make_user):
     sme = await make_user(role="SME")
-    app_id = await _apply(client, sme)
+    app_id = await _apply(client, db_session, sme)
     resp = await client.post(f"/loans/applications/{app_id}/submit", headers=auth_headers(sme))
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "SUBMITTED"
@@ -762,10 +762,10 @@ async def test_only_the_owning_sme_signs(client, approved, make_user, stored):
     assert unknown.status_code == 404
 
 
-async def test_the_wizard_cannot_upload_a_signed_document_unchecked(client, make_user):
+async def test_the_wizard_cannot_upload_a_signed_document_unchecked(client, db_session, make_user):
     # Signed listing documents arrive only through the NEAC-checked endpoint.
     sme = await make_user(role="SME")
-    app_id = await _apply(client, sme)
+    app_id = await _apply(client, db_session, sme)
     for document_type in ("sme_service_agreement", "sme_standing_offer", "sme_loan_contract"):
         resp = await client.post(
             "/uploads/init-upload",
