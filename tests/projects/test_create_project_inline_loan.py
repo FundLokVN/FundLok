@@ -185,10 +185,39 @@ async def test_public_listing_hides_the_applicant_only_fields(client, make_user,
         "guarantor_name",
     }
     assert "prior default" not in listed.text
+    assert match["tax_id"] == created.json()["tax_id"]
 
     # The applicant still sees their own note.
     own = await client.get("/projects", headers=auth_headers(sme))
     assert own.json()[0]["loan_application"]["decision_note"] == application.decision_note
+
+
+async def test_marketplace_redacts_household_identifiers_and_address(client, make_user, db_session):
+    from sqlalchemy import select
+
+    from app.lending.models import Project
+
+    sme = await make_user(role="SME")
+    payload = _payload()
+    payload["tax_id"] = "079123456789"
+    payload["address"] = {"street": "12 Test Street", "city": "Ho Chi Minh City", "country": "Vietnam"}
+    created = await client.post("/projects", json=payload, headers=auth_headers(sme))
+    assert created.status_code == 201, created.text
+    project_id = created.json()["id"]
+    project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+    project.status = "ACTIVE"
+    await db_session.commit()
+
+    investor = await make_user(role="INVESTOR")
+    listed = await client.get("/projects/public", headers=auth_headers(investor))
+    assert listed.status_code == 200, listed.text
+    listing = next(row for row in listed.json() if row["id"] == project_id)
+    assert listing["tax_id"] is None
+    assert listing["address"] is None
+
+    own = await client.get("/projects", headers=auth_headers(sme))
+    assert own.json()[0]["tax_id"] == payload["tax_id"]
+    assert own.json()[0]["address"]["street"] == payload["address"]["street"]
 
 
 async def test_public_listing_without_an_application_returns_null(
