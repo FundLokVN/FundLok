@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.blog import service
+from app.blog import seo_assistant, service
 from app.blog.models import SLUG_PATTERN
 from app.blog.schemas import (
     BlogMediaConfirmResponse,
@@ -22,6 +22,9 @@ from app.blog.schemas import (
     BlogPostDetail,
     BlogPostListResponse,
     BlogPostUpdate,
+    BlogSeoAssistantStatus,
+    BlogSeoSuggestionRequest,
+    BlogSeoSuggestions,
     BlogVersionBody,
     KeywordUsageResponse,
     Locale,
@@ -91,6 +94,27 @@ async def keyword_usage(
     """Other posts with the same focus keyword, for the editor's checklist warning."""
     normalized, posts = await service.find_focus_keyword_usage(db, keyword=keyword, exclude_id=exclude_id)
     return KeywordUsageResponse(keyword=normalized, posts=posts)
+
+
+@admin_blog_router.get("/seo-assistant", response_model=BlogSeoAssistantStatus)
+async def seo_assistant_status(current_user: User = Depends(require_admin)):
+    """Whether this admin's editor shows "Suggest SEO" (docs/specs/blog/seo-assistant.md)."""
+    return BlogSeoAssistantStatus(enabled=seo_assistant.available_to(current_user))
+
+
+@admin_blog_router.post("/seo-assistant/suggestions", response_model=BlogSeoSuggestions)
+async def suggest_seo(
+    body: BlogSeoSuggestionRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Claude's suggestions for the draft on screen. Nothing is stored: the
+    editor applies them to its draft, and Save or Publish writes as usual."""
+    seo_assistant.require_access(current_user)
+    # Loading the admin was this request's only query; give the connection
+    # back to the pool rather than hold it while Claude writes (up to 25 s).
+    await db.close()
+    return await seo_assistant.suggest(title=body.title, locale=body.locale, text=body.text)
 
 
 @admin_blog_router.post("/posts", response_model=BlogPostDetail, status_code=status.HTTP_201_CREATED)
