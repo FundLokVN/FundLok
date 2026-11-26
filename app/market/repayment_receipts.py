@@ -28,7 +28,7 @@ from app.direct_transfer.models import (
     Tranche,
     Transfer,
 )
-from app.direct_transfer.repayment import match_day
+from app.direct_transfer.repayment import lock_repayment_window, match_day
 from app.direct_transfer.tranches import mask_name
 from app.lending.models import Project
 from app.market.receipt_auto import ACCEPTED, DENIED, system_check_state
@@ -208,6 +208,14 @@ async def confirm_receipt(
             headers={"X-Error-Code": "NOTHING_TO_CONFIRM"},
         )
     tranche = await db.get(Tranche, transfers[0].tranche_id)
+    window_ids = (await db.execute(
+        select(Tranche.window_id)
+        .where(Tranche.id.in_({transfer.tranche_id for transfer in waiting}))
+        .distinct()
+        .order_by(Tranche.window_id)
+    )).scalars().all()
+    for window_id in window_ids:
+        await lock_repayment_window(db, window_id)
     window = await db.get(FundingWindow, tranche.window_id)
     tranche_id, sme_user_id, now = tranche.id, window.sme_user_id, _now()
     try:

@@ -14,9 +14,10 @@ import app.direct_transfer
 from app.core.timezone import ICT
 from app.direct_transfer import repayment
 from app.direct_transfer.models import Dispute, FeeInvoice, RepaymentDay
+from app.repayment_schedule.models import Facility
 from app.scheduled_jobs import money_timers
 
-from .helpers import pay_days_through, receipt_file
+from .helpers import at, close_now, fund_window, make_world, pay_days_through, receipt_file
 
 
 def ict(y, m, d, h=0, mi=0):
@@ -30,17 +31,17 @@ async def _wednesday(db):
 async def test_repayment_day_marks_an_unpaid_day_late_after_18h_and_not_before(loan):
     world, _, _ = loan
     before = await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 4, 17, 59))
-    assert before == {"late": 0, "settled": 0, "disputes": 0}
+    assert before == {"late": 0, "settled": 0, "disputes": 0, "failed": 0}
     after = await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 4, 18, 10))
-    assert after == {"late": 20, "settled": 0, "disputes": 0}  # each investor's stub and instalment
+    assert after == {"late": 20, "settled": 0, "disputes": 0, "failed": 0}  # each investor's stub and instalment
     assert {d.status for d in await _wednesday(world.db)} == {"LATE"}
 
 
 async def test_repayment_day_marks_every_missed_day_late_in_one_catch_up_run(loan):
     world, _, _ = loan
     out = await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 9, 0, 10))
-    assert out == {"late": 40, "settled": 0, "disputes": 0}  # Wed (10 instalments + 10 stubs), Thu and Fri
-    assert await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 9, 0, 10)) == {"late": 0, "settled": 0, "disputes": 0}
+    assert out == {"late": 40, "settled": 0, "disputes": 0, "failed": 0}  # Wed (10 instalments + 10 stubs), Thu and Fri
+    assert await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 9, 0, 10)) == {"late": 0, "settled": 0, "disputes": 0, "failed": 0}
 
 
 async def test_repayment_day_settles_a_paid_day_after_the_investor_s_24_hours(loan):
@@ -51,16 +52,61 @@ async def test_repayment_day_settles_a_paid_day_after_the_investor_s_24_hours(lo
         idempotency_key=f"pay-{uuid.uuid4().hex}", now=ict(2026, 11, 4, 10), params=world.params,
     )
     early = await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 5, 9, 59))
-    assert early == {"late": 0, "settled": 0, "disputes": 0}
+    assert early == {"late": 0, "settled": 0, "disputes": 0, "failed": 0}
     settled = await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 5, 10, 10))
-    assert settled == {"late": 0, "settled": 20, "disputes": 0}
+    assert settled == {"late": 0, "settled": 20, "disputes": 0, "failed": 0}
 
 
 async def test_repayment_day_called_twice_changes_nothing_the_second_time(loan):
     world, _, _ = loan
     assert (await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 4, 18, 10)))["late"] == 20
-    assert await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 4, 18, 10)) == {"late": 0, "settled": 0, "disputes": 0}
-    assert await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 5, 0, 10)) == {"late": 0, "settled": 0, "disputes": 0}
+    assert await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 4, 18, 10)) == {"late": 0, "settled": 0, "disputes": 0, "failed": 0}
+    assert await money_timers.run_repayment_day(world.db, now=ict(2026, 11, 5, 0, 10)) == {"late": 0, "settled": 0, "disputes": 0, "failed": 0}
+
+
+async def test_repayment_day_commits_healthy_rounds_when_another_settlement_fails(db_session, monkeypatch):
+    now = ict(2027, 6, 1)
+    broken = await make_world(db_session, target=10_000_000, term=1)
+    await fund_window(broken, [10_000_000])
+    broken_window = await close_now(broken, now=at(days=1))
+    await pay_days_through(broken, now)
+    broken_facility = await db_session.get(Facility, broken_window.facility_id)
+    broken_facility.collected_to_date_vnd = 1
+    broken_day_id = (await db_session.execute(
+        select(RepaymentDay.id).where(RepaymentDay.facility_id == broken_facility.id).limit(1)
+    )).scalar_one()
+
+    healthy = await make_world(db_session, target=10_000_000, term=1)
+    await fund_window(healthy, [10_000_000])
+    healthy_window = await close_now(healthy, now=at(days=1))
+    days = (await db_session.execute(
+        select(RepaymentDay).where(RepaymentDay.facility_id == healthy_window.facility_id)
+        .order_by(RepaymentDay.due_date)
+    )).scalars().all()
+    paid_ids = [day.id for day in days if day.due_date == days[0].due_date]
+    unpaid_id = days[-1].id
+    await repayment.mark_days_paid(
+        db_session, sme_user_id=healthy.sme.id, repayment_day_ids=paid_ids,
+        receipt_file_id=(await receipt_file(healthy)).id, idempotency_key="healthy", now=ict(2026, 11, 4, 10),
+    )
+    await db_session.commit()
+
+    broken_window_id = broken_window.id
+    due_windows = repayment.due_settlement_windows
+
+    async def broken_first(db, *, now):
+        ids = await due_windows(db, now=now)
+        return sorted(ids, key=lambda window_id: window_id != broken_window_id)
+
+    monkeypatch.setattr(repayment, "due_settlement_windows", broken_first)
+    result = await money_timers.run_repayment_day(db_session, now=now)
+    assert result["failed"] == 1 and result["settled"] == len(paid_ids)
+    for day_id in paid_ids:
+        assert (await db_session.get(RepaymentDay, day_id, populate_existing=True)).settled_at == now
+    assert (await db_session.get(RepaymentDay, unpaid_id, populate_existing=True)).status == "LATE"
+    assert (await db_session.get(RepaymentDay, broken_day_id, populate_existing=True)).settled_at is None
+    retry = await money_timers.run_repayment_day(db_session, now=now)
+    assert retry["failed"] == 1 and retry["settled"] == 0
 
 
 async def test_repayment_day_hands_an_expired_dispute_turn_to_staff(loan):
