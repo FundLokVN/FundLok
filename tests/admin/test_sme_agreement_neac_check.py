@@ -9,10 +9,10 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.direct_transfer.models import PaymentAccount
-from app.gverify.models import STATUS_APPROVED, GVerifyVerification
+from app.gverify.models import STATUS_APPROVED, GVerifyKybVerification, GVerifyVerification
 from app.lending.models import AuditLog, LoanApplication, LoanApplicationDocument, ScoreRun
 from app.market.investor_agreement import neac
 from conftest import SIGNED_AGREEMENT_PDF, auth_headers
@@ -62,9 +62,15 @@ def _signed(pdf: bytes) -> bytes:
 async def _uploaded_agreement(client, db_session, make_user, monkeypatch, *, content=None, verified=True, tax_id=TAX):
     """An SME application whose signed Service Agreement is on file; (project id, document id)."""
     sme = await make_user(role="SME")
-    app_id = await _apply(client, sme, tax_id=tax_id)
     if verified:
         await _verified_with_bank(db_session, sme, tax_id=tax_id)
+    app_id = await _apply(client, db_session, sme, tax_id=tax_id)
+    if not verified:
+        # A historical project without KYB uses the project tax ID.
+        await db_session.execute(delete(GVerifyKybVerification).where(
+            GVerifyKybVerification.user_id == uuid.UUID(sme["id"])
+        ))
+        await db_session.commit()
     if content is None:
         download = await client.get(f"/loans/applications/{app_id}/service-agreement", headers=auth_headers(sme))
         assert download.status_code == 200, download.text
@@ -85,8 +91,8 @@ async def _uploaded_offer(client, db_session, make_user, monkeypatch, *, kind="s
     """An approved application (locked terms, the owner's eKYC) whose signed Standing Offer (or, with
     kind="loan-contract", Loan Contract template) is on file; (project id, document id, the SME)."""
     sme = await make_user(role="SME")
-    app_id = await _apply(client, sme)
     await _verified_with_bank(db_session, sme)
+    app_id = await _apply(client, db_session, sme)
     db_session.add(GVerifyVerification(
         user_id=uuid.UUID(sme["id"]), verification_type="KYC", status=STATUS_APPROVED,
         full_name=GUARANTOR_NAME, person_number=GUARANTOR_ID,
@@ -351,7 +357,7 @@ async def test_a_copy_of_an_earlier_version_is_still_the_right_document(
     with monkeypatch.context() as old:
         old.setattr(text, "VERSION", "sme-agreement-v0.3")
         sme = await make_user(role="SME")
-        app_id = await _apply(client, sme)
+        app_id = await _apply(client, db_session, sme)
         await _verified_with_bank(db_session, sme)
         download = await client.get(f"/loans/applications/{app_id}/service-agreement", headers=auth_headers(sme))
         assert download.status_code == 200, download.text

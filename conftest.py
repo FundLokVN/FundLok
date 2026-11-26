@@ -488,11 +488,27 @@ async def _second_factor_session(db_session, user: dict) -> dict:
     return user
 
 
+async def record_test_project_kyb(db_session, sme: dict, tax_id: str | None) -> None:
+    """Put this test SME through the project-creation prerequisite."""
+    from app.gverify.models import STATUS_APPROVED, GVerifyKybVerification
+    from app.projects.borrower import tax_base, verified_tax_base
+
+    user_id = uuid.UUID(sme["id"])
+    base = tax_base(tax_id)
+    if base is not None and await verified_tax_base(db_session, user_id) is None:
+        db_session.add(GVerifyKybVerification(
+            user_id=user_id, status=STATUS_APPROVED, tax_code=base,
+            document_type="HOUSEHOLD" if len(base) == 12 else "COMPANY",
+        ))
+        await db_session.commit()
+
+
 @pytest.fixture
-def make_project(client):
+def make_project(client, db_session):
     async def _make(sme: dict, legal_name: str | None = None, tax_id: str | None = None):
         legal_name = legal_name or f"Test Co {uuid.uuid4().hex[:8]}"
         tax_id = tax_id if tax_id is not None else fake_tax_code()
+        await record_test_project_kyb(db_session, sme, tax_id)
         resp = await client.post(
             "/projects",
             json={"legal_name": legal_name, "tax_id": tax_id},
