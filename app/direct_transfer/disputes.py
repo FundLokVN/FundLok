@@ -253,7 +253,16 @@ async def decide_dispute(
     p = resolve(params)
     if not reason or not reason.strip():
         raise DirectTransferError(422, "A reason is required", "REASON_REQUIRED")
-    dispute = (await db.execute(select(Dispute).where(Dispute.id == dispute_id).with_for_update())).scalar_one_or_none()
+    window_id = (await db.execute(
+        select(Dispute.window_id).where(Dispute.id == dispute_id, Dispute.subject_type == "REPAYMENT_DAY")
+    )).scalar_one_or_none()
+    if window_id is not None:
+        from app.direct_transfer.repayment import lock_repayment_window
+
+        await lock_repayment_window(db, window_id)
+    dispute = (await db.execute(
+        select(Dispute).where(Dispute.id == dispute_id).with_for_update().execution_options(populate_existing=True)
+    )).scalar_one_or_none()
     if dispute is None:
         raise not_found("Dispute not found")
     if dispute.status == "DECIDED":

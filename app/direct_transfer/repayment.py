@@ -530,14 +530,24 @@ async def report_missing_day(
 # --------------------------------------------------------------------------- #
 # matching, settlement, facility closure
 # --------------------------------------------------------------------------- #
+async def lock_repayment_window(db: AsyncSession, window_id: UUID, *, nowait: bool = False) -> FundingWindow:
+    """Serialize settlement and closure with the other repayments and extensions in this round."""
+    return (await db.execute(
+        select(FundingWindow)
+        .where(FundingWindow.id == window_id)
+        .with_for_update(key_share=True, nowait=nowait)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+
+
 async def _settle_day(db: AsyncSession, day: RepaymentDay, *, now: dt.datetime) -> None:
     if day.settled_at is not None:
         return
     tranche = await db.get(Tranche, day.tranche_id)
     window = await db.get(FundingWindow, tranche.window_id)
-    facility = await db.get(Facility, day.facility_id)
     day.settled_at = now
     if day.kind == "INSTALMENT":
+        facility = await db.get(Facility, day.facility_id, populate_existing=True)
         # collected_to_date tracks T0 only (INV-1); the stub obligation sits outside T0 (E3).
         facility.collected_to_date_vnd = int(facility.collected_to_date_vnd) + day.gross_vnd
     await post_repayment_day_settled(
@@ -561,9 +571,18 @@ async def match_day(
     the investor confirming they received it (`actor_role="INVESTOR"`, `staff_id` the investor)."""
     if not reason or not reason.strip():
         raise DirectTransferError(422, "A reason is required", "REASON_REQUIRED")
-    day = (await db.execute(select(RepaymentDay).where(RepaymentDay.id == day_id).with_for_update())).scalar_one_or_none()
-    if day is None:
+    window_id = (await db.execute(
+        select(Tranche.window_id)
+        .join(RepaymentDay, RepaymentDay.tranche_id == Tranche.id)
+        .where(RepaymentDay.id == day_id)
+    )).scalar_one_or_none()
+    if window_id is None:
         raise not_found("Repayment day not found")
+    window = await lock_repayment_window(db, window_id)
+    day = (await db.execute(
+        select(RepaymentDay).where(RepaymentDay.id == day_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )).scalar_one()
     if day.status == "MATCHED":
         return day
     day.status = "MATCHED"
@@ -578,36 +597,55 @@ async def match_day(
         db, entity_type="REPAYMENT_DAY", entity_id=day.id, event_type="REPAYMENT_DAY_REPORTED", now=now,
         actor_id=staff_id, actor_role=actor_role, reason=reason, payload={"event": "MATCHED"},
     )
-    tranche = await db.get(Tranche, day.tranche_id)
-    window = await db.get(FundingWindow, tranche.window_id)
     await maybe_close_facility(db, window, now=now)
     return day
 
 
-async def settle_days(db: AsyncSession, *, now: dt.datetime) -> int:
-    """PRESUMED_PAID days past their report deadline, with no open dispute, count as collected (ledger posted)."""
-    open_disputes = select(Dispute.repayment_day_id).where(Dispute.status != "DECIDED", Dispute.repayment_day_id.is_not(None))
-    days = (
-        await db.execute(
-            select(RepaymentDay)
-            .where(
-                RepaymentDay.status == "PRESUMED_PAID",
-                RepaymentDay.settled_at.is_(None),
-                RepaymentDay.report_deadline <= now,
-                RepaymentDay.id.not_in(open_disputes),
+def _due_for_settlement(now: dt.datetime):
+    open_disputes = select(Dispute.repayment_day_id).where(
+        Dispute.status != "DECIDED", Dispute.repayment_day_id.is_not(None),
+    )
+    return (
+        RepaymentDay.status == "PRESUMED_PAID",
+        RepaymentDay.settled_at.is_(None),
+        RepaymentDay.report_deadline <= now,
+        RepaymentDay.id.not_in(open_disputes),
+    )
+
+
+async def due_settlement_windows(db: AsyncSession, *, now: dt.datetime) -> list[UUID]:
+    return list((await db.execute(
+        select(Tranche.window_id)
+        .join(RepaymentDay, RepaymentDay.tranche_id == Tranche.id)
+        .where(*_due_for_settlement(now))
+        .distinct()
+        .order_by(Tranche.window_id)
+    )).scalars())
+
+
+async def settle_days(db: AsyncSession, *, now: dt.datetime, window_id: UUID | None = None) -> int:
+    """Settle eligible days under a round lock. The caller owns the transaction."""
+    ids = [window_id] if window_id is not None else await due_settlement_windows(db, now=now)
+    settled = 0
+    for current_id in ids:
+        # A scheduled run can retry a busy round after committing the others.
+        window = await lock_repayment_window(db, current_id, nowait=window_id is not None)
+        days = (
+            await db.execute(
+                select(RepaymentDay)
+                .join(Tranche, Tranche.id == RepaymentDay.tranche_id)
+                .where(Tranche.window_id == current_id, *_due_for_settlement(now))
+                .order_by(RepaymentDay.due_date, RepaymentDay.day_index, RepaymentDay.id)
+                .with_for_update(of=RepaymentDay, skip_locked=True)
+                .execution_options(populate_existing=True)
             )
-            .order_by(RepaymentDay.due_date, RepaymentDay.day_index)
-            .with_for_update(skip_locked=True)
-        )
-    ).scalars().all()
-    windows: dict[UUID, FundingWindow] = {}
-    for day in days:
-        await _settle_day(db, day, now=now)
-        tranche = await db.get(Tranche, day.tranche_id)
-        windows[tranche.window_id] = await db.get(FundingWindow, tranche.window_id)
-    for window in windows.values():
-        await maybe_close_facility(db, window, now=now)
-    return len(days)
+        ).scalars().all()
+        for day in days:
+            await _settle_day(db, day, now=now)
+        if days:
+            await maybe_close_facility(db, window, now=now)
+        settled += len(days)
+    return settled
 
 
 async def maybe_close_facility(db: AsyncSession, window: FundingWindow, *, now: dt.datetime) -> bool:
@@ -627,7 +665,7 @@ async def maybe_close_facility(db: AsyncSession, window: FundingWindow, *, now: 
         return False
     all_settled = True
     for facility_id in facility_ids:
-        facility = await db.get(Facility, facility_id)
+        facility = await db.get(Facility, facility_id, populate_existing=True)
         if facility.status == "SETTLED":
             continue
         unsettled = (
