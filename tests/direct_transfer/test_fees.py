@@ -13,7 +13,7 @@ from app.direct_transfer.fees import ManualInvoiceProvider
 from app.direct_transfer.models import FeeInvoice, InvestorFeeAccrual, RepaymentDay, Tranche
 from app.ledger.models import LedgerAccount, LedgerEntry
 
-from .helpers import T0, at, close_now, fund_window, make_investor, make_world, open_window, pay_days_through, receipt_file, reserve
+from .helpers import T0, at, close_now, fund_window, make_investor, make_world, open_window, pay_days_through, receipt_file
 
 M = 1_000_000
 
@@ -211,7 +211,6 @@ async def test_unpaid_sme_invoice_blocks_new_window(loan):
     inv = await sme_invoice(world.db)
     late = inv.due_at + dt.timedelta(seconds=1)
     assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id, now=late) is True
-    assert await fees.investor_has_unpaid_invoice(world.db, world.sme.id, now=late) is False
 
 
 async def test_sme_fee_blocks_next_listing_only_after_seven_days(loan):
@@ -230,38 +229,7 @@ async def test_sme_fee_blocks_next_listing_only_after_seven_days(loan):
     assert await fees.sme_has_unpaid_invoice(world.db, world.sme.id, now=after + dt.timedelta(days=30)) is True
 
 
-async def test_lender_fee_unpaid_after_seven_days_blocks_new_commitments_only(world):
-    """D-047 / T5: inside the 7 days a lender can still invest; after them only NEW commitments are refused."""
-    window = await open_window(world)
-    inv = await make_investor(world)
-    invoice = FeeInvoice(
-        kind="INVESTOR_SERVICE", window_id=window.id, contract_id=world.contract.id, payer_user_id=inv.user.id, base_vnd=1_000_000,
-        fee_vnd=1_000, vat_vnd=100, total_vnd=1_100, status="ISSUED", invoice_number="INV-Y", provider="MANUAL", reference_code="FLDDDDDDDD",
-        issued_at=T0, due_at=T0 + dt.timedelta(days=7),
-    )
-    world.db.add(invoice)
-    await world.db.flush()
-    inside = await reserve(world, inv, 10 * M, now=T0 + dt.timedelta(days=6))
-    assert inside.status == "RESERVED"  # no block inside the 7 days
-    other = await make_investor(world)
-    other_invoice = FeeInvoice(
-        kind="INVESTOR_SERVICE", window_id=window.id, contract_id=world.contract.id, payer_user_id=other.user.id, base_vnd=1_000_000,
-        fee_vnd=1_000, vat_vnd=100, total_vnd=1_100, status="OVERDUE", invoice_number="INV-X", provider="MANUAL", reference_code="FLEEEEEEEE",
-        issued_at=T0, due_at=T0 + dt.timedelta(days=7),
-    )
-    world.db.add(other_invoice)
-    await world.db.flush()
-    after = T0 + dt.timedelta(days=7, seconds=1)
-    with pytest.raises(DirectTransferError) as info:
-        await reserve(world, other, 10 * M, now=after)
-    assert info.value.code == "INVESTOR_FEE_UNPAID"
-    # Nothing else is locked: the lender's existing ticket is untouched and the SME side is not blocked by it.
-    await world.db.refresh(inside)
-    assert inside.status == "RESERVED"
-    assert await fees.sme_has_unpaid_invoice(world.db, other.user.id, now=after) is False
-
-
-async def test_unpaid_investor_invoice_blocks_reservation_and_paying_lifts_it(world):
+async def test_existing_investor_invoice_is_not_listed_as_a_block_and_can_be_recorded_paid(world):
     window = await open_window(world)
     inv = await make_investor(world)
     invoice = FeeInvoice(
@@ -271,11 +239,9 @@ async def test_unpaid_investor_invoice_blocks_reservation_and_paying_lifts_it(wo
     )
     world.db.add(invoice)
     await world.db.flush()
-    with pytest.raises(DirectTransferError) as info:
-        await reserve(world, inv, 10 * M, now=T0 + dt.timedelta(days=7, hours=1))
-    assert info.value.code == "INVESTOR_FEE_UNPAID"
+    assert (await fees.blocked_parties(world.db))["investors"] == []
     await fees.mark_invoice_paid(world.db, invoice_id=invoice.id, bank_txn_id="FT-INV-1", reason="bank statement line", staff_id=world.admin.id, now=at(hours=1))
-    assert (await reserve(world, inv, 10 * M, now=at(hours=1))).status == "RESERVED"
+    assert invoice.status == "PAID"
 
 
 async def test_paying_invoice_lifts_blocks(loan):

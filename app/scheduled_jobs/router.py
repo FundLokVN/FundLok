@@ -152,7 +152,7 @@ class InvoicesResult(BaseModel):
     job: str
     overdue: int  # invoices newly marked OVERDUE
     accrued: int  # investor fee accruals created
-    invoiced: int  # investor invoices issued
+    invoiced: int  # zero while issuance is paused
 
 
 class CicDailyBalanceResult(BaseModel):
@@ -170,8 +170,7 @@ async def run_repayment_day(db: AsyncSession = Depends(get_db)):
 
 @router.post("/invoices", response_model=InvoicesResult)
 async def run_invoices(db: AsyncSession = Depends(get_db)):
-    """Daily, 00:20 ICT: mark unpaid invoices overdue, accrue investor service fees for ended months and issue the
-    investors' invoices. Idempotent."""
+    """Daily, 00:20 ICT: mark unpaid invoices overdue and accrue investor service fees for ended months."""
     return InvoicesResult(job="invoices", **await money_timers.run_invoices(db))
 
 

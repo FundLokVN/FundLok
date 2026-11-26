@@ -23,7 +23,6 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.direct_transfer import fees
 from app.direct_transfer.accounts import get_usable_account
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.errors import DirectTransferError, bad_request, conflict, not_found
@@ -194,8 +193,6 @@ async def commit_to_window(
         raise conflict("LENDER_LOCKED", "Your account is locked after a missed payment; unlock it first")
     if standing is not None and standing.status == "CLOSED":
         raise conflict("LENDER_CLOSED", "Your account was closed after repeated missed payments")
-    if await fees.investor_has_unpaid_invoice(db, investor_id, p, now=now):
-        raise conflict("INVESTOR_FEE_UNPAID", "A FundLok invoice is unpaid")
     account = await get_usable_account(db, account_id=payment_account_id, user_id=investor_id, holder_role="INVESTOR")
 
     capacity = window.target_vnd - await pledged_total(db, window.id)
