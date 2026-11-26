@@ -25,6 +25,7 @@ NOT_PERSONAL_DATA = {
     "/admin/blog/posts/{post_id}": "one blog post: marketing content written by staff, no user data",
     "/admin/blog/keyword-usage": "titles and slugs of blog posts sharing a focus keyword, no user data",
     "/admin/blog/seo-assistant": "whether the blog editor shows Suggest SEO to the signed-in admin, no user data",
+    "/admin/email/assistant": "whether the email composer shows Write with Claude to the signed-in admin, no user data",
 }
 # Admin-only GET routes mounted outside /admin.
 ADMIN_READS_OUTSIDE_ADMIN_PREFIX = {
