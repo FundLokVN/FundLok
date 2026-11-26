@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     # posts before every admin sees the button ("all_admins").
     ANTHROPIC_API_KEY: str | None = None
     BLOG_SEO_ASSISTANT_AUDIENCE: Literal["system_admin", "all_admins"] = "system_admin"
+    # Admin > Email "Write with Claude" (app/admin/internal_email/assistant.py,
+    # docs/specs/admin/email-assistant.md). Same key; its own audience switch.
+    EMAIL_ASSISTANT_AUDIENCE: Literal["system_admin", "all_admins"] = "system_admin"
 
     # SMTP Configuration
     SMTP_HOST: str = "localhost"

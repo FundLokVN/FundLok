@@ -1,17 +1,17 @@
 """The editor's "Suggest SEO" button (docs/specs/blog/seo-assistant.md).
 
-Claude is never called: the SDK runs against an httpx2 MockTransport, so these
-tests cover the real request the SDK builds and the real errors it raises.
+Claude is never called: the SDK runs against tests/assistants/stub.py, so
+these tests cover the real request the SDK builds and the real errors it
+raises.
 """
 import asyncio
-import json
 
-import anthropic
 import httpx2
 import pytest
 
-from app.blog import seo_assistant
+from app.assistants import claude as claude_api
 from app.core.config import settings
+from tests.assistants.stub import api_error, claude_stub, message  # noqa: F401 (fixture)
 from tests.blog.helpers import public_media  # noqa: F401 (autouse fixture)
 
 STATUS = "/admin/blog/seo-assistant"
@@ -41,62 +41,10 @@ def good_answer(**overrides) -> dict:
     return answer
 
 
-def message(answer, *, stop_reason="end_turn", text=None) -> dict:
-    return {
-        "id": "msg_test",
-        "type": "message",
-        "role": "assistant",
-        "model": seo_assistant.MODEL,
-        "content": [{"type": "text", "text": text if text is not None else json.dumps(answer, ensure_ascii=False)}],
-        "stop_reason": stop_reason,
-        "stop_sequence": None,
-        "usage": {"input_tokens": 1200, "output_tokens": 300},
-    }
-
-
-def api_error(status: int, error_type: str, text: str, error_code: str | None = None) -> httpx2.Response:
-    error = {"type": error_type, "message": text}
-    if error_code:
-        error["details"] = {"error_code": error_code}
-    return httpx2.Response(status, json={"type": "error", "error": error})
-
-
 @pytest.fixture
-def claude(monkeypatch):
-    """A configured assistant whose Anthropic API is a stub. Set `.reply` to
-    an httpx2.Response, a message dict, or an exception; `.requests` keeps
-    what was sent."""
-
-    class Stub:
-        reply: object = message(good_answer())
-        requests: list[dict] = []
-        headers: list[dict] = []
-
-    stub = Stub()
-    stub.requests = []
-    stub.headers = []
-
-    async def handler(request: httpx2.Request) -> httpx2.Response:
-        stub.requests.append(json.loads(request.content))
-        stub.headers.append(dict(request.headers))
-        reply = stub.reply
-        if callable(reply):
-            reply = await reply()
-        if isinstance(reply, Exception):
-            raise reply
-        if isinstance(reply, httpx2.Response):
-            return reply
-        return httpx2.Response(200, json=reply, headers={"request-id": "req_test"})
-
-    client = anthropic.AsyncAnthropic(
-        api_key="sk-ant-test",
-        max_retries=0,
-        http_client=anthropic.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler)),
-    )
-    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "sk-ant-test")
-    monkeypatch.setattr(settings, "BLOG_SEO_ASSISTANT_AUDIENCE", "system_admin")
-    monkeypatch.setattr(seo_assistant, "_client_for", lambda api_key: client)
-    return stub
+def claude(claude_stub):
+    claude_stub.reply = message(good_answer())
+    return claude_stub
 
 
 async def _suggest(client, user, **overrides):
@@ -172,7 +120,7 @@ async def test_sends_the_draft_title_language_and_text(client, claude, make_syst
         "related_terms",
     }
     assert sent["fallbacks"] == "default"
-    assert claude.headers[0]["anthropic-beta"] == seo_assistant.FALLBACK_BETA
+    assert claude.headers[0]["anthropic-beta"] == claude_api.FALLBACK_BETA
     assert "rules for financial claims" in sent["system"]
     [user_turn] = sent["messages"]
     assert "filed under Vietnamese" in user_turn["content"]
@@ -363,7 +311,7 @@ async def test_slow_or_unavailable_claude_asks_to_retry(client, claude, make_sys
 
 
 async def test_no_answer_within_the_deadline_asks_to_retry(client, claude, make_system_admin, monkeypatch):
-    monkeypatch.setattr(seo_assistant, "DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(claude_api, "DEADLINE_SECONDS", 0.05)
     admin = await make_system_admin()
 
     async def slow():
