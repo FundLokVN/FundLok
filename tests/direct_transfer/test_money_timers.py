@@ -14,7 +14,6 @@ import app.direct_transfer
 from app.core.timezone import ICT
 from app.direct_transfer import repayment
 from app.direct_transfer.models import Dispute, FeeInvoice, RepaymentDay
-from app.repayment_schedule.models import Facility
 from app.scheduled_jobs import money_timers
 
 from .helpers import at, close_now, fund_window, make_world, pay_days_through, receipt_file
@@ -65,6 +64,8 @@ async def test_repayment_day_called_twice_changes_nothing_the_second_time(loan):
 
 
 async def test_repayment_day_commits_healthy_rounds_when_another_settlement_fails(db_session, monkeypatch):
+    from app.repayment_schedule.models import Facility
+
     now = ict(2027, 6, 1)
     broken = await make_world(db_session, target=10_000_000, term=1)
     await fund_window(broken, [10_000_000])
