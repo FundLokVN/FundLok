@@ -111,6 +111,7 @@ class BlogPostSummary(BaseModel):
     updated_at: datetime
     created_at: datetime
     reading_minutes: int
+    view_count: int
 
 
 class BlogPostDetail(BlogPostSummary):
@@ -168,6 +169,7 @@ class PublicBlogPost(PublicBlogPostSummary):
 
 class PublicBlogPostListResponse(BaseModel):
     items: list[PublicBlogPostSummary]
+    next_offset: int | None = None
 
 
 class BlogMediaPresignRequest(BaseModel):

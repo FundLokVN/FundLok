@@ -267,9 +267,13 @@ async def confirm_media(
 async def list_published_posts(
     locale: Locale = Query(default="vi"),
     limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    return PublicBlogPostListResponse(items=await service.list_published(db, locale=locale, limit=limit))
+    items = await service.list_published(db, locale=locale, limit=limit, offset=offset)
+    return PublicBlogPostListResponse(
+        items=items, next_offset=offset + limit if len(items) == limit else None,
+    )
 
 
 @router.get("/posts/{locale}/{slug}", response_model=PublicBlogPost)
@@ -279,3 +283,16 @@ async def get_published_post(
     db: AsyncSession = Depends(get_db),
 ):
     return await service.get_published(db, locale=locale, slug=slug)
+
+
+@router.post("/posts/{locale}/{slug}/views", status_code=status.HTTP_204_NO_CONTENT)
+async def record_view(
+    locale: Locale,
+    request: Request,
+    slug: str = Path(max_length=80, pattern=SLUG_PATTERN),
+    db: AsyncSession = Depends(get_db),
+):
+    if request.headers.get("sec-fetch-site") != "cross-site":
+        await service.record_published_view(db, locale=locale, slug=slug)
+        await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

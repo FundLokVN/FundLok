@@ -2,6 +2,7 @@
 import uuid
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     Column,
     DateTime,
@@ -39,6 +40,7 @@ class BlogPost(Base):
     excerpt = Column(String(300), nullable=False, server_default="")
     content = Column(JSONB, nullable=False)
     reading_minutes = Column(Integer, nullable=False, server_default="1")
+    view_count = Column(BigInteger, nullable=False, server_default="0")
     cover_image_url = Column(String(500), nullable=True)
     cover_alt = Column(String(200), nullable=True)
     # What the post is written to rank for. Editor-only: they drive the SEO
