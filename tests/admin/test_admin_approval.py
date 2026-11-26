@@ -517,7 +517,7 @@ async def test_approval_is_refused_while_documents_are_missing(
     resp = await _decide(client, admin, application["id"], "APPROVED")
     assert resp.status_code == 409
     assert resp.headers["x-error-code"] == "DOCUMENTS_MISSING"
-    for missing in ("business_registration", "e_invoice_data", "tax_filings", "cic_report"):
+    for missing in ("e_invoice_data", "tax_filings", "cic_report"):
         assert missing in resp.json()["detail"]
     assert "legal_charter" not in resp.json()["detail"]
 
@@ -574,5 +574,5 @@ async def test_the_panel_lists_what_is_missing(client, make_admin, make_incomple
 
     detail = (await client.get(f"/admin/projects/{project['id']}", headers=admin["headers"])).json()
     assert detail["applications"][0]["missing_documents"] == [
-        "legal_charter", "business_registration", "e_invoice_data", "tax_filings", "cic_report",
+        "legal_charter", "e_invoice_data", "tax_filings", "cic_report",
     ]

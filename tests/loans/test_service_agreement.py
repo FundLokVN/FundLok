@@ -13,12 +13,13 @@ from app.gverify.models import STATUS_APPROVED, GVerifyKybVerification
 from app.loans.agreement import text
 from app.loans.agreement.signature import has_digital_signature
 from app.projects.service import verified_document_types
-from conftest import SIGNED_AGREEMENT_PDF, auth_headers
+from conftest import SIGNED_AGREEMENT_PDF, auth_headers, record_test_project_kyb
 
 TAX = "0319911223"
 
 
-async def _apply(client, sme, *, tax_id=TAX, amount=80_000_000, months=4) -> str:
+async def _apply(client, db_session, sme, *, tax_id=TAX, amount=80_000_000, months=4) -> str:
+    await record_test_project_kyb(db_session, sme, tax_id)
     resp = await client.post(
         "/projects",
         json={
@@ -67,8 +68,8 @@ def _pdf_text(content: bytes) -> str:
 
 async def test_the_agreement_is_filled_from_the_smes_verified_details(client, db_session, make_user):
     sme = await make_user(role="SME")
-    app_id = await _apply(client, sme)
     await _verified_with_bank(db_session, sme)
+    app_id = await _apply(client, db_session, sme)
 
     resp = await client.get(f"/loans/applications/{app_id}/service-agreement", headers=auth_headers(sme))
     assert resp.status_code == 200, resp.text
@@ -101,11 +102,11 @@ async def test_the_agreement_is_filled_from_the_smes_verified_details(client, db
     assert TAX in download.headers["content-disposition"]
 
 
-async def test_what_is_not_known_prints_as_a_blank(client, make_user):
-    # No business verification and no bank account yet: the project's own
-    # name and tax id, and dotted blanks for the rest.
+async def test_what_is_not_known_prints_as_a_blank(client, db_session, make_user):
+    # Business verification with a tax code only: the project's own name
+    # and tax id, and dotted blanks for the rest.
     sme = await make_user(role="SME")
-    app_id = await _apply(client, sme, tax_id="0319911224")
+    app_id = await _apply(client, db_session, sme, tax_id="0319911224")
     body = _pdf_text(
         (await client.get(f"/loans/applications/{app_id}/service-agreement", headers=auth_headers(sme))).content
     )
@@ -113,11 +114,11 @@ async def test_what_is_not_known_prints_as_a_blank(client, make_user):
     assert text.BLANK in body
 
 
-async def test_only_the_owning_sme_gets_the_agreement(client, make_user):
+async def test_only_the_owning_sme_gets_the_agreement(client, db_session, make_user):
     owner = await make_user(role="SME")
     other_sme = await make_user(role="SME")
     investor = await make_user(role="INVESTOR")
-    app_id = await _apply(client, owner)
+    app_id = await _apply(client, db_session, owner)
     path = f"/loans/applications/{app_id}/service-agreement"
 
     assert (await client.get(path, headers=auth_headers(other_sme))).status_code == 403

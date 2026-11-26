@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 
 from app.gverify.models import GVerifyKybVerification, GVerifyVerification
 from app.gverify.storage import StorageUnavailable
-from app.lending.models import AuditLog
+from app.lending.models import AuditLog, Project, ProjectOwnership
 
 _JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"fundlok-test-image"
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fundlok-test-image"
@@ -340,12 +340,19 @@ async def test_manual_kyb_skips_the_provider_and_waits_for_review(
 
 
 async def test_kyb_queue_lists_manual_attempts_with_review_context(
-    client, make_user, make_admin, make_project, set_mode, provider_calls, stored
+    client, db_session, make_user, make_admin, set_mode, provider_calls, stored
 ):
     await set_mode("MANUAL")
     sme = await make_user(role="SME")
-    project = await make_project(sme, legal_name="Cong Ty Thu Nghiem")
-    attempt = (await client.post("/gverify/kyb/verify", json=KYB_BODY, headers=sme["headers"])).json()
+    # Existing projects created before the KYB gate still appear in the review context.
+    project = Project(legal_name="Cong Ty Thu Nghiem", tax_id=KYB_BODY["tax_code"])
+    db_session.add(project)
+    await db_session.flush()
+    db_session.add(ProjectOwnership(project_id=project.id, user_id=uuid.UUID(sme["id"]), role="OWNER"))
+    await db_session.commit()
+    response = await client.post("/gverify/kyb/verify", json=KYB_BODY, headers=sme["headers"])
+    assert response.status_code == 201, response.text
+    attempt = response.json()
     admin = await make_admin()
 
     queue = await client.get("/admin/kyb-verifications", headers=admin["headers"])
@@ -353,7 +360,7 @@ async def test_kyb_queue_lists_manual_attempts_with_review_context(
     row = next(r for r in queue.json()["items"] if r["id"] == attempt["verification_id"])
     assert row["provider_checked"] is False
     assert row["user"]["email"] == sme["email"]
-    assert row["projects"] == [project["legal_name"]]
+    assert row["projects"] == [project.legal_name]
     assert row["document_type"] == "COMPANY"
 
     detail = await client.get(f"/admin/kyb-verifications/{attempt['verification_id']}", headers=admin["headers"])

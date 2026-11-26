@@ -271,7 +271,7 @@ async def test_locked_lender_cannot_commit(world):
     await _commit(world, fine, 10 * M)  # no standing row means GOOD
 
 
-async def test_lender_with_fee_invoice_unpaid_after_seven_days_cannot_commit(world):
+async def test_lender_with_an_existing_overdue_fee_invoice_can_commit(world):
     window = await _open(world)
     inv = await make_investor(world)
     world.db.add(
@@ -284,7 +284,7 @@ async def test_lender_with_fee_invoice_unpaid_after_seven_days_cannot_commit(wor
     await world.db.flush()
     inside = await _commit(world, inv, 10 * M, now=T0 + dt.timedelta(days=6))
     assert inside.status == "PLEDGED"  # inside the 7 days nothing is blocked
-    await _refused(_commit(world, inv, 10 * M, now=T0 + dt.timedelta(days=7, seconds=1)), "INVESTOR_FEE_UNPAID")
+    assert (await _commit(world, inv, 10 * M, now=T0 + dt.timedelta(days=7, seconds=1))).status == "PLEDGED"
 
 
 async def test_commitment_needs_no_service_agreement_but_keeps_the_other_gates(world):
