@@ -193,19 +193,16 @@ async def test_public_listing_hides_the_applicant_only_fields(client, make_user,
 
 
 async def test_marketplace_redacts_household_identifiers_and_address(client, make_user, db_session):
-    from sqlalchemy import select
-
-    from app.lending.models import Project
+    from app.lending.models import Project, ProjectOwnership
 
     sme = await make_user(role="SME")
-    payload = _payload()
-    payload["tax_id"] = "079123456789"
-    payload["address"] = {"street": "12 Test Street", "city": "Ho Chi Minh City", "country": "Vietnam"}
-    created = await client.post("/projects", json=payload, headers=auth_headers(sme))
-    assert created.status_code == 201, created.text
-    project_id = created.json()["id"]
-    project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
-    project.status = "ACTIVE"
+    tax_id = "079123456789"
+    address = {"street": "12 Test Street", "city": "Ho Chi Minh City", "country": "Vietnam"}
+    project = Project(legal_name="Test Household", tax_id=tax_id, address=address, status="ACTIVE")
+    db_session.add(project)
+    await db_session.flush()
+    project_id = str(project.id)
+    db_session.add(ProjectOwnership(project_id=project.id, user_id=uuid.UUID(sme["id"]), role="OWNER"))
     await db_session.commit()
 
     investor = await make_user(role="INVESTOR")
@@ -216,8 +213,8 @@ async def test_marketplace_redacts_household_identifiers_and_address(client, mak
     assert listing["address"] is None
 
     own = await client.get("/projects", headers=auth_headers(sme))
-    assert own.json()[0]["tax_id"] == payload["tax_id"]
-    assert own.json()[0]["address"]["street"] == payload["address"]["street"]
+    assert own.json()[0]["tax_id"] == tax_id
+    assert own.json()[0]["address"]["street"] == address["street"]
 
 
 async def test_public_listing_without_an_application_returns_null(
