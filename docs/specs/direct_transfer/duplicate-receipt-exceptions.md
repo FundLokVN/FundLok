@@ -147,6 +147,6 @@ Test file: `tests/direct_transfer/test_exceptions.py` (extended), `tests/direct_
 
 ## 9. Open Questions
 
-1. **Investor consequence.** Should a duplicate from a *different* investor (someone else's receipt) also flag the investor's account for staff, beyond the queue item? Proposal: no automatic flag; staff use the existing SUSPENDED / CLOSED statuses (SCRUM-620) if they conclude it is fraud. Needs Loc.
+1. ~~**Investor consequence.**~~ **Answered (Loc, 26 Nov 2026): no automatic flag.** Staff review the queue item and use SUSPENDED or CLOSED (SCRUM-620) if it is fraud.
 2. **Repayment receipts.** Surface duplicates there too? Proposal: separate ticket.
 3. **Queue route.** Phat to confirm he will add `GET` for the queue and `POST` for the review action, or ask me to add them in `app/admin/`.
