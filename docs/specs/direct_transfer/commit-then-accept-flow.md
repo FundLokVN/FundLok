@@ -399,7 +399,7 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 | 7 | Is Day 0 the day the window opens, or the day staff publish it? | Loc | The ICT date `window_start` falls on |
 | 8 | When is the `LEGACY` flow removed? | Edward | After dev data is cleared; the `flow` column and legacy branches are then dropped (technical debt) |
 | 9 | Phat: does the SME's decision screen fit before `commit_closes_at` (read-only) or only after? | Phat | Only after the commit phase |
-| 10 | Unlock sentence matching: tolerant (case, accents, spacing ignored, as today) or strictly exact? | Loc | Tolerant, as built; one function to change |
+| 10 | Unlock sentence matching: tolerant (case, accents, spacing ignored, as today) or strictly exact? | Loc | **Answered 2026-11-27 (Loc): tolerant.** Case, accents and spacing are ignored; the build already does this |
 
 ---
 
