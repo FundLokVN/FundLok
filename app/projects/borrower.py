@@ -16,8 +16,8 @@ The database holds the two rules a column can (migrations 6664b74ae183 and d5c1e
 This module holds the rest (Phat, 2026-11-14), which depend on other tables:
 
   * a project needs a valid tax code, kept in one form so the database can compare it;
-  * once the SME's business is verified (KYB), a project must be that business, when it is created and again when
-    its listing opens (it may have been created before the verification);
+  * a new project requires approved KYB for that business; at listing, older projects are checked against any
+    approved KYB to catch a mismatch;
   * an SME cannot start a new project while another of its projects is still in progress: not yet decided,
     approved and not yet ended, listed, or repaying. It can once that one is rejected, closed, its round failed or
     was cancelled, or its loan is repaid in full.
@@ -41,6 +41,7 @@ ENDED_PROJECT_STATUSES = ("CLOSED", "ARCHIVED")
 
 # Why a request was refused (X-Error-Code).
 INVALID_TAX_CODE = "INVALID_TAX_CODE"
+BUSINESS_VERIFICATION_REQUIRED = "BUSINESS_VERIFICATION_REQUIRED"
 TAX_CODE_NOT_VERIFIED_BUSINESS = "TAX_CODE_NOT_VERIFIED_BUSINESS"
 DUPLICATE_TAX_CODE = "DUPLICATE_TAX_CODE"  # raised by the database (uq_projects_one_open_per_business / _tax_id)
 SME_HAS_OPEN_PROJECT = "SME_HAS_OPEN_PROJECT"
@@ -165,7 +166,11 @@ async def check_new_project(db: AsyncSession, *, user_id: UUID, tax_id: str | No
             "Enter the business's tax code: 10 digits, a branch's 10-3 digits, or a 12-digit personal number",
         ) from None
     verified = await verified_tax_base(db, user_id)
-    if verified is not None and verified != tax_base(code):
+    if verified is None:
+        raise BorrowerRefused(
+            409, BUSINESS_VERIFICATION_REQUIRED, "Verify your business before creating a project",
+        )
+    if verified != tax_base(code):
         raise BorrowerRefused(
             409, TAX_CODE_NOT_VERIFIED_BUSINESS,
             "This tax code is not the business you verified. A project can only be for your verified business",

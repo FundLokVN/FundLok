@@ -2,7 +2,7 @@
 import datetime as dt
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.core.timezone import ICT
 from app.direct_transfer import cic, disputes, fees, repayment
@@ -201,6 +201,57 @@ async def test_settle_days_posts_principal_ledger_legs_once(loan):
     assert await repayment.settle_days(world.db, now=ict(2026, 11, 6)) == 0
     facility = await world.db.get(Facility, window.facility_id)
     assert int(facility.collected_to_date_vnd) == 1_253_968  # instalment gross only; the stub sits outside T0
+
+
+async def test_concurrent_confirmations_keep_both_instalment_amounts(loan):
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    world, window, tranches = loan
+    first = (await day_rows(world.db, tranche_id=tranches[0].id, kind="INSTALMENT", day_index=1))[0]
+    second = (await day_rows(world.db, tranche_id=tranches[1].id, kind="INSTALMENT", day_index=1))[0]
+    facility_id, staff_id = window.facility_id, world.admin.id
+    first_id, second_id = first.id, second.id
+    expected = first.gross_vnd + second.gross_vnd
+    await world.db.commit()
+    Session = async_sessionmaker(world.db.bind, autoflush=False, expire_on_commit=False)
+
+    async with Session() as a, Session() as b:
+        stale_facility = await b.get(Facility, facility_id)
+        assert stale_facility.collected_to_date_vnd == 0
+        await repayment.match_day(
+            a, day_id=first_id, staff_id=staff_id, reason="confirmed", now=ict(2026, 11, 5),
+        )
+        backend_pid = (await b.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+        concurrent = asyncio.create_task(repayment.match_day(
+            b, day_id=second_id, staff_id=staff_id, reason="confirmed", now=ict(2026, 11, 5),
+        ))
+        async def wait_for_row_lock():
+            try:
+                while not concurrent.done():
+                    waiting = (await world.db.execute(
+                        text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"), {"pid": backend_pid},
+                    )).scalar_one()
+                    if waiting:
+                        return
+                    await asyncio.sleep(0.01)
+                await concurrent
+                pytest.fail("Second settlement did not wait for the first transaction")
+            finally:
+                await world.db.rollback()
+
+        try:
+            await asyncio.wait_for(wait_for_row_lock(), timeout=10)
+            await a.commit()
+            await asyncio.wait_for(concurrent, timeout=10)
+        finally:
+            if not concurrent.done():
+                concurrent.cancel()
+                await asyncio.gather(concurrent, return_exceptions=True)
+        await b.commit()
+        await b.refresh(stale_facility)
+        assert stale_facility.collected_to_date_vnd == expected
 
 
 async def test_reported_missed_day_blocks_settlement_until_matched(loan):

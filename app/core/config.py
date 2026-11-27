@@ -167,6 +167,18 @@ class Settings(BaseSettings):
     R2_PUBLIC_BUCKET: str | None = None
     R2_PUBLIC_BASE_URL: str | None = None
 
+    # Blog editor "Suggest SEO" (app/blog/seo_assistant.py,
+    # docs/specs/blog/seo-assistant.md). The key belongs to a dedicated Claude
+    # Console workspace with a monthly spend limit; on Cloud Run it comes from
+    # Secret Manager. While it is unset the editor hides the button. The
+    # audience starts at SYSTEM_ADMIN so suggestions can be reviewed on real
+    # posts before every admin sees the button ("all_admins").
+    ANTHROPIC_API_KEY: str | None = None
+    BLOG_SEO_ASSISTANT_AUDIENCE: Literal["system_admin", "all_admins"] = "system_admin"
+    # Admin > Email "Write with Claude" (app/admin/internal_email/assistant.py,
+    # docs/specs/admin/email-assistant.md). Same key; its own audience switch.
+    EMAIL_ASSISTANT_AUDIENCE: Literal["system_admin", "all_admins"] = "system_admin"
+
     # SMTP Configuration
     SMTP_HOST: str = "localhost"
     SMTP_PORT: int = 1025

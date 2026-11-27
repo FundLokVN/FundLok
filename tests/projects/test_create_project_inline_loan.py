@@ -40,11 +40,11 @@ def _payload(**overrides):
 
 
 async def test_create_project_with_inline_loan_application_returns_201(
-    client, make_user
+    post_verified_project, client, make_user
 ):
     sme = await make_user(role="SME")
 
-    resp = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    resp = await post_verified_project(sme, _payload())
 
     assert resp.status_code == 201, resp.text
     body = resp.json()
@@ -54,24 +54,24 @@ async def test_create_project_with_inline_loan_application_returns_201(
 
 
 async def test_inline_loan_application_documents_serialize_as_empty_list(
-    client, make_user
+    post_verified_project, client, make_user
 ):
     """The `documents` relationship must be loaded, not lazily touched. A new
     application has no documents, so an empty list is the correct answer — the
     bug was that reading it at all raised."""
     sme = await make_user(role="SME")
 
-    resp = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    resp = await post_verified_project(sme, _payload())
 
     assert resp.status_code == 201, resp.text
     assert resp.json()["loan_application"]["documents"] == []
 
 
-async def test_created_inline_application_is_visible_on_list(client, make_user):
+async def test_created_inline_application_is_visible_on_list(post_verified_project, client, make_user):
     """The create response and the list endpoint must agree — the list path
     already eager-loaded documents, the create path did not."""
     sme = await make_user(role="SME")
-    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    created = await post_verified_project(sme, _payload())
     assert created.status_code == 201, created.text
     created_app = created.json()["loan_application"]
 
@@ -87,20 +87,20 @@ async def test_created_inline_application_is_visible_on_list(client, make_user):
 
 
 async def test_create_project_without_loan_application_still_works(
-    client, make_user
+    post_verified_project, client, make_user
 ):
     """The inline block is optional; omitting it must not start returning one."""
     sme = await make_user(role="SME")
     payload = _payload()
     payload.pop("loan_application")
 
-    resp = await client.post("/projects", json=payload, headers=auth_headers(sme))
+    resp = await post_verified_project(sme, payload)
 
     assert resp.status_code == 201, resp.text
     assert resp.json()["loan_application"] is None
 
 
-async def test_public_listing_carries_the_loan_terms(client, make_user, db_session):
+async def test_public_listing_carries_the_loan_terms(post_verified_project, client, make_user, db_session):
     """FE-008: the marketplace card shows the asking amount, so the public
     listing has to carry the application — otherwise an investor must open every
     project to find out what the deal is."""
@@ -109,7 +109,7 @@ async def test_public_listing_carries_the_loan_terms(client, make_user, db_sessi
     from app.lending.models import Project
 
     sme = await make_user(role="SME")
-    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    created = await post_verified_project(sme, _payload())
     assert created.status_code == 201, created.text
     project_id = created.json()["id"]
 
@@ -135,7 +135,7 @@ async def test_public_listing_carries_the_loan_terms(client, make_user, db_sessi
     assert match["loan_application"]["requested_amount"] == 80000000
 
 
-async def test_public_listing_hides_the_applicant_only_fields(client, make_user, db_session):
+async def test_public_listing_hides_the_applicant_only_fields(post_verified_project, client, make_user, db_session):
     """vbsec 2026-10-16: the listing reused the applicant's own schema, so every
     investor read each SME's operator decision_note and its document metadata
     (storage key, original filename)."""
@@ -144,7 +144,7 @@ async def test_public_listing_hides_the_applicant_only_fields(client, make_user,
     from app.lending.models import LoanApplication, Project
 
     sme = await make_user(role="SME")
-    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    created = await post_verified_project(sme, _payload())
     assert created.status_code == 201, created.text
     project_id = created.json()["id"]
     project = (
@@ -185,14 +185,40 @@ async def test_public_listing_hides_the_applicant_only_fields(client, make_user,
         "guarantor_name",
     }
     assert "prior default" not in listed.text
+    assert match["tax_id"] == created.json()["tax_id"]
 
     # The applicant still sees their own note.
     own = await client.get("/projects", headers=auth_headers(sme))
     assert own.json()[0]["loan_application"]["decision_note"] == application.decision_note
 
 
+async def test_marketplace_redacts_household_identifiers_and_address(client, make_user, db_session):
+    from app.lending.models import Project, ProjectOwnership
+
+    sme = await make_user(role="SME")
+    tax_id = "079123456789"
+    address = {"street": "12 Test Street", "city": "Ho Chi Minh City", "country": "Vietnam"}
+    project = Project(legal_name="Test Household", tax_id=tax_id, address=address, status="ACTIVE")
+    db_session.add(project)
+    await db_session.flush()
+    project_id = str(project.id)
+    db_session.add(ProjectOwnership(project_id=project.id, user_id=uuid.UUID(sme["id"]), role="OWNER"))
+    await db_session.commit()
+
+    investor = await make_user(role="INVESTOR")
+    listed = await client.get("/projects/public", headers=auth_headers(investor))
+    assert listed.status_code == 200, listed.text
+    listing = next(row for row in listed.json() if row["id"] == project_id)
+    assert listing["tax_id"] is None
+    assert listing["address"] is None
+
+    own = await client.get("/projects", headers=auth_headers(sme))
+    assert own.json()[0]["tax_id"] == tax_id
+    assert own.json()[0]["address"]["street"] == address["street"]
+
+
 async def test_public_listing_without_an_application_returns_null(
-    client, make_user, db_session
+    post_verified_project, client, make_user, db_session
 ):
     from sqlalchemy import select
 
@@ -201,7 +227,7 @@ async def test_public_listing_without_an_application_returns_null(
     sme = await make_user(role="SME")
     payload = _payload()
     payload.pop("loan_application")
-    created = await client.post("/projects", json=payload, headers=auth_headers(sme))
+    created = await post_verified_project(sme, payload)
     project_id = created.json()["id"]
 
     row = (
@@ -216,7 +242,7 @@ async def test_public_listing_without_an_application_returns_null(
     assert match["loan_application"] is None
 
 
-async def test_public_listing_names_the_reviewed_document_types_only(client, make_user, db_session):
+async def test_public_listing_names_the_reviewed_document_types_only(post_verified_project, client, make_user, db_session):
     """The investor's due-diligence tab lists what the FundLok team reviewed.
     It gets the document TYPES of an approved request: never a file, a
     filename or a storage key."""
@@ -226,7 +252,7 @@ async def test_public_listing_names_the_reviewed_document_types_only(client, mak
     from app.lending.models import LoanApplication, LoanApplicationDocument, Project
 
     sme = await make_user(role="SME")
-    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    created = await post_verified_project(sme, _payload())
     assert created.status_code == 201, created.text
     project_id = created.json()["id"]
     project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
@@ -267,7 +293,7 @@ async def test_public_listing_names_the_reviewed_document_types_only(client, mak
     assert await listed_documents() == [*REQUIRED_DOCUMENT_TYPES, "financial_report"]
 
 
-async def test_public_listing_carries_the_locked_score_runs_business_score(client, make_user, db_session):
+async def test_public_listing_carries_the_locked_score_runs_business_score(post_verified_project, client, make_user, db_session):
     """The card and the project page show the score the request was approved
     on, not a sample: the LOCKED run's, 2dp, as in the SME's approval summary.
     An unlocked (READY) run is not shown."""
@@ -276,7 +302,7 @@ async def test_public_listing_carries_the_locked_score_runs_business_score(clien
     from app.lending.models import LoanApplication, Project, ScoreRun
 
     sme = await make_user(role="SME")
-    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    created = await post_verified_project(sme, _payload())
     assert created.status_code == 201, created.text
     project_id = created.json()["id"]
     project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
@@ -303,7 +329,7 @@ async def test_public_listing_carries_the_locked_score_runs_business_score(clien
     assert await listed_score() == 79.25
 
 
-async def test_public_listing_carries_the_rounds_real_funding_figures(client, make_user, db_session):
+async def test_public_listing_carries_the_rounds_real_funding_figures(post_verified_project, client, make_user, db_session):
     """The card's funding block reads the listing: target, funded, minimum
     ticket and how many investors have a FILLED order. A DRAFT listing is not
     open, so a request with only that shows no round."""
@@ -312,7 +338,7 @@ async def test_public_listing_carries_the_rounds_real_funding_figures(client, ma
     from app.lending.models import Contract, LoanApplication, Listing, Order, Project, ScoreRun
 
     sme = await make_user(role="SME")
-    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    created = await post_verified_project(sme, _payload())
     assert created.status_code == 201, created.text
     project_id = created.json()["id"]
     project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
@@ -358,7 +384,7 @@ async def test_public_listing_carries_the_rounds_real_funding_figures(client, ma
     }
 
 
-async def test_public_listing_carries_the_bank_rate_in_force(client, make_user, db_session):
+async def test_public_listing_carries_the_bank_rate_in_force(post_verified_project, client, make_user, db_session):
     """The card's ROI is FundLok's bank rate in force (bank_rate_config), the
     same on every listing: the seeded 12.0% here."""
     from sqlalchemy import select
@@ -366,7 +392,7 @@ async def test_public_listing_carries_the_bank_rate_in_force(client, make_user, 
     from app.lending.models import Project
 
     sme = await make_user(role="SME")
-    created = await client.post("/projects", json=_payload(), headers=auth_headers(sme))
+    created = await post_verified_project(sme, _payload())
     project_id = created.json()["id"]
     project = (await db_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
     project.status = "ACTIVE"

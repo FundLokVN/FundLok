@@ -149,7 +149,6 @@ async def _manually_approved_case(client, db_session, manual_kyb, attach_require
 
     case = await manual_kyb()
     sme = case.sme
-    app_id = await _apply(client, sme, tax_id=TAX)
     extra = (
         {
             "legal_representative_name": REP_NAME,
@@ -161,6 +160,7 @@ async def _manually_approved_case(client, db_session, manual_kyb, attach_require
     )
     resolved = await _resolve(client, case, **extra)
     assert resolved.status_code == 200, resolved.text
+    app_id = await _apply(client, db_session, sme, tax_id=TAX)
     db_session.add(
         PaymentAccount(
             user_id=UUID(sme["id"]),

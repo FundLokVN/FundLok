@@ -9,7 +9,7 @@ missing is invented.
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.gverify.models import STATUS_APPROVED, GVerifyKybVerification
 from app.lending.models import LoanApplicationFinancials
@@ -34,7 +34,7 @@ def storage(monkeypatch):
     monkeypatch.setattr("app.uploads.service.delete_object", lambda key: None)
 
 
-async def _apply(client, sme, *, employee_count=25, duration_months=3):
+async def _apply(client, db_session, sme, *, employee_count=25, duration_months=3):
     """The project-application form, as the frontend sends it."""
     loan = {"requested_amount": 80_000_000, "purpose": "Working capital"}
     if duration_months is not None:
@@ -48,6 +48,7 @@ async def _apply(client, sme, *, employee_count=25, duration_months=3):
     }
     if employee_count is not None:
         body["employee_count"] = employee_count
+    await _verified(db_session, sme)
     resp = await client.post("/projects", json=body, headers=auth_headers(sme))
     assert resp.status_code == 201, resp.text
     return resp.json()["loan_application"]["id"]
@@ -76,8 +77,7 @@ async def _verified(db_session, sme, tax_code=TAX):
 
 
 async def _complete(client, db_session, sme, **form):
-    app_id = await _apply(client, sme, **form)
-    await _verified(db_session, sme)
+    app_id = await _apply(client, db_session, sme, **form)
     resp = await client.put(
         f"/loans/applications/{app_id}/figures",
         json=figures(fixed_cost_y1=600_000_000, variable_cost_excl_cogs_y1=0),
@@ -150,7 +150,10 @@ async def test_an_operator_entered_row_is_not_overwritten(client, db_session, ma
 
 async def test_missing_verification_is_left_missing_and_named(client, db_session, make_user, make_admin, storage):
     sme, admin = await make_user(role="SME"), await make_admin()
-    app_id = await _apply(client, sme)  # no business verification
+    app_id = await _apply(client, db_session, sme)
+    # An older project predates the KYB requirement.
+    await db_session.execute(delete(GVerifyKybVerification).where(GVerifyKybVerification.user_id == UUID(sme["id"])))
+    await db_session.commit()
     await _upload(client, sme, app_id, "tax_filings", "filings.zip", "application/zip")
     await _upload(client, sme, app_id, "cic_report", "cic.pdf", "application/pdf")
     await client.put(f"/loans/applications/{app_id}/figures", json=figures(), headers=auth_headers(sme))
@@ -174,7 +177,7 @@ async def test_missing_verification_is_left_missing_and_named(client, db_session
 
 async def test_without_headcount_or_term_no_row_is_written(client, db_session, make_user, make_admin, storage):
     sme, admin = await make_user(role="SME"), await make_admin()
-    app_id = await _apply(client, sme, employee_count=None, duration_months=None)
+    app_id = await _apply(client, db_session, sme, employee_count=None, duration_months=None)
     assert (await client.post(f"/loans/applications/{app_id}/submit", headers=auth_headers(sme))).status_code == 200
 
     run = await _score(client, admin, app_id)

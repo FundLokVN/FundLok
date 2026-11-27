@@ -2,16 +2,19 @@ import type { ReactNode } from "react";
 import {
   Body,
   Button,
+  Column,
   Container,
   Head,
+  Heading,
   Html,
   Img,
+  Row,
   Section,
   Text,
 } from "@react-email/components";
 
-import { v } from "./jinja";
-import { FONT, GREEN, MUTED, BODY_TEXT } from "./styles";
+import { If, v } from "./jinja";
+import { BODY_TEXT, FONT, SUBTLE } from "./styles";
 
 export const SYSTEM_FOOTER =
   "FundLok · This is an automated message, please do not reply.";
@@ -20,7 +23,7 @@ export const SYSTEM_FOOTER =
 export const INTERNAL_FOOTER = "FundLok · Sent by the FundLok team.";
 
 /**
- * The branded shell every email shares: dark logo band, white card, footer.
+ * The branded shell every email shares, with a headline banner for composed mail.
  *
  * Dark band, not white: the brand mark is only ever placed on black or very
  * dark teal (Handbook v3 §7.3), and the mark itself is the light-on-dark
@@ -34,11 +37,13 @@ export const INTERNAL_FOOTER = "FundLok · Sent by the FundLok team.";
  */
 export function Layout({
   children,
+  heading,
   footer = SYSTEM_FOOTER,
   lang = "en",
   preview = false,
 }: {
   children: ReactNode;
+  heading?: string;
   footer?: string;
   lang?: string;
   preview?: boolean;
@@ -48,19 +53,32 @@ export function Layout({
       <Head />
       <Body style={body}>
         <Container style={container}>
-          <Section style={header}>
-            <Img
-              src={preview ? "/static/email-logo.png" : v("logo_src")}
-              alt="FundLok"
-              width="180"
-              height="64"
-              style={logo}
-            />
-          </Section>
-          <Section style={card}>{children}</Section>
-          <Section style={footerSection}>
-            <Text style={footerText}>{footer}</Text>
-          </Section>
+          <Row>
+            <Column style={header}>
+              <Img
+                src={preview ? "/static/email-logo.png" : v("logo_src")}
+                alt="FundLok"
+                width="144"
+                height="51"
+                style={logo}
+              />
+            </Column>
+          </Row>
+          <If test="heading" value={heading}>
+            <Row>
+              <Column style={banner}>
+                <Heading as="h1" style={bannerHeading}>{heading}</Heading>
+              </Column>
+            </Row>
+          </If>
+          <Row>
+            <Column style={card}>{children}</Column>
+          </Row>
+          <Row>
+            <Column style={footerSection}>
+              <Text style={footerText}>{footer}</Text>
+            </Column>
+          </Row>
         </Container>
       </Body>
     </Html>
@@ -68,7 +86,7 @@ export function Layout({
 }
 
 /**
- * A centred call-to-action button. The colour is set on the anchor itself
+ * The colour is set on the anchor itself
  * because some clients (Outlook, a few webmail readers) otherwise repaint the
  * link blue, which is unreadable on the green fill.
  */
@@ -85,7 +103,7 @@ export function CtaButton({ href, label }: { href: string; label: string }) {
 const body = {
   margin: 0,
   padding: "24px 12px",
-  backgroundColor: "#f4f7f6",
+  backgroundColor: "#f1f5f3",
   WebkitFontSmoothing: "antialiased" as const,
 };
 
@@ -93,24 +111,39 @@ const container = { maxWidth: "600px", width: "100%" };
 
 const header = {
   backgroundColor: "#0a1512",
-  padding: "28px 20px",
-  borderRadius: "12px 12px 0 0",
-  textAlign: "center" as const,
+  padding: "12px 24px",
+  borderBottom: "3px solid #8bdc43",
 };
 
 const logo = {
   display: "block",
-  margin: "0 auto",
-  width: "180px",
+  color: "#ffffff",
+  fontFamily: FONT,
   height: "auto",
   border: 0,
   outline: "none",
   textDecoration: "none",
 };
 
+const banner = {
+  backgroundColor: "#e8f4ee",
+  padding: "32px 24px",
+  borderBottom: "1px solid #d6e7df",
+};
+
+const bannerHeading = {
+  margin: 0,
+  color: "#103e30",
+  fontFamily: FONT,
+  fontSize: "30px",
+  fontWeight: 700,
+  lineHeight: "1.2",
+  overflowWrap: "anywhere" as const,
+};
+
 const card = {
   backgroundColor: "#ffffff",
-  padding: "36px 40px",
+  padding: "26px 24px 28px",
   fontFamily: FONT,
   color: BODY_TEXT,
   fontSize: "16px",
@@ -118,31 +151,28 @@ const card = {
 };
 
 const footerSection = {
-  backgroundColor: "#ffffff",
-  borderRadius: "0 0 12px 12px",
-  padding: "0 40px 28px",
+  backgroundColor: "#f7faf8",
+  borderTop: "1px solid #dce7e1",
+  padding: "16px 24px",
 };
 
 const footerText = {
   fontFamily: FONT,
-  borderTop: "1px solid #e5e7eb",
-  paddingTop: "18px",
   margin: 0,
-  color: MUTED,
+  color: SUBTLE,
   fontSize: "13px",
   lineHeight: "1.6",
-  textAlign: "center" as const,
 };
 
-const buttonRow = { margin: "32px 0", textAlign: "center" as const };
+const buttonRow = { margin: "24px 0 12px", textAlign: "left" as const };
 
 const button = {
   display: "inline-block",
   padding: "14px 28px",
-  backgroundColor: GREEN,
+  backgroundColor: "#14633e",
   color: "#ffffff",
   textDecoration: "none",
-  borderRadius: "8px",
+  borderRadius: "4px",
   fontWeight: 600,
   fontSize: "16px",
   fontFamily: FONT,

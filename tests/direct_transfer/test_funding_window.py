@@ -245,7 +245,7 @@ async def test_reserve_idempotency_key_replay_returns_same_tranche(world):
     await expect_error(reserve(world, inv, 20 * M, key="res-1"), "IDEMPOTENCY_CONFLICT", 409)
 
 
-async def test_reserve_blocked_when_investor_fee_unpaid(world):
+async def test_reserve_allowed_when_an_existing_investor_fee_is_unpaid(world):
     window = await open_window(world)
     inv = await make_investor(world)
     world.db.add(
@@ -256,7 +256,7 @@ async def test_reserve_blocked_when_investor_fee_unpaid(world):
         )
     )
     await world.db.flush()
-    await expect_error(reserve(world, inv, 10 * M, now=T0 + dt.timedelta(days=7, hours=1)), "INVESTOR_FEE_UNPAID", 409)
+    assert (await reserve(world, inv, 10 * M, now=T0 + dt.timedelta(days=7, hours=1))).status == "RESERVED"
 
 
 async def test_reserve_requires_risk_ack(world):
