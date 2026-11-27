@@ -324,6 +324,10 @@ def _mock_external_io(monkeypatch):
         raise AssertionError("a test tried to contact Google")
 
     monkeypatch.setattr("app.admin.internal_email.google._client", _no_google)
+    # Admin > Blog search figures read Search Console with the service's own
+    # Google credentials; the search-console tests replace both seams.
+    monkeypatch.setattr("app.blog.search_console._client", _no_google)
+    monkeypatch.setattr("app.blog.search_console._access_token", _no_google)
 
     # GVerify verification-document retention writes to R2 — never in tests.
     async def _no_store(*a, **kw):

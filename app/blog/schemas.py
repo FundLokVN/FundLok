@@ -1,5 +1,5 @@
 """Request/response models for the blog. See docs/specs/blog/blog-posts.md §4."""
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -97,6 +97,23 @@ class BlogVersionBody(BaseModel):
     version: int = Field(ge=1)
 
 
+class BlogSearchStats(BaseModel):
+    """A post's Google Search figures over the list's window (search-console-stats.md)."""
+
+    clicks: int
+    impressions: int
+    # Average position, weighted by impressions; None with no impressions.
+    position: float | None
+
+
+class BlogSearchConsoleStatus(BaseModel):
+    configured: bool
+    last_synced_at: datetime | None
+    # The newest day stored; the window is the `window_days` ending on it.
+    data_through: date | None
+    window_days: int
+
+
 class BlogPostSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -112,6 +129,8 @@ class BlogPostSummary(BaseModel):
     created_at: datetime
     reading_minutes: int
     view_count: int
+    # Admin list only; None when Google has not reported the post.
+    search: BlogSearchStats | None = None
 
 
 class BlogPostDetail(BlogPostSummary):
@@ -146,6 +165,7 @@ class BlogPostListResponse(BaseModel):
     page: int
     page_size: int
     items: list[BlogPostSummary]
+    search_console: BlogSearchConsoleStatus | None = None
 
 
 class PublicBlogPostSummary(BaseModel):
