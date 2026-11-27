@@ -1,8 +1,8 @@
-import { Heading, Section, Text } from "@react-email/components";
+import { Section, Text } from "@react-email/components";
 
 import { CtaButton, INTERNAL_FOOTER, Layout } from "./Layout";
 import { If, Lines, v } from "./jinja";
-import { FONT, GREEN, h1, paragraph } from "./styles";
+import { FONT, GREEN, paragraph } from "./styles";
 
 export type InternalMessageProps = {
   heading?: string;
@@ -10,7 +10,7 @@ export type InternalMessageProps = {
   buttonLabel?: string;
   buttonUrl?: string;
   preview?: boolean;
-  includeSignature?: boolean;
+  includeSignature?: boolean | string;
   signatureName?: string;
   signatureTitle?: string;
   signaturePhone?: string;
@@ -38,33 +38,28 @@ export function InternalMessage({
   signatureTitle = v("signature_title"),
   signaturePhone = v("signature_phone"),
 }: InternalMessageProps & {
-  variant: "general" | "announcement" | "action_required";
+  variant: "general" | "announcement" | "action_required" | "official";
 }) {
   return (
-    <Layout preview={preview} footer={INTERNAL_FOOTER}>
+    <Layout heading={heading} preview={preview} footer={INTERNAL_FOOTER}>
       {variant === "announcement" && <Text style={eyebrow}>Announcement</Text>}
       {variant === "action_required" && (
         <Section style={callout}>
           <Text style={calloutText}>Action required</Text>
         </Section>
       )}
-      <If test="heading" value={heading}>
-        <Heading as="h1" style={h1}>
-          {heading}
-        </Heading>
-      </If>
-      <Text style={paragraph}>
+      <div style={messageBody}>
         <Lines text={body} />
-      </Text>
+      </div>
       <If test="button_url" value={buttonUrl}>
         <CtaButton href={buttonUrl} label={buttonLabel} />
       </If>
 
       <If test="include_signature" value={includeSignature}>
         <br />
-        <Text style={signatureName}>{signatureName}</Text>
+        <Text style={signatureNameStyle}>{signatureName}</Text>
         <If test="signature_title" value={signatureTitle}>
-          <Text style={signatureTitle}>{signatureTitle}</Text>
+          <Text style={signatureTitleStyle}>{signatureTitle}</Text>
         </If>
         <If test="signature_phone" value={signaturePhone}>
           <Text style={signatureLine}>
@@ -87,6 +82,8 @@ export const internalPreview = {
   signatureTitle: "Founder & CEO @ FundLok",
   signaturePhone: "+84 943.791.382",
 } satisfies InternalMessageProps;
+
+const messageBody = { ...paragraph, marginTop: 0, marginBottom: 0, overflowWrap: "anywhere" as const };
 
 const eyebrow = {
   fontFamily: FONT,
@@ -114,14 +111,14 @@ const calloutText = {
   fontWeight: 700,
 };
 
-const signatureName = {
+const signatureNameStyle = {
   fontFamily: FONT,
   margin: "0 0 4px",
   fontSize: "18px",
   fontWeight: 700,
 };
 
-const signatureTitle = {
+const signatureTitleStyle = {
   fontFamily: FONT,
   margin: "0 0 12px",
   fontSize: "16px",
