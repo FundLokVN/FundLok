@@ -143,8 +143,12 @@ Admin GETs return no personal data (marketing content), so they are listed in
 
 | Method + path | Response |
 |---|---|
-| `GET /api/v1/blog/posts?locale=vi&limit=50` | `{ items: PublicBlogPostSummary[] }`, published only, newest first |
+| `GET /api/v1/blog/posts?locale=vi&limit=50&offset=0` | `{ items: PublicBlogPostSummary[], next_offset: int or null }`, published only, newest first |
 | `GET /api/v1/blog/posts/{locale}/{slug}` | `PublicBlogPost`, or 404 if missing or not published |
+| `POST /api/v1/blog/posts/{locale}/{slug}/views` | 204. A visible public post reports one view per page visit. Cross-site browser requests are ignored. |
+
+Admin post responses include `view_count`. The aggregate starts at zero and requires no cookies or visitor identifiers. Drafts cannot accrue views. The counter preserves editorial versions and update timestamps. The sitemap follows `next_offset` through all published pages.
+
 
 ### Error Responses
 

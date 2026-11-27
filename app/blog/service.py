@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.blog.models import BlogMedia, BlogPost
@@ -348,12 +348,13 @@ async def find_focus_keyword_usage(
 # --------------------------------------------------------------------------- #
 
 
-async def list_published(db: AsyncSession, *, locale: str, limit: int) -> list[BlogPost]:
+async def list_published(db: AsyncSession, *, locale: str, limit: int, offset: int = 0) -> list[BlogPost]:
     rows = await db.execute(
         select(BlogPost)
         .where(BlogPost.status == "published", BlogPost.locale == locale)
         .order_by(BlogPost.published_at.desc(), BlogPost.id)
         .limit(limit)
+        .offset(offset)
     )
     return list(rows.scalars())
 
@@ -371,3 +372,12 @@ async def get_published(db: AsyncSession, *, locale: str, slug: str) -> BlogPost
     if post is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Blog post not found")
     return post
+
+
+async def record_published_view(db: AsyncSession, *, locale: str, slug: str) -> None:
+    # Update in SQL to preserve concurrent views without changing the post's edit version or SEO timestamp.
+    await db.execute(
+        update(BlogPost)
+        .where(BlogPost.status == "published", BlogPost.locale == locale, BlogPost.slug == slug)
+        .values(view_count=BlogPost.view_count + 1)
+    )

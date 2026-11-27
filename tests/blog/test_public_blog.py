@@ -63,3 +63,28 @@ async def test_public_list_is_newest_first_and_limited(client, make_admin):
     items = (await client.get(PUBLIC)).json()["items"]
     assert [p["slug"] for p in items] == [second["slug"], first["slug"]]
     assert len((await client.get(PUBLIC, params={"limit": 1})).json()["items"]) == 1
+    older = await client.get(PUBLIC, params={"limit": 1, "offset": 1})
+    assert [post["slug"] for post in older.json()["items"]] == [first["slug"]]
+
+
+async def test_public_views_only_count_for_published_posts_and_preserve_metadata(client, make_admin):
+    admin = await make_admin()
+    live = await _post(client, admin, "Bài có lượt xem", publish=True)
+    draft = await _post(client, admin, "Bài chưa đăng", publish=False)
+
+    client.cookies.clear()
+    live_url = f"{PUBLIC}/vi/{live['slug']}"
+    assert (await client.get(live_url)).status_code == 200
+    assert (await client.post(f"{live_url}/views", headers={"Sec-Fetch-Site": "cross-site"})).status_code == 204
+    for _ in range(2):
+        assert (await client.post(f"{live_url}/views")).status_code == 204
+    assert (await client.post(f"{PUBLIC}/vi/{draft['slug']}/views")).status_code == 204
+    assert "view_count" not in (await client.get(live_url)).json()
+
+    items = (await client.get(POSTS, headers=admin["headers"])).json()["items"]
+    by_id = {post["id"]: post for post in items}
+    assert by_id[live["id"]]["view_count"] == 2
+    assert by_id[draft["id"]]["view_count"] == 0
+    detail = (await client.get(f"{POSTS}/{live['id']}", headers=admin["headers"])).json()
+    assert detail["updated_at"] == live["updated_at"]
+    assert detail["version"] == live["version"]

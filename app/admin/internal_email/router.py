@@ -3,8 +3,11 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.access_log import audit_admin_read
-from app.admin.internal_email import google, service
+from app.admin.internal_email import assistant, google, service
 from app.admin.internal_email.schemas import (
+    EmailAssistantDraft,
+    EmailAssistantRequest,
+    EmailAssistantStatus,
     EmailContent,
     EmailOAuthStart,
     EmailPolicyOut,
@@ -158,6 +161,27 @@ async def preview_email(
 ):
     """The rendered email, exactly as it would be sent. Sends nothing."""
     return await service.preview(db, body, actor_id=current_user.id)
+
+
+@router.get("/assistant", response_model=EmailAssistantStatus)
+async def email_assistant_status(current_user: User = Depends(require_admin)):
+    """Whether the composer shows "Write with Claude" (docs/specs/admin/email-assistant.md)."""
+    return EmailAssistantStatus(enabled=assistant.available_to(current_user))
+
+
+@router.post("/assistant/draft", response_model=EmailAssistantDraft)
+async def draft_email(
+    body: EmailAssistantRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A draft subject, heading and body from the admin's instruction. Sends
+    and stores nothing; recipients never reach Claude."""
+    assistant.require_access(current_user)
+    # Loading the admin was this request's only query; give the connection
+    # back to the pool rather than hold it while Claude writes (up to 25 s).
+    await db.close()
+    return await assistant.draft(body)
 
 
 @router.post("/send", response_model=InternalEmailOut)
