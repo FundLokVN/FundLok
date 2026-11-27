@@ -193,6 +193,8 @@ class SearchConsoleSyncResult(BaseModel):
     job: str
     days: int  # days re-read from Google
     rows: int  # (day, post) rows stored
+    inspected: int = 0  # published posts whose index status Google returned
+    inspect_failed: int = 0  # posts Google did not answer for (retried next run)
     failed: int = 0
     # Why nothing ran (NOT_CONFIGURED), when nothing did.
     skipped: str | None = None
@@ -200,8 +202,8 @@ class SearchConsoleSyncResult(BaseModel):
 
 @router.post("/search-console-sync", response_model=SearchConsoleSyncResult)
 async def run_search_console_sync(response: Response, db: AsyncSession = Depends(get_db)):
-    """Daily, 06:00 ICT: re-read the recent days of Google Search Console figures for blog posts and replace them
-    (docs/specs/blog/search-console-stats.md). 502 when Google fails, having written nothing, so the scheduler
+    """Daily, 06:00 ICT: re-read the recent days of Google Search Console figures for blog posts and replace them,
+    then check which published posts Google has indexed (docs/specs/blog/search-console-stats.md). 502 when Google fails, having written nothing, so the scheduler
     retries."""
     try:
         result = await search_console.sync(db)
@@ -210,4 +212,13 @@ async def run_search_console_sync(response: Response, db: AsyncSession = Depends
         logger.warning("Search Console sync failed: %s", exc)
         response.status_code = 502
         return SearchConsoleSyncResult(job="search-console-sync", days=0, rows=0, failed=1)
-    return SearchConsoleSyncResult(job="search-console-sync", **result)
+    # Index status is best effort: a refusal is logged and retried tomorrow,
+    # and does not make the scheduler re-read figures that were stored.
+    try:
+        checked = await search_console.inspect_posts(db)
+    except search_console.SearchConsoleError as exc:
+        logger.warning("URL Inspection skipped: %s", exc)
+        checked = {"inspected": 0, "failed": 0}
+    return SearchConsoleSyncResult(
+        job="search-console-sync", **result, inspected=checked["inspected"], inspect_failed=checked["failed"]
+    )

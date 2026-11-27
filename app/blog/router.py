@@ -5,6 +5,7 @@ personal data, so they are exempt from VIEW auditing
 (tests/admin/test_admin_read_audit.py NOT_PERSONAL_DATA); every write is audited.
 """
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 from uuid import UUID
 
@@ -22,7 +23,9 @@ from app.blog.schemas import (
     BlogPostDetail,
     BlogPostListResponse,
     BlogPostSummary,
+    BlogIndexStatusOut,
     BlogSearchConsoleStatus,
+    BlogSitemapSubmitResult,
     BlogSearchStats,
     BlogPostUpdate,
     BlogSeoAssistantStatus,
@@ -41,6 +44,7 @@ from app.utils.audit import append_audit
 from app.utils.rbac import require_roles
 
 router = APIRouter(prefix="/api/v1/blog", tags=["blog"])
+logger = logging.getLogger(__name__)
 admin_blog_router = APIRouter(prefix="/admin/blog", tags=["admin-blog"])
 
 require_admin = require_roles(Role.ADMIN, Role.SYSTEM_ADMIN)
@@ -86,11 +90,14 @@ async def list_posts(
     )
     sync = await search_console.status(db)
     stats = await search_console.stats_for(db, [p.slug for p in posts], through=sync.data_through)
+    indexed = await search_console.index_status_for(db, [p.slug for p in posts if p.status == "published"])
     items = []
     for post in posts:
         item = BlogPostSummary.model_validate(post)
         if found := stats.get(post.slug):
             item.search = BlogSearchStats(**vars(found))
+        if checked := indexed.get(post.slug):
+            item.index_status = BlogIndexStatusOut.model_validate(checked)
         items.append(item)
     return BlogPostListResponse(
         total=total,
@@ -99,6 +106,21 @@ async def list_posts(
         items=items,
         search_console=BlogSearchConsoleStatus(**vars(sync), window_days=search_console.WINDOW_DAYS),
     )
+
+
+@admin_blog_router.post("/sitemap/submit", response_model=BlogSitemapSubmitResult)
+async def submit_sitemap(current_user: User = Depends(require_admin)):
+    """Tell Google Search Console the sitemap changed. The editor calls this
+    after a publish, once the public sitemap is refreshed. Never an error to
+    the caller: publishing already succeeded (search-console-stats.md §4)."""
+    try:
+        await search_console.submit_sitemap()
+    except search_console.SearchConsoleError as exc:
+        reason = "NOT_CONFIGURED" if str(exc) == "NOT_CONFIGURED" else "REFUSED"
+        if reason == "REFUSED":
+            logger.warning("Sitemap submit failed: %s", exc)
+        return BlogSitemapSubmitResult(submitted=False, reason=reason)
+    return BlogSitemapSubmitResult(submitted=True)
 
 
 @admin_blog_router.get("/keyword-usage", response_model=KeywordUsageResponse)

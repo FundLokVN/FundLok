@@ -106,6 +106,26 @@ class BlogSearchStats(BaseModel):
     position: float | None
 
 
+class BlogIndexStatusOut(BaseModel):
+    """Google's latest URL Inspection answer for the post's public address."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    # PASS = indexed; NEUTRAL = not indexed; PARTIAL / FAIL = indexed with
+    # problems / an error; VERDICT_UNSPECIFIED = Google gave none.
+    verdict: str
+    coverage_state: str | None
+    last_crawl_at: datetime | None
+    checked_at: datetime
+
+
+class BlogSitemapSubmitResult(BaseModel):
+    submitted: bool
+    # Why not, when not: NOT_CONFIGURED, or REFUSED (Google said no; the
+    # service account needs Full permission on the property).
+    reason: Literal["NOT_CONFIGURED", "REFUSED"] | None = None
+
+
 class BlogSearchConsoleStatus(BaseModel):
     configured: bool
     last_synced_at: datetime | None
@@ -131,6 +151,8 @@ class BlogPostSummary(BaseModel):
     view_count: int
     # Admin list only; None when Google has not reported the post.
     search: BlogSearchStats | None = None
+    # Admin list only; None until the daily check has looked at the post.
+    index_status: BlogIndexStatusOut | None = None
 
 
 class BlogPostDetail(BlogPostSummary):
