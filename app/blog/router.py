@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.blog import seo_assistant, service
+from app.blog import search_console, seo_assistant, service
 from app.blog.models import SLUG_PATTERN
 from app.blog.schemas import (
     BlogMediaConfirmResponse,
@@ -21,6 +21,9 @@ from app.blog.schemas import (
     BlogPostCreate,
     BlogPostDetail,
     BlogPostListResponse,
+    BlogPostSummary,
+    BlogSearchConsoleStatus,
+    BlogSearchStats,
     BlogPostUpdate,
     BlogSeoAssistantStatus,
     BlogSeoSuggestionRequest,
@@ -78,10 +81,24 @@ async def list_posts(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    total, items = await service.list_posts_admin(
+    total, posts = await service.list_posts_admin(
         db, page=page, page_size=page_size, status_filter=status_filter, search=search
     )
-    return BlogPostListResponse(total=total, page=page, page_size=page_size, items=items)
+    sync = await search_console.status(db)
+    stats = await search_console.stats_for(db, [p.slug for p in posts], through=sync.data_through)
+    items = []
+    for post in posts:
+        item = BlogPostSummary.model_validate(post)
+        if found := stats.get(post.slug):
+            item.search = BlogSearchStats(**vars(found))
+        items.append(item)
+    return BlogPostListResponse(
+        total=total,
+        page=page,
+        page_size=page_size,
+        items=items,
+        search_console=BlogSearchConsoleStatus(**vars(sync), window_days=search_console.WINDOW_DAYS),
+    )
 
 
 @admin_blog_router.get("/keyword-usage", response_model=KeywordUsageResponse)
