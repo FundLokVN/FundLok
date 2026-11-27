@@ -45,6 +45,22 @@ def test_a_missing_variable_is_an_error_not_a_blank():
         render_email("verification")
 
 
+@pytest.mark.parametrize("heading", ["Bắt đầu hành trình đầu tư cùng FundLok", ""])
+def test_composer_banner_is_rendered_only_with_a_heading(heading):
+    html = render_email(
+        "internal-general",
+        heading=heading,
+        body="Xin chào Quý nhà đầu tư,",
+        button_label="Hoàn tất xác minh KYC",
+        button_url="https://fundlok.com/kyc",
+        include_signature=False,
+    )
+    assert ("#e8f4ee" in html) == bool(heading)
+    if heading:
+        assert html.index(heading) < html.index("Xin chào Quý nhà đầu tư,")
+    assert 'href="https://fundlok.com/kyc"' in html
+
+
 def test_values_are_escaped_like_html_escape():
     html = render_email(
         "contact-notification",
