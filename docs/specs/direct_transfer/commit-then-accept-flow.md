@@ -6,7 +6,7 @@
 | **Owner** | Edward |
 | **Implementer(s)** | Edward's modules: a Claude Sonnet implementer (HANDOFF-06 Phase 2). Phat: routers in `app/market`, all UI, notification wording (D-051) |
 | **Module** | `app/direct_transfer/` (backend), `app/market/funding_router.py` and `app/market/funding.py` (Phat's routers, calling the service functions here), `app/market/investor_agreement/` (shared, section 3) |
-| **Version** | 1.3 (late Day-14 tickets after formation, rules 8 and 9; 1.2 was status only; 1.1 is the Money flow FINAL v1.0 amendment, see the box below) |
+| **Version** | 1.4 (unlock sentence: the two locked sentences, language stored, SCRUM-612; 1.3 was late Day-14 tickets after formation, rules 8 and 9; 1.2 was status only; 1.1 is the Money flow FINAL v1.0 amendment, see the box below) |
 | **Date** | 2026-11-15 |
 | **Related ADR** | ADR-011 (this spec implements it), ADR-009 |
 | **Depends on** | `end-to-end-payment-flow.md` (4 Nov design), `funding-window.md`, `transfer-and-evidence.md`, `fees.md`, `ledger-amendment.md`, D-036 to D-057, `docs/appendix-m/appendix-m-remediation-decisions.md` (A1 to A7) |
@@ -106,8 +106,9 @@ lender_standing
 
 ```
 ├── id UUID PK · investor_id UUID NOT NULL · locked_window_id UUID NOT NULL
-├── sentence_text TEXT NOT NULL      -- the exact sentence the lender typed
-├── sentence_version TEXT NOT NULL
+├── sentence_text TEXT NOT NULL      -- the text the lender typed, as typed
+├── sentence_version TEXT NOT NULL   -- 'unlock-v2' from 1.4 (v1 rows are the old placeholder)
+├── sentence_language TEXT NULL      -- 'vi' | 'en': which locked sentence it matched; NULL on v1 rows
 ├── ekyc_verification_id UUID NOT NULL   -- the re-eKYC that allowed the unlock
 ├── acknowledged_at TIMESTAMPTZ NOT NULL · ip_address TEXT · user_agent TEXT
 ```
@@ -233,8 +234,13 @@ Stores the SME's own screenshot of the money arriving. When nothing can be read 
 
 ### 4.7 Lender lock (new)
 
-- `GET /funding/me/standing` → `200 { "status": "GOOD|LOCKED|CLOSED", "no_show_count": 0, "locked_at": null, "unlock_requires": ["EKYC", "ACKNOWLEDGEMENT"], "acknowledgement_sentence": "…" | null }`.
-- `POST /funding/me/standing/unlock` → `{ "acknowledgement": "<exact sentence>" }` → `200` standing. Requires an `APPROVED` eKYC completed after `locked_at`, and the sentence matching exactly (after trimming). Errors: `EKYC_REQUIRED`, `ACKNOWLEDGEMENT_MISMATCH`, `NOT_LOCKED`, `LENDER_CLOSED`.
+- `GET /funding/me/standing` → `200 { "status": "GOOD|LOCKED|CLOSED", "no_show_count": 0, "locked_at": null, "unlock_requires": ["EKYC", "ACKNOWLEDGEMENT"], "acknowledgement_sentence": "…" | null, "acknowledgement_sentences": {"vi": "…", "en": "…"} | null }`. `acknowledgement_sentence` stays (the Vietnamese one, which prevails) so the current screen keeps working; `acknowledgement_sentences` carries both, and the screen shows the one in the lender's language.
+- `POST /funding/me/standing/unlock` → `{ "acknowledgement": "<sentence>" }` → `200` standing. Requires an `APPROVED` eKYC completed after `locked_at`, and the text matching **either** locked sentence. The language is whichever sentence matched (the request has no language field). Errors: `EKYC_REQUIRED`, `ACKNOWLEDGEMENT_MISMATCH` (wrong text is refused and nothing is stored), `NOT_LOCKED`, `LENDER_CLOSED`.
+- **The two sentences** (locked by Loc 18 Nov 2026, SCRUM-604; version `unlock-v2`):
+  - vi: "Tôi hiểu việc không có mặt giải ngân ảnh hưởng rất nhiều đến doanh nghiệp, tôi cam kết sẽ đầu tư chuẩn mực"
+  - en: "I realise no-showing has a big effect on the SME. I commit to investing properly."
+- **Matching** (one function, so the rule changes in one place): PROVISIONAL(Q-1.4): the text is compared after trimming, collapsing runs of spaces and ignoring case and accents, as the unlock has always been compared. Strict exact matching is the alternative, waiting on Loc's answer (section 9, question 10).
+- **Recorded on success** (`lender_unlock_acknowledgements`): the text as typed, the language, the version, the time, the eKYC used, IP and user agent. Nothing is recorded on a refusal.
 
 ### 4.8 Staff (`/admin`, `require_admin`)
 
@@ -386,13 +392,14 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 |---|---|---|---|
 | 1 | If commitments reach the target before Day 12, do the Day-13 and Day-14 deadlines stay fixed or move earlier? | Loc | **Answered (Money flow FINAL v1.0): fixed.** Pledges close early; Day 13 and Day 14 do not move |
 | 2 | May a lender withdraw a pledge before the SME decides? | Loc | **Answered (Money flow FINAL v1.0): yes, until the end of Day 12** |
-| 3 | The exact acknowledgement sentence for unlocking (Vietnamese and English), and its version | Loc | Placeholder text in config, `sentence_version = "draft"` |
+| 3 | The exact acknowledgement sentence for unlocking (Vietnamese and English), and its version | Loc | **Answered (SCRUM-604, 18 Nov 2026):** the two sentences in 4.7, version `unlock-v2` |
 | 4 | How is each pledge signed: the acceptance document through the signer as today, or an OTP per commitment? | Loc, Edward | As today (no OTP per commitment); OTP only for the service agreement and the Day-14 contract |
 | 5 | If no-shows leave the confirmed total below 50%, does the loan still form? | Loc | Yes (A4) |
 | 6 | How long does `CLOSING` wait for disputes after `pay_deadline_at`? | Edward, Loc | `close_wait_days = 2` calendar days |
 | 7 | Is Day 0 the day the window opens, or the day staff publish it? | Loc | The ICT date `window_start` falls on |
 | 8 | When is the `LEGACY` flow removed? | Edward | After dev data is cleared; the `flow` column and legacy branches are then dropped (technical debt) |
 | 9 | Phat: does the SME's decision screen fit before `commit_closes_at` (read-only) or only after? | Phat | Only after the commit phase |
+| 10 | Unlock sentence matching: tolerant (case, accents, spacing ignored, as today) or strictly exact? | Loc | Tolerant, as built; one function to change |
 
 ---
 
@@ -404,3 +411,4 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 | 1.1 | 2026-11-18 | Phat / Claude | Money flow FINAL v1.0: no service agreement at commit (signed on Day 14), withdrawal until the end of Day 12, fixed deadlines (`WINDOW_FULL`), Day-14 cut-offs 14:45 / 15:00 / 15:30; `FUNDING_WINDOW_FLOW` switches new windows to this flow |
 | 1.2 | 2026-11-21 | Edward / Claude | Status DRAFT to IMPLEMENTED; no behaviour change |
 | 1.3 | 2026-11-25 | Claude (for Edward's approval) | After the pooled loan forms: an excluded ticket confirmed later (24-hour lapse on every `funding-advance` run, or staff approval) is voided with a refund (rule 8); formation unlocks a lender locked at 15:00 whose ticket joins (rule 9) |
+| 1.4 | 2026-11-26 | Edward / Claude | Unlock sentence (SCRUM-612): the two sentences Loc locked on 18 Nov, either accepted, language stored (`sentence_language`, version `unlock-v2`); matching rule flagged for Loc (question 10) |
