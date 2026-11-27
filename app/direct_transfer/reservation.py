@@ -12,7 +12,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.direct_transfer import fees
 from app.direct_transfer.accounts import get_usable_account
 from app.direct_transfer.config import DirectTransferParams, resolve
 from app.direct_transfer.errors import bad_request, conflict, not_found
@@ -66,8 +65,6 @@ async def reserve_ticket(
         raise conflict("USE_COMMITMENTS", "This window takes commitments, not reservations")
     if window.status != "OPEN" or now >= window.window_end:
         raise conflict("WINDOW_NOT_OPEN", "The window is not open for reservations")
-    if await fees.investor_has_unpaid_invoice(db, investor_id, p, now=now):
-        raise conflict("INVESTOR_FEE_UNPAID", "A FundLok invoice is unpaid")
     account = await get_usable_account(db, account_id=payment_account_id, user_id=investor_id, holder_role="INVESTOR")
 
     live = (

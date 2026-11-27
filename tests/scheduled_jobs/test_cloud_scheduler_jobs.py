@@ -241,3 +241,15 @@ async def test_the_money_timer_routes_need_the_scheduler_token(client, monkeypat
     assert resp.json()["job"] == path.rsplit("/", 1)[-1]
     monkeypatch.delenv("SCHEDULER_SERVICE_ACCOUNT")
     assert (await client.post(path, headers={"Authorization": "Bearer valid"})).status_code == 503
+
+
+async def test_repayment_day_retries_failed_rounds_without_hiding_completed_work(client, monkeypatch, scheduler):
+    from app.scheduled_jobs import money_timers
+
+    async def partial_run(db):
+        return {"late": 2, "settled": 3, "disputes": 0, "failed": 1}
+
+    monkeypatch.setattr(money_timers, "run_repayment_day", partial_run)
+    response = await client.post(REPAYMENT_DAY, headers={"Authorization": "Bearer valid"})
+    assert response.status_code == 500, response.text
+    assert response.json() == {"job": "repayment-day", "late": 2, "settled": 3, "disputes": 0, "failed": 1}

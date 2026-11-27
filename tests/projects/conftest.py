@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import update
 
 from app.direct_transfer.models import PaymentAccount
-from conftest import auth_headers
+from conftest import auth_headers, record_test_project_kyb
 
 
 @pytest.fixture
@@ -42,3 +42,13 @@ def make_user(make_user, client, db_session):
         return user
 
     return _make
+
+
+@pytest.fixture
+def post_verified_project(client, db_session):
+    async def post(sme, payload):
+        if sme["role"] == "SME":
+            await record_test_project_kyb(db_session, sme, payload.get("tax_id"))
+        return await client.post("/projects", json=payload, headers=auth_headers(sme))
+
+    return post

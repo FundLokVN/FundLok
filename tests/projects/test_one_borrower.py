@@ -11,6 +11,8 @@ failed or request was refused, borrows again on a new project under its own (ver
 import datetime as dt
 import uuid
 
+import pytest
+
 from sqlalchemy import select, update
 
 from app.direct_transfer import close, repayment
@@ -85,6 +87,20 @@ async def _verified_world(db_session, make_user, **kwargs):
 # --------------------------------------------------------------------------- #
 # the tax code
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("endpoint", ["/projects", "/sme/businesses"])
+async def test_an_unverified_sme_cannot_reserve_a_business_tax_code(endpoint, client, db_session, make_user):
+    unverified = await make_user(role="SME")
+    owner = await make_user(role="SME")
+    code = fake_tax_code()
+    await _verified(db_session, owner, code)
+    payload = {"legal_name": "Verified business", "tax_id": code}
+
+    denied = await client.post(endpoint, json=payload, headers=auth_headers(unverified))
+    assert denied.status_code == 409 and _code(denied) == "BUSINESS_VERIFICATION_REQUIRED"
+    created = await client.post(endpoint, json=payload, headers=auth_headers(owner))
+    assert created.status_code == 201, created.text
+
+
 async def test_a_project_needs_a_valid_tax_code_kept_in_one_form(client, db_session, make_user):
     for bad in (None, "", "TAX-123", "12345", "0123456789-01", "01234567890"):
         sme = await make_user(role="SME")
@@ -92,13 +108,19 @@ async def test_a_project_needs_a_valid_tax_code_kept_in_one_form(client, db_sess
         assert resp.status_code == 422 and _code(resp) == "INVALID_TAX_CODE", (bad, resp.text)
 
     company, branch = fake_tax_code(), fake_tax_code()
-    spaced = await _create(client, await make_user(role="SME"), f" {company[:4]} {company[4:]} ")
+    sme = await make_user(role="SME")
+    await _verified(db_session, sme, company)
+    spaced = await _create(client, sme, f" {company[:4]} {company[4:]} ")
     assert spaced.status_code == 201, spaced.text
     assert spaced.json()["tax_id"] == company
-    dashless = await _create(client, await make_user(role="SME"), f"{branch}002")
+    sme = await make_user(role="SME")
+    await _verified(db_session, sme, branch)
+    dashless = await _create(client, sme, f"{branch}002")
     assert dashless.status_code == 201, dashless.text
     assert dashless.json()["tax_id"] == f"{branch}-002"
-    household = await _create(client, await make_user(role="SME"), "079123456789")
+    sme = await make_user(role="SME")
+    await _verified(db_session, sme, "079123456789")
+    household = await _create(client, sme, "079123456789")
     assert household.status_code == 201 and household.json()["tax_id"] == "079123456789"
 
     stored = (
@@ -107,12 +129,16 @@ async def test_a_project_needs_a_valid_tax_code_kept_in_one_form(client, db_sess
     assert stored == branch  # a branch is its company
 
 
-async def test_a_business_has_one_project_however_its_tax_code_is_written(client, make_user):
+async def test_a_business_has_one_project_however_its_tax_code_is_written(client, db_session, make_user):
     code = fake_tax_code()
-    assert (await _create(client, await make_user(role="SME"), code)).status_code == 201
+    sme = await make_user(role="SME")
+    await _verified(db_session, sme, code)
+    assert (await _create(client, sme, code)).status_code == 201
 
     for variant in (code, f"{code}-001", f"{code[:5]} {code[5:]}"):
-        resp = await _create(client, await make_user(role="SME"), variant)
+        sme = await make_user(role="SME")
+        await _verified(db_session, sme, code)
+        resp = await _create(client, sme, variant)
         assert resp.status_code == 409 and _code(resp) == "DUPLICATE_TAX_CODE", (variant, resp.text)
 
 
@@ -134,10 +160,12 @@ async def test_a_project_must_be_the_business_the_sme_verified(client, db_sessio
 # --------------------------------------------------------------------------- #
 async def test_an_sme_cannot_start_a_second_project_while_one_is_in_progress(client, db_session, make_user):
     sme = await make_user(role="SME")
-    first = await _create(client, sme, fake_tax_code(), loan_application=LOAN)
+    code = fake_tax_code()
+    await _verified(db_session, sme, code)
+    first = await _create(client, sme, code, loan_application=LOAN)
     assert first.status_code == 201, first.text
 
-    second = await _create(client, sme, fake_tax_code())
+    second = await _create(client, sme, code)
     assert second.status_code == 409 and _code(second) == "SME_HAS_OPEN_PROJECT"
 
     # Once the first ends (here: its application was rejected), another can start.
@@ -146,8 +174,9 @@ async def test_an_sme_cannot_start_a_second_project_while_one_is_in_progress(cli
         .where(LoanApplication.project_id == uuid.UUID(first.json()["id"]))
         .values(status="REJECTED", admin_approval="REJECTED")
     )
+    await close_project_if_finished(db_session, uuid.UUID(first.json()["id"]), "REJECTED")
     await db_session.commit()
-    third = await _create(client, sme, fake_tax_code())
+    third = await _create(client, sme, code)
     assert third.status_code == 201, third.text
 
 
@@ -263,7 +292,9 @@ async def test_business_can_reapply_after_its_application_is_rejected(
     again = await _create(client, sme, code)
     assert again.status_code == 201, again.text
     # Another account for the same business, while the new project is open: the database refuses it.
-    other = await _create(client, await make_user(role="SME"), f"{code}-002")
+    other_sme = await make_user(role="SME")
+    await _verified(db_session, other_sme, code)
+    other = await _create(client, other_sme, f"{code}-002")
     assert other.status_code == 409 and _code(other) == "DUPLICATE_TAX_CODE", other.text
 
 
@@ -274,10 +305,18 @@ async def test_an_sme_repaying_a_loan_can_neither_start_nor_list_another_project
     s = await _repaying(client, db_session, make_admin, make_user, make_eligible_investor)
 
     # No new project while it repays.
-    blocked = await _create(client, s["sme"], fake_tax_code())
+    code = (await db_session.get(Project, uuid.UUID(str(s["project"])))).tax_id
+    await _verified(db_session, s["sme"], code)
+    blocked = await _create(client, s["sme"], code)
     assert blocked.status_code == 409 and _code(blocked) == "SME_HAS_OPEN_PROJECT"
 
-    # A second project that already exists (from before the rule) cannot open a listing either.
+    # A second historical project had no KYB check when it was created.
+    kyb = (await db_session.execute(select(GVerifyKybVerification).where(
+        GVerifyKybVerification.user_id == uuid.UUID(s["sme"]["id"]),
+    ))).scalars().all()
+    for attempt in kyb:
+        await db_session.delete(attempt)
+    await db_session.commit()
     second = await _project(db_session, s["sme"])
     refused = await _open(client, s["admin"], second)
     assert refused.status_code == 409 and _code(refused) == "SME_HAS_LIVE_LISTING", refused.text

@@ -6,7 +6,7 @@
 | **Owner** | Phat |
 | **Implementer(s)** | v1.0: Phat. v1.1 (HANDOFF-06 T6): a Claude Sonnet implementer after Phat and Edward approve this version; Phat reviews the PR (shared file `app/lending/models.py`, `app/projects`) |
 | **Module** | `app/projects/borrower.py`, `app/projects/service.py`, `app/market/funding.py`, `app/direct_transfer/windows.py`; migration `6664b74ae183` (v1.0) and a new one (v1.1); `app/lending/models.py` (`Project`), `app/direct_transfer/models.py` (index only) |
-| **Version** | 1.1 |
+| **Version** | 1.2 (approved business verification required before project creation) |
 | **Date** | 2026-11-15 |
 | **Related ADR** | ADR-009, ADR-011 |
 | **Depends on** | D-016, D-040, D-050 (`docs/outstanding-issues.md`), `docs/specs/direct_transfer/funding-window.md`, `docs/specs/direct_transfer/end-to-end-payment-flow.md`, handbook 10.1 and Appendix M 7.7 |
@@ -64,7 +64,8 @@ No change to request or response shapes.
 | Status | Code | When (v1.1) |
 |---|---|---|
 | 422 | `INVALID_TAX_CODE` | Missing, or not 10 digits, 10-3 digits or 12 digits (spaces and dots ignored) |
-| 409 | `TAX_CODE_NOT_VERIFIED_BUSINESS` | The SME's business is verified (approved KYB with a tax code) and this is another business |
+| 409 | `BUSINESS_VERIFICATION_REQUIRED` | The SME has no approved business verification with a valid tax code |
+| 409 | `TAX_CODE_NOT_VERIFIED_BUSINESS` | The approved verification identifies a different business |
 | 409 | `SME_HAS_OPEN_PROJECT` | The SME has a project in progress (rule 3). The friendly pre-check |
 | 409 | `DUPLICATE_TAX_CODE` | The business already has a project **in progress** under another account, however its code was written (the database index). A business whose earlier projects have all ended is **not** refused |
 
@@ -105,7 +106,7 @@ are signed again after this request's approval. Staff review and the score run a
    - staff close or archive it (existing behaviour): `STAFF`.
 
    A project with a live round, or with one not yet decided, is in progress. A closed project is not reopened; a failed round means the SME starts a **new project** (a new row, Edward 2026-11-15), which Phat's UI may prefill.
-4. **The verified business** (code). Once an SME has an approved KYB with a tax code, a project must be that business, when it is created and again when its listing opens.
+4. **The verified business** (code). A new project requires an approved KYB with a matching tax code. For older projects the listing check still rejects a mismatch with any approved KYB.
 5. **Tax code required** (code, new projects only). Older rows keep what they have; one in another shape is not compared by `tax_business`, but is compared by the open-project index on `tax_id`.
 6. **Migration.** In this order, in one revision: (a) set `status = 'CLOSED'` for every existing project that rule 3 says has ended (the same derivation `unfinished_project` uses today), so the new index does not count them; (b) stop with a list if any business or tax code still has more than one *open* project, or any SME account more than one live window (as v1.0): someone decides, then upgrades again; (c) drop `uq_projects_tax_business` and `projects_tax_id_key`; (d) create the two partial unique indexes. `downgrade` recreates the old indexes and refuses if two projects now share a business or code.
 7. **Existing code.** `borrower.unfinished_project` keeps its derivation as the one definition of "ended", and `close_project_if_finished` uses it. `check_new_project` and `check_can_open` keep their checks.

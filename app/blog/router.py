@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.blog import service
+from app.blog import seo_assistant, service
 from app.blog.models import SLUG_PATTERN
 from app.blog.schemas import (
     BlogMediaConfirmResponse,
@@ -22,6 +22,9 @@ from app.blog.schemas import (
     BlogPostDetail,
     BlogPostListResponse,
     BlogPostUpdate,
+    BlogSeoAssistantStatus,
+    BlogSeoSuggestionRequest,
+    BlogSeoSuggestions,
     BlogVersionBody,
     KeywordUsageResponse,
     Locale,
@@ -91,6 +94,27 @@ async def keyword_usage(
     """Other posts with the same focus keyword, for the editor's checklist warning."""
     normalized, posts = await service.find_focus_keyword_usage(db, keyword=keyword, exclude_id=exclude_id)
     return KeywordUsageResponse(keyword=normalized, posts=posts)
+
+
+@admin_blog_router.get("/seo-assistant", response_model=BlogSeoAssistantStatus)
+async def seo_assistant_status(current_user: User = Depends(require_admin)):
+    """Whether this admin's editor shows "Suggest SEO" (docs/specs/blog/seo-assistant.md)."""
+    return BlogSeoAssistantStatus(enabled=seo_assistant.available_to(current_user))
+
+
+@admin_blog_router.post("/seo-assistant/suggestions", response_model=BlogSeoSuggestions)
+async def suggest_seo(
+    body: BlogSeoSuggestionRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Claude's suggestions for the draft on screen. Nothing is stored: the
+    editor applies them to its draft, and Save or Publish writes as usual."""
+    seo_assistant.require_access(current_user)
+    # Loading the admin was this request's only query; give the connection
+    # back to the pool rather than hold it while Claude writes (up to 25 s).
+    await db.close()
+    return await seo_assistant.suggest(title=body.title, locale=body.locale, text=body.text)
 
 
 @admin_blog_router.post("/posts", response_model=BlogPostDetail, status_code=status.HTTP_201_CREATED)
@@ -267,9 +291,13 @@ async def confirm_media(
 async def list_published_posts(
     locale: Locale = Query(default="vi"),
     limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    return PublicBlogPostListResponse(items=await service.list_published(db, locale=locale, limit=limit))
+    items = await service.list_published(db, locale=locale, limit=limit, offset=offset)
+    return PublicBlogPostListResponse(
+        items=items, next_offset=offset + limit if len(items) == limit else None,
+    )
 
 
 @router.get("/posts/{locale}/{slug}", response_model=PublicBlogPost)
@@ -279,3 +307,16 @@ async def get_published_post(
     db: AsyncSession = Depends(get_db),
 ):
     return await service.get_published(db, locale=locale, slug=slug)
+
+
+@router.post("/posts/{locale}/{slug}/views", status_code=status.HTTP_204_NO_CONTENT)
+async def record_view(
+    locale: Locale,
+    request: Request,
+    slug: str = Path(max_length=80, pattern=SLUG_PATTERN),
+    db: AsyncSession = Depends(get_db),
+):
+    if request.headers.get("sec-fetch-site") != "cross-site":
+        await service.record_published_view(db, locale=locale, slug=slug)
+        await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -111,6 +111,7 @@ class BlogPostSummary(BaseModel):
     updated_at: datetime
     created_at: datetime
     reading_minutes: int
+    view_count: int
 
 
 class BlogPostDetail(BlogPostSummary):
@@ -168,6 +169,7 @@ class PublicBlogPost(PublicBlogPostSummary):
 
 class PublicBlogPostListResponse(BaseModel):
     items: list[PublicBlogPostSummary]
+    next_offset: int | None = None
 
 
 class BlogMediaPresignRequest(BaseModel):
@@ -184,3 +186,47 @@ class BlogMediaPresignResponse(BaseModel):
 class BlogMediaConfirmResponse(BaseModel):
     media_id: UUID
     public_url: str
+
+
+# --------------------------------------------------------------------------- #
+# SEO assistant (docs/specs/blog/seo-assistant.md)
+# --------------------------------------------------------------------------- #
+
+# About 30k tokens: far beyond any real post, short of an expensive mistake.
+SEO_ARTICLE_MAX_CHARS = 100_000
+
+
+class BlogSeoAssistantStatus(BaseModel):
+    """Whether the editor shows "Suggest SEO" to the signed-in admin."""
+
+    enabled: bool
+
+
+class BlogSeoSuggestionRequest(BaseModel):
+    """The draft on screen, unsaved edits included, as plain text."""
+
+    title: str = Field(min_length=1, max_length=200)
+    locale: Locale
+    text: str = Field(min_length=1, max_length=SEO_ARTICLE_MAX_CHARS)
+
+    @field_validator("title", "text")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class SeoTitleSuggestion(BaseModel):
+    title: str
+    intent: str
+
+
+class BlogSeoSuggestions(BaseModel):
+    """Checked against BlogPostUpdate's limits before it is returned."""
+
+    titles: list[SeoTitleSuggestion]
+    meta_description: str
+    focus_keyword: str
+    related_terms: list[str]

@@ -295,3 +295,59 @@ class InternalEmailOut(BaseModel):
     undelivered: list[str]
     created_at: datetime
     sent_at: datetime | None
+
+
+# --------------------------------------------------------------------------- #
+# "Write with Claude" (docs/specs/admin/email-assistant.md)
+# --------------------------------------------------------------------------- #
+
+
+class EmailAssistantStatus(BaseModel):
+    """Whether the composer shows "Write with Claude" to the signed-in admin."""
+
+    enabled: bool
+
+
+class EmailAssistantCurrent(BaseModel):
+    """What is already in the form, so Claude can rework it. Plain text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: str = Field(default="", max_length=200)
+    heading: str = Field(default="", max_length=200)
+    body: str = Field(default="", max_length=10_000)
+    button_label: str = Field(default="", max_length=60)
+
+
+class EmailAssistantRequest(BaseModel):
+    """The admin's instruction. Recipients are never part of it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instruction: str = Field(min_length=1, max_length=2_000)
+    language: Literal["vi", "en"]
+    template: ComposeTemplate
+    current: EmailAssistantCurrent = Field(default_factory=EmailAssistantCurrent)
+
+    @field_validator("instruction")
+    @classmethod
+    def _instruction(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Say what the email should cover")
+        return value
+
+
+class EmailAssistantDraft(BaseModel):
+    """A draft for the composer: body_html goes into the editor as is (every
+    piece of text in it is escaped), body_text is for showing it."""
+
+    subject: str
+    heading: str
+    body_html: str
+    body_text: str
+    # "[deadline]"-style gaps Claude left instead of inventing a fact; the
+    # composer refuses to send while any is still in the email.
+    placeholders: list[str]
+    # Figures in the draft that are not in the instruction or the old draft.
+    unverified_numbers: list[str]
