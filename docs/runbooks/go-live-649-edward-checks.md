@@ -9,7 +9,7 @@ Tick each row in `go-live-checklist.md` with the date and initials when it passe
 | Need | Why | Who |
 |---|---|---|
 | A production SME account whose company has an `APPROVED` KYB, an approved application, and a USB/CA token with a valid digital certificate in the company's name (MST on the certificate) | 3.3 | A real SME, or a company of ours with a token |
-| The Personal Guarantor's own CA signature on the Standing Offer | 3.3 (the check also wants the guarantor's valid signature) | The guarantor |
+| The Personal Guarantor with an approved eKYC and a verified phone for the Zalo signing code | Day 0 signing for the Standing Offer and Loan Contract template | The guarantor |
 | A dedicated round with a controlled SME and three distinct eligible test investors, each with the Investor Service Agreement signed | 3.6 | Edward |
 | Approval for the live transfers, loan servicing, and reconciliation plan in 3.6 | 3.6 | Edward |
 | A phone with a bank app that scans VietQR | 3.8 | Edward |
@@ -25,18 +25,18 @@ If no willing SME with a token exists yet, 3.3 is the long pole: ask for it firs
 **Pass when:** the admin panel shows NEAC valid and every other check passing for a real signed Standing Offer, and an altered copy fails.
 
 1. Log in as the SME. On the approved application, open **Standing Offer**, download the PDF (the page footer prints the application reference and the document version; the check relies on both).
-2. Sign it with the USB/CA token (signature 1, the company). The guarantor adds a separate signature in the same PDF (signature 2).
+2. Sign it with the company’s USB/CA token. Use the Day 0 Zalo code for the guarantor after the SME uploads the Standing Offer and the Loan Contract template. A second certificate in the PDF is optional for the current flow.
 3. Upload the signed PDF through the signed-copy upload. The upload runs the check on the way in.
-4. As admin, open the project panel and the document. Expected, all passing: **right document**, **right numbers** (check code), **NEAC** (document unchanged, signature valid, certificate not revoked), **right signer** (MST equals the approved KYB enterprise code, name compared), **guarantor** (second valid signature, ID matches the guarantor's eKYC ID).
+4. As admin, open the project panel and the document. Expected, all passing: **right document**, **right numbers** (check code), **NEAC** (document unchanged, signature valid, certificate not revoked), **right signer** (MST equals the approved KYB enterprise code, name compared), **guarantor** (confirm the recorded Zalo signature separately from the PDF’s NEAC verdict).
 5. Press "Kiểm tra lại với NEAC" (`POST /admin/documents/{document_id}/neac-check`). Expected: same verdict, a second audit row.
-6. **Altered copy:** Use a dedicated test application. Sign its own Standing Offer, verify that it passes, then alter content covered by the signature without re-signing. Upload the altered copy against that same test application. Expected: the signature check fails. A document-reference mismatch is a separate failure and does not prove this check.
+6. **Altered copy:** For the negative check, use a separate approved test application with no Standing Offer on file. Sign its own Standing Offer, keep the valid original, then alter a signed part of the copy while preserving the application reference and terms check code. Upload the altered copy first. Expect `SIGNING_SIGNATURE_INVALID`, then upload the valid original and expect acceptance. A document mismatch or an already-signed refusal does not prove this check.
 7. Read the audit rows: `audit_log` entity `LOAN_APPLICATION_DOCUMENT`, action `NEAC_SIGNATURE_CHECKED`, newest first. The verdict is in `after_state`.
 
 Failure notes:
 - NEAC unreachable or slow: `NEAC_VERIFY_URL` is unset on `prod-api` (default `https://neac.gov.vn/vi/Home/VerifyFileByNeac`). Retry once; if the site is down, the row stays open and say so in the checklist, do not tick it.
 - "Right signer" fails on a real token: compare the certificate's MST with the KYB enterprise code before suspecting the code.
 
-Evidence to record: application id, document id, the five verdicts, the altered copy's failing check, date.
+Evidence to record: application id, document id, the verification results, the altered copy’s failing check, date.
 
 ## 3.6 Receipt OCR (and 1.16, R2 storage)
 
@@ -58,7 +58,7 @@ Each investor pledges once. The SME signs the Day 13 contracts and accepts the r
 
 Read the result, for each receipt (confirm the exact screen names on the day; the admin funding screens are Phat's): investor `GET` on the ticket shows `transfer.system_check` (`verdict`, `confidence`, `failure_codes`, `review_reasons`, `receiver`), and staff see it in the admin funding review and the Transactions tab's activity log (`TRANSFER_SYSTEM_ACCEPTED`, `_DENIED`, `_NEEDS_REVIEW`).
 
-After recording the verdicts, staff verify actual bank receipt and handle each ticket under the agreed plan. Review a receipt as received only when the bank evidence supports it. A ticket may already be ACTIVE after staff approval or automatic advance. Service any formed loan through its normal repayment or approved early-settlement flow. For money that did not join a loan, use the approved reconciliation or tracked refund process and retain the audit trail. Finish the row only after reconciling all three transfers and recording the disposition of each ticket.
+After recording the verdicts, staff verify actual bank receipt and handle each ticket under the agreed plan. Review a receipt as received only when the bank evidence supports it. A ticket may already be ACTIVE after staff approval or automatic advance. Service any formed loan through its normal repayment flow, or use an early settlement only if Finance confirms that the process is available for that loan. For money that did not join a loan, use the approved reconciliation or tracked refund process and retain the audit trail. Finish the row only after reconciling all three transfers and recording the disposition of each ticket.
 
 **1.16 proof (R2):** after the uploads, list the bucket. Expected: three objects under `evidence/RECEIPT/<first-two-hex-of-hash>/<file-id>`. Also open one receipt from the admin panel (this mints a download URL): it must display. If an object is missing or the URL fails, 1.16 is not done even though 3.6 passed. Contracts and signed documents (3.3) are the second proof: the signed PDF from step 3 of 3.3 must also download.
 
