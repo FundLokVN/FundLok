@@ -5,7 +5,9 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -93,3 +95,53 @@ class BlogMedia(Base):
         CheckConstraint("size_bytes > 0", name="chk_blog_media_size_bytes"),
         UniqueConstraint("key", name="uq_blog_media_key"),
     )
+
+
+class BlogSearchDaily(Base):
+    """One day of Google Search Console figures for one blog post's address.
+
+    Written only by the daily sync (app/blog/search_console.py), which
+    replaces the days it re-reads. `slug` is the post's address, not a foreign
+    key: Google reports the URL, and the row stays meaningful if the post is
+    deleted. `position_weighted` is the sum of position x impressions, so an
+    average over several days or URLs weights each by its impressions.
+    """
+
+    __tablename__ = "blog_search_daily"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    date = Column(Date, nullable=False)
+    slug = Column(String(80), nullable=False)
+    clicks = Column(Integer, nullable=False)
+    impressions = Column(Integer, nullable=False)
+    position_weighted = Column(Float, nullable=False)
+    synced_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("clicks >= 0 AND impressions >= 0", name="chk_blog_search_daily_counts"),
+        UniqueConstraint("date", "slug", name="uq_blog_search_daily_date_slug"),
+        Index("idx_blog_search_daily_slug_date", "slug", "date"),
+    )
+
+
+
+class BlogIndexStatus(Base):
+    """Google's latest answer on whether a post's public address is indexed.
+
+    Written only by the daily sync's URL Inspection step
+    (app/blog/search_console.py); one row per slug, replaced on each check.
+    """
+
+    __tablename__ = "blog_index_status"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    slug = Column(String(80), nullable=False)
+    # Google's verdict: PASS (indexed), NEUTRAL (not indexed), PARTIAL, FAIL.
+    verdict = Column(String(30), nullable=False)
+    # Google's own words, e.g. "Submitted and indexed",
+    # "Discovered - currently not indexed".
+    coverage_state = Column(String(200), nullable=True)
+    last_crawl_at = Column(DateTime(timezone=True), nullable=True)
+    checked_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("slug", name="uq_blog_index_status_slug"),)

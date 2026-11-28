@@ -179,6 +179,14 @@ class Settings(BaseSettings):
     # docs/specs/admin/email-assistant.md). Same key; its own audience switch.
     EMAIL_ASSISTANT_AUDIENCE: Literal["system_admin", "all_admins"] = "system_admin"
 
+    # Admin > Blog search figures (app/blog/search_console.py,
+    # docs/specs/blog/search-console-stats.md). The Search Console property,
+    # as Google names it: "sc-domain:fundlok.com" or "https://www.fundlok.com/".
+    # Read with the service's own Google credentials, which must be added as a
+    # user of that property. Unset: the daily sync skips and the list shows no
+    # search figures.
+    SEARCH_CONSOLE_SITE_URL: str | None = None
+
     # SMTP Configuration
     SMTP_HOST: str = "localhost"
     SMTP_PORT: int = 1025
