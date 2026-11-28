@@ -10,8 +10,8 @@ Tick each row in `go-live-checklist.md` with the date and initials when it passe
 |---|---|---|
 | A production SME account whose company has an `APPROVED` KYB, an approved application, and a USB/CA token with a valid digital certificate in the company's name (MST on the certificate) | 3.3 | A real SME, or a company of ours with a token |
 | The Personal Guarantor's own CA signature on the Standing Offer | 3.3 (the check also wants the guarantor's valid signature) | The guarantor |
-| An open production funding round with a verified payee account (ours), and an eligible investor account (ours) with the Investor Service Agreement signed | 3.6 | Edward |
-| Three transfers from a personal bank app, each of at least 10,000,000 VND (`min_ticket_vnd`); see 3.6 for the amounts | 3.6 | Edward |
+| A dedicated round with a controlled SME and three distinct eligible test investors, each with the Investor Service Agreement signed | 3.6 | Edward |
+| Approval for the live transfers, loan servicing, and reconciliation plan in 3.6 | 3.6 | Edward |
 | A phone with a bank app that scans VietQR | 3.8 | Edward |
 | An admin login with a second factor, and `gcloud` access to read the Cloud Run log | all | Edward |
 | Cloudflare R2 access for the production bucket (dashboard, or `aws s3 ls --endpoint-url <R2_ENDPOINT_URL>` with the read key) | 1.16 | Edward |
@@ -29,7 +29,7 @@ If no willing SME with a token exists yet, 3.3 is the long pole: ask for it firs
 3. Upload the signed PDF through the signed-copy upload. The upload runs the check on the way in.
 4. As admin, open the project panel and the document. Expected, all passing: **right document**, **right numbers** (check code), **NEAC** (document unchanged, signature valid, certificate not revoked), **right signer** (MST equals the approved KYB enterprise code, name compared), **guarantor** (second valid signature, ID matches the guarantor's eKYC ID).
 5. Press "Kiểm tra lại với NEAC" (`POST /admin/documents/{document_id}/neac-check`). Expected: same verdict, a second audit row.
-6. **Altered copy:** take the signed PDF, change one byte after signing (open in an editor that rewrites the file, or append a space with a hex editor; do not re-sign). Upload it as a new copy on a test application of ours, not the real SME's. Expected: NEAC reports the document changed, the check fails.
+6. **Altered copy:** Use a dedicated test application. Sign its own Standing Offer, verify that it passes, then alter content covered by the signature without re-signing. Upload the altered copy against that same test application. Expected: the signature check fails. A document-reference mismatch is a separate failure and does not prove this check.
 7. Read the audit rows: `audit_log` entity `LOAN_APPLICATION_DOCUMENT`, action `NEAC_SIGNATURE_CHECKED`, newest first. The verdict is in `after_state`.
 
 Failure notes:
@@ -44,17 +44,21 @@ Evidence to record: application id, document id, the five verdicts, the altered 
 
 Production already has `RECEIPT_OCR_ENABLED=1` and `RECEIPT_AUTO_VERDICT_ENABLED=1` (checklist 1.13, 1.14), and the image has Tesseract with `vie` and `eng`.
 
-Do all three on **our own** investor and **our own** payee account, so the money moves between two accounts we control. Each needs its own ticket (reserve, sign the Day-13 contract as the flow requires, then the QR is shown).
+Use one dedicated round with three distinct eligible test investors and a verified bank account owned by the test SME. FundLok's fee account is used only for the fee invoice. The system folds all pledges by one investor in a round into one ticket, so three pledges from one investor cannot drive this test.
+
+Before any production transfer, agree the test accounts, amounts, review and settlement owners, and cleanup with Finance and the production owner. The plan must cover all three transfers, any unpaid amounts or refunds, and any real contract, repayment schedule, fee invoice, or report that formation creates. If that plan is unavailable, run the verdict scenarios in staging and leave the production row open.
+
+Each investor pledges once. The SME signs the Day 13 contracts and accepts the round. Each investor signs their Day 14 copy before using that ticket's QR. Confirm the schedule and staff availability before sending money, since automatic advance and close can form a loan from a confirmed ticket.
 
 | # | Receipt | How to make it | Expected |
 |---|---|---|---|
-| a | Correct | Reserve a 10,000,000 VND ticket, transfer exactly 10,000,000 to the payee account in the QR with the QR's memo code, screenshot the bank's success page, upload | `ACCEPTED`, ticket confirmed |
-| b | Wrong amount | A second ticket for 10,000,000; transfer a different amount (for example 10,500,000), same memo; upload the receipt | `DENIED` (`failure_codes` includes the amount mismatch), investor asked to upload the right one |
-| c | Blurry | A third ticket; transfer correctly, then photograph the success page out of focus (or use the bank app screenshot, then blur and re-save it), upload | `NEEDS_REVIEW`: waiting for staff in the admin funding review (Transactions tab) |
+| a | Correct | Use investor A’s 10,000,000 VND ticket, transfer exactly 10,000,000 to the payee account in the QR with the QR's memo code, screenshot the bank's success page, upload | `ACCEPTED`, ticket confirmed |
+| b | Wrong amount | Use investor B’s 10,000,000 VND ticket. Transfer the approved mismatch amount with B’s memo and upload the receipt | `DENIED` (`failure_codes` includes the amount mismatch), investor asked to upload the right one |
+| c | Blurry | Use investor C’s ticket. Transfer the correct amount with C’s memo and upload an out-of-focus photo of the success page | `NEEDS_REVIEW`: waiting for staff in the admin funding review (Transactions tab) |
 
 Read the result, for each receipt (confirm the exact screen names on the day; the admin funding screens are Phat's): investor `GET` on the ticket shows `transfer.system_check` (`verdict`, `confidence`, `failure_codes`, `review_reasons`, `receiver`), and staff see it in the admin funding review and the Transactions tab's activity log (`TRANSFER_SYSTEM_ACCEPTED`, `_DENIED`, `_NEEDS_REVIEW`).
 
-Then settle the test money: staff **review** (c) as approved or denied; reverse (a) and (b) by hand with the bank as the test transfers are between our own accounts; void the tickets so the round is clean.
+After recording the verdicts, staff verify actual bank receipt and handle each ticket under the agreed plan. Review a receipt as received only when the bank evidence supports it. A ticket may already be ACTIVE after staff approval or automatic advance. Service any formed loan through its normal repayment or approved early-settlement flow. For money that did not join a loan, use the approved reconciliation or tracked refund process and retain the audit trail. Finish the row only after reconciling all three transfers and recording the disposition of each ticket.
 
 **1.16 proof (R2):** after the uploads, list the bucket. Expected: three objects under `evidence/RECEIPT/<first-two-hex-of-hash>/<file-id>`. Also open one receipt from the admin panel (this mints a download URL): it must display. If an object is missing or the URL fails, 1.16 is not done even though 3.6 passed. Contracts and signed documents (3.3) are the second proof: the signed PDF from step 3 of 3.3 must also download.
 
@@ -64,7 +68,7 @@ Evidence to record: three ticket ids, the three verdicts, the object keys (not t
 
 **Pass when:** a bank app scan of a real SME fee invoice shows Techcombank 116889688, the right amount and the right reference.
 
-1. Use a production SME fee invoice (the 3% activation fee). If none exists, issue one on a test round of ours after a loan forms. The invoice response carries `vietqr_payload` (null when `FUNDLOK_FEE_BANK_BIN` and `FUNDLOK_FEE_ACCOUNT_NUMBER` are unset; they are set to 970407 and 116889688, checklist 1.2 and 1.3).
+1. Use a production SME fee invoice (the 3% activation fee). If none exists, coordinate with Finance to use an invoice from the approved test round after normal loan formation. The invoice response carries `vietqr_payload` (null when `FUNDLOK_FEE_BANK_BIN` and `FUNDLOK_FEE_ACCOUNT_NUMBER` are unset; they are set to 970407 and 116889688, checklist 1.2 and 1.3).
 2. Open the invoice on the SME's screen (and the fee email's bank block) and scan the QR with a bank app. **Do not confirm the transfer.**
 3. Check on the bank screen:
    - bank: Techcombank (BIN 970407)
@@ -80,7 +84,7 @@ Evidence to record: invoice id, scanned bank name, scanned account (last 4 digit
 ## Order of work (suggested)
 
 1. Today: ask for the SME with a token and the guarantor (3.3 lead time).
-2. Open or find a production round and set up the three tickets (3.6), so the receipts and the R2 proof (1.16) happen the same day.
+2. Agree the production test and reconciliation plan, then set up the dedicated round and three investors for 3.6 and the R2 proof (1.16).
 3. 3.8 after a fee invoice exists (it follows a formed loan; coordinate with the round used in 3.6 or an existing one).
 4. 3.3 when the token holder is available.
 
