@@ -6,6 +6,7 @@ next time. Kept out of the OpenAPI schema; the web app never calls them.
 Spec: docs/specs/scheduled_jobs/cloud-scheduler-jobs.md.
 """
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Response
@@ -13,9 +14,12 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.fee_notice.service import send_pending_fee_invoice_emails
+from app.blog import search_console
 from app.core.database import get_db
 from app.scheduled_jobs import acceptance, day14, money_timers, reminders, zalo_reminders
 from app.scheduled_jobs.auth import require_scheduler
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/internal/jobs",
@@ -183,3 +187,38 @@ async def run_cic_daily_balance(db: AsyncSession = Depends(get_db)):
     """Daily, 00:30 ICT: log the previous business day's outstanding balance for every active ticket in the CIC event
     log (Decree 94). Nothing the morning after a weekend or holiday. Idempotent."""
     return CicDailyBalanceResult(job="cic-daily-balance", **await money_timers.run_cic_daily_balance(db))
+
+
+class SearchConsoleSyncResult(BaseModel):
+    job: str
+    days: int  # days re-read from Google
+    rows: int  # (day, post) rows stored
+    inspected: int = 0  # published posts whose index status Google returned
+    inspect_failed: int = 0  # posts Google did not answer for (retried next run)
+    failed: int = 0
+    # Why nothing ran (NOT_CONFIGURED), when nothing did.
+    skipped: str | None = None
+
+
+@router.post("/search-console-sync", response_model=SearchConsoleSyncResult)
+async def run_search_console_sync(response: Response, db: AsyncSession = Depends(get_db)):
+    """Daily, 06:00 ICT: re-read the recent days of Google Search Console figures for blog posts and replace them,
+    then check which published posts Google has indexed (docs/specs/blog/search-console-stats.md). 502 when Google fails, having written nothing, so the scheduler
+    retries."""
+    try:
+        result = await search_console.sync(db)
+    except search_console.SearchConsoleError as exc:
+        await db.rollback()
+        logger.warning("Search Console sync failed: %s", exc)
+        response.status_code = 502
+        return SearchConsoleSyncResult(job="search-console-sync", days=0, rows=0, failed=1)
+    # Index status is best effort: a refusal is logged and retried tomorrow,
+    # and does not make the scheduler re-read figures that were stored.
+    try:
+        checked = await search_console.inspect_posts(db)
+    except search_console.SearchConsoleError as exc:
+        logger.warning("URL Inspection skipped: %s", exc)
+        checked = {"inspected": 0, "failed": 0}
+    return SearchConsoleSyncResult(
+        job="search-console-sync", **result, inspected=checked["inspected"], inspect_failed=checked["failed"]
+    )

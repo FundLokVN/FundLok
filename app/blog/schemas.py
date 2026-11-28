@@ -1,5 +1,5 @@
 """Request/response models for the blog. See docs/specs/blog/blog-posts.md §4."""
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -97,6 +97,43 @@ class BlogVersionBody(BaseModel):
     version: int = Field(ge=1)
 
 
+class BlogSearchStats(BaseModel):
+    """A post's Google Search figures over the list's window (search-console-stats.md)."""
+
+    clicks: int
+    impressions: int
+    # Average position, weighted by impressions; None with no impressions.
+    position: float | None
+
+
+class BlogIndexStatusOut(BaseModel):
+    """Google's latest URL Inspection answer for the post's public address."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    # PASS = indexed; NEUTRAL = not indexed; PARTIAL / FAIL = indexed with
+    # problems / an error; VERDICT_UNSPECIFIED = Google gave none.
+    verdict: str
+    coverage_state: str | None
+    last_crawl_at: datetime | None
+    checked_at: datetime
+
+
+class BlogSitemapSubmitResult(BaseModel):
+    submitted: bool
+    # Why not, when not: NOT_CONFIGURED, or REFUSED (Google said no; the
+    # service account needs Full permission on the property).
+    reason: Literal["NOT_CONFIGURED", "REFUSED"] | None = None
+
+
+class BlogSearchConsoleStatus(BaseModel):
+    configured: bool
+    last_synced_at: datetime | None
+    # The newest day stored; the window is the `window_days` ending on it.
+    data_through: date | None
+    window_days: int
+
+
 class BlogPostSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -112,6 +149,10 @@ class BlogPostSummary(BaseModel):
     created_at: datetime
     reading_minutes: int
     view_count: int
+    # Admin list only; None when Google has not reported the post.
+    search: BlogSearchStats | None = None
+    # Admin list only; None until the daily check has looked at the post.
+    index_status: BlogIndexStatusOut | None = None
 
 
 class BlogPostDetail(BlogPostSummary):
@@ -146,6 +187,7 @@ class BlogPostListResponse(BaseModel):
     page: int
     page_size: int
     items: list[BlogPostSummary]
+    search_console: BlogSearchConsoleStatus | None = None
 
 
 class PublicBlogPostSummary(BaseModel):
