@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | **IMPLEMENTED** (build slices S1 to S6 merged; Loc's end-to-end Appendix M re-run on `main` 6977af7 passed, 2026-11-21). Provisional until handbook v3.2 (D-052); Loc's open points are in section 9 |
+| **Status** | **IMPLEMENTED through v1.3.** Loc's Appendix M re-run on `main` 6977af7 passed on 2026-11-21. The v1.4 bilingual unlock amendment is specified and pending implementation (SCRUM-612). |
 | **Owner** | Edward |
 | **Implementer(s)** | Edward's modules: a Claude Sonnet implementer (HANDOFF-06 Phase 2). Phat: routers in `app/market`, all UI, notification wording (D-051) |
 | **Module** | `app/direct_transfer/` (backend), `app/market/funding_router.py` and `app/market/funding.py` (Phat's routers, calling the service functions here), `app/market/investor_agreement/` (shared, section 3) |
@@ -102,7 +102,7 @@ lender_standing
 ```
 `CLOSED` here is the permanent closure after a second no-show; the staff misconduct status (C19) is separate and later.
 
-### New table: `lender_unlock_acknowledgements` (append-only)
+### `lender_unlock_acknowledgements` (append-only, proposed v1.4 shape)
 
 ```
 ├── id UUID PK · investor_id UUID NOT NULL · locked_window_id UUID NOT NULL
@@ -232,14 +232,16 @@ Stores the SME's own screenshot of the money arriving. When nothing can be read 
 
 `POST /funding/tranches/{tranche_id}/dispute` · SME · multipart `statement` (text) and `file` (the bank statement; PDF/PNG/JPEG/WEBP, ≤ 10 MB; there is no separate evidence upload for the SME) → `202 SmeTicketOut`. For a tranche confirmed by silence: allowed until `confirmed_at + 30 days`; opens a dispute for staff. After that: `409 DISPUTE_WINDOW_CLOSED`. Each auto-confirmation exposes `dispute_until` (ISO) on `InvestorTrancheOut` and `SmeTicketOut` so the UI can show it beside the confirmation (A5).
 
-### 4.7 Lender lock (new)
+### 4.7 Lender lock
+
+**Current implementation:** `unlock-v1` accepts one Vietnamese sentence with tolerant matching and stores the canonical sentence. The bilingual contract below is the v1.4 build target. It requires a migration for `sentence_language` and an API update.
 
 - `GET /funding/me/standing` → `200 { "status": "GOOD|LOCKED|CLOSED", "no_show_count": 0, "locked_at": null, "unlock_requires": ["EKYC", "ACKNOWLEDGEMENT"], "acknowledgement_sentence": "…" | null, "acknowledgement_sentences": {"vi": "…", "en": "…"} | null }`. `acknowledgement_sentence` stays (the Vietnamese one, which prevails) so the current screen keeps working; `acknowledgement_sentences` carries both, and the screen shows the one in the lender's language.
 - `POST /funding/me/standing/unlock` → `{ "acknowledgement": "<sentence>" }` → `200` standing. Requires an `APPROVED` eKYC completed after `locked_at`, and the text matching **either** locked sentence. The language is whichever sentence matched (the request has no language field). Errors: `EKYC_REQUIRED`, `ACKNOWLEDGEMENT_MISMATCH` (wrong text is refused and nothing is stored), `NOT_LOCKED`, `LENDER_CLOSED`.
 - **The two sentences** (locked by Loc 18 Nov 2026, SCRUM-604; version `unlock-v2`):
   - vi: "Tôi hiểu việc không có mặt giải ngân ảnh hưởng rất nhiều đến doanh nghiệp, tôi cam kết sẽ đầu tư chuẩn mực"
   - en: "I realise no-showing has a big effect on the SME. I commit to investing properly."
-- **Matching** (one function, so the rule changes in one place): PROVISIONAL(Q-1.4): the text is compared after trimming, collapsing runs of spaces and ignoring case and accents, as the unlock has always been compared. Strict exact matching is the alternative, waiting on Loc's answer (section 9, question 10).
+- **Matching** (confirmed by Loc on 2026-11-27): compare either sentence after trimming, collapsing runs of spaces, and ignoring case and accents. Use the same normalization for both languages.
 - **Recorded on success** (`lender_unlock_acknowledgements`): the text as typed, the language, the version, the time, the eKYC used, IP and user agent. Nothing is recorded on a refusal.
 
 ### 4.8 Staff (`/admin`, `require_admin`)
@@ -399,7 +401,7 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 | 7 | Is Day 0 the day the window opens, or the day staff publish it? | Loc | The ICT date `window_start` falls on |
 | 8 | When is the `LEGACY` flow removed? | Edward | After dev data is cleared; the `flow` column and legacy branches are then dropped (technical debt) |
 | 9 | Phat: does the SME's decision screen fit before `commit_closes_at` (read-only) or only after? | Phat | Only after the commit phase |
-| 10 | Unlock sentence matching: tolerant (case, accents, spacing ignored, as today) or strictly exact? | Loc | **Answered 2026-11-27 (Loc): tolerant.** Case, accents and spacing are ignored; the build already does this |
+| 10 | Unlock sentence matching: tolerant (case, accents, spacing ignored, as today) or strictly exact? | Loc | **Answered 2026-11-27 (Loc): tolerant.** Case, accents and spacing are ignored. v1.4 carries forward the v1 matching rule |
 
 ---
 
@@ -411,4 +413,4 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 | 1.1 | 2026-11-18 | Phat / Claude | Money flow FINAL v1.0: no service agreement at commit (signed on Day 14), withdrawal until the end of Day 12, fixed deadlines (`WINDOW_FULL`), Day-14 cut-offs 14:45 / 15:00 / 15:30; `FUNDING_WINDOW_FLOW` switches new windows to this flow |
 | 1.2 | 2026-11-21 | Edward / Claude | Status DRAFT to IMPLEMENTED; no behaviour change |
 | 1.3 | 2026-11-25 | Claude (for Edward's approval) | After the pooled loan forms: an excluded ticket confirmed later (24-hour lapse on every `funding-advance` run, or staff approval) is voided with a refund (rule 8); formation unlocks a lender locked at 15:00 whose ticket joins (rule 9) |
-| 1.4 | 2026-11-26 | Edward / Claude | Unlock sentence (SCRUM-612): the two sentences Loc locked on 18 Nov, either accepted, language stored (`sentence_language`, version `unlock-v2`); matching rule flagged for Loc (question 10) |
+| 1.4 | 2026-11-26 | Edward / Claude | Unlock sentence (SCRUM-612): the two sentences Loc locked on 18 Nov, either accepted, language stored (`sentence_language`, version `unlock-v2`); tolerant matching confirmed by Loc on 2026-11-27. Implementation pending |
