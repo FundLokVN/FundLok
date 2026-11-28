@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | **IMPLEMENTED through v1.3.** Loc's Appendix M re-run on `main` 6977af7 passed on 2026-11-21. The v1.4 bilingual unlock amendment is specified and pending implementation (SCRUM-612). |
+| **Status** | **IMPLEMENTED through v1.3.** Loc's Appendix M re-run on `main` 6977af7 passed on 2026-11-21. The v1.4 bilingual unlock amendment is specified and pending implementation (SCRUM-612). Remaining provisional points for Handbook v3.2 (D-052) are in section 9. |
 | **Owner** | Edward |
 | **Implementer(s)** | Edward's modules: a Claude Sonnet implementer (HANDOFF-06 Phase 2). Phat: routers in `app/market`, all UI, notification wording (D-051) |
 | **Module** | `app/direct_transfer/` (backend), `app/market/funding_router.py` and `app/market/funding.py` (Phat's routers, calling the service functions here), `app/market/investor_agreement/` (shared, section 3) |
@@ -363,7 +363,9 @@ GOOD | LOCKED ──[second counted no-show]──► CLOSED   (permanent)
 - [ ] `test_receipt_uploaded_before_deadline_is_not_a_no_show`
 - [ ] `test_no_show_locks_the_lender_and_voids_its_commitments`
 - [ ] `test_second_no_show_closes_the_lender_permanently`
-- [ ] `test_unlock_needs_fresh_ekyc_and_the_exact_acknowledgement`
+- [ ] `test_unlock_requires_fresh_ekyc_and_a_recognized_acknowledgement`
+- [ ] `test_unlock_accepts_either_language_with_tolerant_matching_and_records_raw_text`
+- [ ] `test_unlock_rejects_unrecognized_text_without_recording_acknowledgement`
 - [ ] `test_staff_waiver_lifts_lock_without_counting_the_miss`
 - [ ] `test_sme_receipt_match_confirms_the_tranche`
 - [ ] `test_silence_for_24_hours_confirms_the_tranche`
