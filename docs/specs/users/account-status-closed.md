@@ -11,7 +11,7 @@
 | **Related ADR** | — |
 | **Depends on** | D-043 (T&S Art. 4.4), D-047 (suspended accounts), `docs/specs/admin/` user status endpoint; Jira SCRUM-620 (AM-E15), Appendix M 12.2 and 11.1 |
 
-Touches shared files, which need Phat's agreement before build: `app/users/models.py` (two new columns), `app/auth/service.py`, `app/admin/` (his module), `alembic/` (one migration).
+Touches shared files, which need Phat's agreement before build: `app/users/models.py` (two new columns), `app/auth/`, `app/oauth/`, `app/admin/` (his module), `alembic/` (one migration).
 
 ---
 
@@ -108,10 +108,11 @@ ACTIVE | PENDING_KYC | SUSPENDED → CLOSED        (terminal)
 
 1. CLOSED needs a `reason_code`; the reason is stored on the user and in the audit entry (`USER_STATUS_CHANGED`, before and after state, actor, IP).
 2. CLOSED is permanent through the API.
-3. A CLOSED account's open sessions end on the next request (refresh tokens revoked at closure), and it cannot log in, refresh or use Google sign-in.
-4. The existing guards stay: no self-change; only a SYSTEM_ADMIN may act on an admin-level account.
-5. Login keeps answering "Incorrect email or password" to a wrong password before it reveals CLOSED (no account enumeration).
-6. Closing an account does not delete or alter its ledger, transfers, contracts or audit trail.
+3. Closure revokes refresh tokens and blocks authenticated requests on the next request. Check the current account status before issuing or refreshing a session on every path: password, password plus TOTP or recovery code, Google, and passkey. Finishing a two-factor challenge issued before closure must also refuse a new session. Apply the status check after credential verification on login paths so a failed credential check cannot expose the account's status.
+4. A SUSPENDED account can use its existing sign-in methods, including passkeys. Update the passkey service's current `ACTIVE`-only check to admit `SUSPENDED` as well, with the existing authenticator and second-factor requirements.
+5. The existing guards stay: no self-change; only a SYSTEM_ADMIN may act on an admin-level account.
+6. Login keeps answering "Incorrect email or password" to a wrong password before it reveals CLOSED (no account enumeration).
+7. Closing an account does not delete or alter its ledger, transfers, contracts or audit trail.
 
 ---
 
@@ -124,14 +125,14 @@ ACTIVE | PENDING_KYC | SUSPENDED → CLOSED        (terminal)
 | Any change to a CLOSED account | 409 | `This account is closed and cannot be changed` |
 | Suspended account on a new-offer or investment endpoint | 403 | `This account is suspended: new offers and investments are not available` |
 | Closed account, any authenticated request | 403 | `This account has been closed` |
-| Closed account, login, refresh or Google sign-in | 403 | `This account has been closed` (after the password check) |
+| Closed account, login or refresh | 403 | `This account has been closed` after successful credential verification |
 | Self-change, or non-SYSTEM_ADMIN acting on an admin | 409 / 403 | unchanged |
 
 ---
 
 ## 8. Acceptance Criteria
 
-Test file: `tests/admin/test_user_status.py` (extended), `tests/market/test_suspended_repayment.py` (rewritten for the new rule).
+Test files: `tests/admin/test_user_status.py`, `tests/auth/` (sign-in methods and refresh), and `tests/market/test_suspended_repayment.py`.
 
 - `test_close_account_requires_reason_code`
 - `test_close_account_with_other_requires_note`
@@ -139,9 +140,12 @@ Test file: `tests/admin/test_user_status.py` (extended), `tests/market/test_susp
 - `test_closed_account_cannot_be_changed`
 - `test_closed_account_session_rejected_on_next_request`
 - `test_closed_account_cannot_login_refresh_or_oauth`
+- `test_closed_account_cannot_sign_in_with_a_valid_passkey`
+- `test_closure_blocks_a_preexisting_two_factor_challenge`
 - `test_closed_login_wrong_password_does_not_reveal_status`
 - `test_close_keeps_self_and_admin_guards`
 - `test_suspended_account_can_login_refresh_and_read_profile`
+- `test_suspended_account_can_sign_in_with_a_valid_passkey`
 - `test_suspended_sme_refused_new_project_application_listing`
 - `test_suspended_investor_refused_new_reservation_and_commitment`
 - `test_suspended_account_can_still_repay_and_confirm_receipts`
