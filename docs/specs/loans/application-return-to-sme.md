@@ -98,7 +98,7 @@ SUBMITTED | UNDER_REVIEW ──staff decision──▶ REJECTED   (admin_approva
 
 1. Submit and resubmit both run the document check; the check is done inside the same transaction as the status change.
 2. Staff cannot approve or reject a `RETURNED_TO_SME` application (409 `APPLICATION_RETURNED`); the SME must resubmit first.
-3. An application with a **locked** score run cannot be returned (409 `SCORE_LOCKED`): from that point the score is what the decision is built on. Returning from `UNDER_REVIEW` without a locked run is allowed; resubmitting makes it `SUBMITTED`, and a new score run is a new row (old runs stay, append-only).
+3. An application with a **locked** score run cannot be returned (409 `SCORE_LOCKED`). Return and score approval take the same application row lock and recheck eligibility under that lock. Score approval requires `SUBMITTED` or `UNDER_REVIEW` and the latest eligible run from the current submission. A returned application cannot have a score approved. On resubmission, `submitted_at` is reset. Only a new run produced from that submission's figures and evidence can be locked, even if an older `READY` run is still the latest row. Keep the old runs as append-only history.
 4. The underwriting engine does not run on a `RETURNED_TO_SME` application (its existing status check already refuses anything not `SUBMITTED` or `UNDER_REVIEW`).
 5. The **repeat-application** path (`app/projects/service.py`, which sets `SUBMITTED` directly after copying documents) runs the same check. If documents are missing it leaves the application `DRAFT`, so the SME can upload the rest and submit.
 6. The note is shown to the SME exactly as staff wrote it. It is not machine-parsed.
@@ -115,6 +115,8 @@ SUBMITTED | UNDER_REVIEW ──staff decision──▶ REJECTED   (admin_approva
 | Return without a note, or a note over 1000 characters | 422 | validation error |
 | Return an application not `SUBMITTED` or `UNDER_REVIEW` | 409 | `Only a submitted application can be returned` |
 | Return when `admin_approval` is not `PENDING` | 409 | `Application has already been <approved/rejected>` (as the decision endpoint) |
+| Approve a score run while the application is returned | 409 | `APPLICATION_RETURNED` |
+| Approve a score run from before the latest resubmission | 409 | `SCORE_STALE`: `Run scoring again for the current submission` |
 | Return with a locked score run | 409 | `SCORE_LOCKED`: `This application has a locked score and cannot be returned` |
 | Approve or reject a returned application | 409 | `APPLICATION_RETURNED`: `This application was returned to the SME` |
 | Edit an application that is not `DRAFT` or `RETURNED_TO_SME` | 400 | `Application is not in DRAFT status` (as today) |
@@ -124,7 +126,7 @@ SUBMITTED | UNDER_REVIEW ──staff decision──▶ REJECTED   (admin_approva
 
 ## 8. Acceptance Criteria
 
-Test files: `tests/loans/` (submit), `tests/admin/test_admin_approval.py` (return and decision), `tests/uploads/` (editing), migration test.
+Test files: `tests/loans/` (submit), `tests/admin/test_admin_approval.py` (return and decision), `tests/uploads/` (editing), `tests/underwriting/` (score approval), migration test.
 
 - `test_submit_refused_when_required_document_missing`
 - `test_submit_refused_when_cic_report_still_pending`
@@ -139,6 +141,9 @@ Test files: `tests/loans/` (submit), `tests/admin/test_admin_approval.py` (retur
 - `test_return_writes_audit_entry_and_emails_owners`
 - `test_returned_application_cannot_be_approved_or_rejected`
 - `test_returned_application_not_scored_by_engine`
+- `test_return_and_score_approval_cannot_both_succeed`
+- `test_cannot_lock_a_score_while_application_is_returned`
+- `test_resubmission_rejects_old_ready_score_and_allows_fresh_score`
 - `test_sme_can_edit_figures_and_replace_document_while_returned`
 - `test_resubmit_after_return_clears_note_and_goes_to_submitted`
 - `test_resubmit_still_refused_when_document_missing`
@@ -150,6 +155,6 @@ Test files: `tests/loans/` (submit), `tests/admin/test_admin_approval.py` (retur
 ## 9. Open Questions
 
 1. **Return from `UNDER_REVIEW`.** Proposal above: allowed unless the score is locked. Alternative: only from `SUBMITTED`. Needs Loc.
-2. **Re-grading after a return.** If the SME changes figures after a score run, the old run stays as history and staff run a new one. Confirm no automatic re-run is wanted.
+2. **Re-grading after a return.** If the SME changes figures after a score run, the old run stays as history. A new run is required before score approval. Confirm whether staff start it or resubmission triggers it.
 3. **Notification wording.** Reuse "application updated", or a specific "your application needs changes" email with the note? Proposal: specific email; wording from Loc or Phat.
 4. **Existing stuck application.** Any application already submitted with a missing document (the Appendix M case) can be returned once this ships; no data fix needed.
